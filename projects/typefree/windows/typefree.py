@@ -35,7 +35,7 @@ import httpx
 import pyautogui
 import pystray
 from PIL import Image, ImageDraw
-from openai import OpenAI
+from openai import APITimeoutError, OpenAI
 
 import absaetze
 import ersetzungen
@@ -2458,6 +2458,15 @@ def _stt_anfrage(client, modell, puffer, vokabular, zweit_nach=None,
         if leer is not None:
             return leer                    # Stille — die andere kam nicht rechtzeitig
         if laufend == 0 and fehlerliste and time.monotonic() <= fristende:
+            if any(isinstance(fehler, APITimeoutError) for fehler in fehlerliste):
+                konkreter_fehler = next((
+                    fehler for fehler in fehlerliste
+                    if not isinstance(fehler, APITimeoutError)
+                    and not _transiente_stoerung(fehler)
+                ), None)
+                if konkreter_fehler is None:
+                    raise zeitfehler()
+                raise konkreter_fehler
             raise fehlerliste[0]
         raise zeitfehler()
     finally:

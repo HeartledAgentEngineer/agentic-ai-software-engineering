@@ -21,7 +21,7 @@ import types
 
 import httpx
 import pytest
-from openai import OpenAI
+from openai import APITimeoutError, BadRequestError, OpenAI
 
 import typefree
 
@@ -541,3 +541,38 @@ def test_wartezeit_waechst_mit_dem_audio():
     assert typefree.zweitanfrage_nach(0) == typefree.STT_ZWEIT_NACH
     assert typefree.zweitanfrage_nach(140) > typefree.zweitanfrage_nach(20)
     assert typefree.zweitanfrage_nach(140) < 10      # bleibt deutlich unter den Hängern
+
+def test_sdk_timeout_allein_wird_als_gesamtfrist_gemeldet():
+    fehler = APITimeoutError(request=httpx.Request("POST", "https://test.invalid"))
+    client = Client(fehler={1: fehler})
+
+    with pytest.raises(TimeoutError, match="keine Antwort nach 5 s"):
+        _anfrage(client, zweit_nach=30, hoechstdauer=5)
+
+    assert len(client.aufrufe) == 1
+
+
+def test_429_mit_sdk_timeout_wird_als_gesamtfrist_gemeldet():
+    timeout = APITimeoutError(request=httpx.Request("POST", "https://test.invalid"))
+    client = Client(fehler={1: StatusFehler(429), 2: timeout})
+
+    with pytest.raises(TimeoutError, match="keine Antwort nach 5 s"):
+        _anfrage(client, zweit_nach=30, hoechstdauer=5)
+
+    assert len(client.aufrufe) == 2
+
+
+def test_paralleler_sdk_400_hat_vorrang_vor_sdk_timeout(eingetragen):
+    request = httpx.Request("POST", "https://test.invalid")
+    bad_request = BadRequestError(
+        "Ungültige Anfrage", response=httpx.Response(400, request=request), body=None
+    )
+    timeout = APITimeoutError(request=httpx.Request("POST", "https://test.invalid"))
+    client = Client(fehler={1: bad_request, 2: timeout},
+                    warte={1: eingetragen[2]})
+
+    with pytest.raises(BadRequestError) as ausgelost:
+        _anfrage(client, zweit_nach=0.01, hoechstdauer=5)
+
+    assert ausgelost.value is bad_request
+    assert len(client.aufrufe) == 2

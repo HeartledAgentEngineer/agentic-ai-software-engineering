@@ -46,8 +46,10 @@ Windows only. `installer/setup.cmd` installs it for end users; for development:
 ```powershell
 pip install -r windows/requirements.txt -r windows/requirements-dev.txt
 python windows/typefree.py
-python -m pytest -q windows/tests    # from the project folder; 569 passed, also run in CI
+python -m pytest -q windows/tests    # from the project folder; also run in CI
 ```
+
+Parallel requests to the same speech-to-text provider share a single deadline. If the SDK times out on the remaining budget, typeFREE reports the overall deadline unless a non-transient provider error takes precedence.
 
 The API key goes into a local `.env` (see `installer/ANLEITUNG-API-KEY.html`).
 
