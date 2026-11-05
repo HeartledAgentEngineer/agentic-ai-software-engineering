@@ -33,7 +33,7 @@ Every extracted layer has its own mirrored unit and integration test suite under
   reserve; on `429` the client honours the retry header; fetched setlists are cached.
 - **Distance filter against false positives.** Tour pages list dates worldwide. A date is only accepted if it
   appears within 400 characters of a keyword for the searched city (`_extract_date_near_city`).
-- **Local-only single-user scope.** The server binds to `127.0.0.1:5000` by default (`CONCERTIFY_HOST`) and rejects cross-origin `POST`/`DELETE` requests; the SQLite snapshot table carries a `user_id` (default `local`) from the start.
+- **Local-only single-user scope.** The server binds to `127.0.0.1:5000` by default (`CONCERTIFY_HOST`) and validates `Host`, `Sec-Fetch-Site`/`Sec-Fetch-Mode`, and local `Origin`/`Referer` headers on both state-changing `POST`/`DELETE` endpoints and action-triggering `GET` endpoints (`/stream`, `/preview_stream`, `/refresh_stream`, `/quick_refresh`, `/spotify_token`, `/spotify_connect`); the SQLite snapshot table carries a `user_id` (default `local`) from the start.
 
 ## Run it
 

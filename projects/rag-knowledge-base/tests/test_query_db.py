@@ -119,19 +119,33 @@ def test_quellen_im_kontext_kurs_vor_dateiname(ohne_schluessel, monkeypatch):
 
 
 def test_lokales_modell_faellt_auf_mistral_zurueck(ohne_schluessel, monkeypatch):
-    urls = []
+    schritte = []
     monkeypatch.setattr(query_db, "USE_LOCAL_LLM", True)
+    monkeypatch.setattr(query_db, "GEMINI_API_KEY", "test-gemini-key")
     monkeypatch.setattr(query_db, "MISTRAL_API_KEY", "test-key")
 
+    class AttrappenGemini:
+        def __init__(self, modell_name):
+            self.modell_name = modell_name
+
+        def generate_content(self, prompt):
+            schritte.append(f"gemini:{self.modell_name}")
+            raise RuntimeError("gemini kontingent erschoepft")
+
     def post(url, **k):
-        urls.append(url)
+        schritte.append(url)
         if url == query_db.LOCAL_LLM_URL:
             return Antwort(500, text="ollama aus")
         return Antwort(200, {"choices": [{"message": {"content": "von Mistral"}}]})
 
+    monkeypatch.setattr(query_db.genai, "GenerativeModel", AttrappenGemini)
     monkeypatch.setattr(query_db.requests, "post", post)
     assert query_db.generate_answer("Frage", [{"content": "x", "metadata": {}}]) == "von Mistral"
-    assert urls == [query_db.LOCAL_LLM_URL, "https://api.mistral.ai/v1/chat/completions"]
+    assert schritte == [
+        query_db.LOCAL_LLM_URL,
+        "gemini:gemini-1.5-flash",
+        "https://api.mistral.ai/v1/chat/completions",
+    ]
 
 
 def test_ohne_jedes_modell_klare_fehlermeldung(ohne_schluessel, monkeypatch):

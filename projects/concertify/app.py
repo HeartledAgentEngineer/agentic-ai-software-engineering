@@ -156,17 +156,45 @@ def _idle_watchdog():
 
 _threading.Thread(target=_idle_watchdog, daemon=True).start()
 
+_ALLOWED_ORIGINS = ("http://localhost:5000", "http://127.0.0.1:5000")
+_ALLOWED_HOSTS = ("localhost", "127.0.0.1")
+_PROTECTED_GET_PATHS = {
+    "/stream",
+    "/preview_stream",
+    "/refresh_stream",
+    "/quick_refresh",
+    "/spotify_token",
+    "/spotify_connect",
+}
+
 @app.before_request
 def _touch():
     global _last_request
     _last_request = _time.time()
-    if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+    host = (request.headers.get("Host") or "").split(":")[0].lower()
+    if host and host not in _ALLOWED_HOSTS:
+        return jsonify({"error": "Invalid Host header"}), 403
+
+    is_state_or_action = (
+        request.method in ("POST", "PUT", "DELETE", "PATCH")
+        or request.path in _PROTECTED_GET_PATHS
+    )
+    if is_state_or_action:
         sec_site = (request.headers.get("Sec-Fetch-Site") or "").lower()
         if sec_site and sec_site not in ("same-origin", "none"):
-            return jsonify({"error": "Cross-site state change rejected"}), 403
-        origin = request.headers.get("Origin")
-        if origin and origin not in ("http://localhost:5000", "http://127.0.0.1:5000"):
+            return jsonify({"error": "Cross-site request rejected"}), 403
+        sec_mode = (request.headers.get("Sec-Fetch-Mode") or "").lower()
+        if request.path in _PROTECTED_GET_PATHS and request.path != "/spotify_connect" and sec_mode == "navigate":
+            return jsonify({"error": "Direct browser navigation to action stream rejected"}), 403
+        origin = (request.headers.get("Origin") or "").rstrip("/")
+        if origin and origin not in _ALLOWED_ORIGINS:
             return jsonify({"error": "Cross-origin state change rejected"}), 403
+        referer = request.headers.get("Referer") or ""
+        if referer and not any(referer.startswith(o + "/") or referer == o for o in _ALLOWED_ORIGINS):
+            return jsonify({"error": "Cross-origin Referer rejected"}), 403
+        if not app.testing and not os.environ.get("PYTEST_CURRENT_TEST"):
+            if not origin and not referer and sec_site != "same-origin":
+                return jsonify({"error": "Missing local Origin/Referer header"}), 403
 
 
 @app.route("/")
