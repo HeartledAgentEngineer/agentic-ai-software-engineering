@@ -12,10 +12,10 @@ import os
 import shutil
 import psycopg2
 import markdown
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -28,18 +28,48 @@ load_dotenv()
 
 SUPABASE_CONNECTION_STRING = os.getenv("SUPABASE_CONNECTION_STRING")
 PCLOUD_DIR = os.getenv("RAG_DOCUMENTS_DIR", r"P:\RAG_Documents")
+RAG_API_TOKEN = os.getenv("RAG_API_TOKEN", "").strip()
 ALLOWED_EXTENSIONS = {".pdf", ".md", ".txt", ".json"}
+ALLOWED_LOCAL_ORIGINS = {"http://localhost:8000", "http://127.0.0.1:8000"}
+ALLOWED_LOCAL_HOSTS = {"localhost", "127.0.0.1", "testserver"}
 
 app = FastAPI(title="Persönlicher RAG Wissensassistent")
 
 # CORS auf localhost begrenzen (lokaler Single-User-Server)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8000", "http://127.0.0.1:8000"],
+    allow_origins=list(ALLOWED_LOCAL_ORIGINS),
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _local_origin_and_host_guard(request: Request, call_next):
+    """Schützt lokale Endpunkte gegen DNS-Rebinding und fremde Browser-POSTs (CSRF)."""
+    host = (request.headers.get("host") or "").split(":")[0].lower()
+    if host and host not in ALLOWED_LOCAL_HOSTS:
+        return JSONResponse(status_code=403, content={"detail": "Unzulässiger Host-Header."})
+
+    if request.method in {"POST", "PUT", "DELETE", "PATCH"}:
+        if RAG_API_TOKEN and request.headers.get("x-rag-token") != RAG_API_TOKEN:
+            return JSONResponse(status_code=403, content={"detail": "Ungültiges oder fehlendes X-RAG-Token."})
+        sec_site = (request.headers.get("sec-fetch-site") or "").lower()
+        if sec_site and sec_site not in {"same-origin", "none"}:
+            return JSONResponse(status_code=403, content={"detail": "Cross-Site-Anfrage abgelehnt."})
+        origin = (request.headers.get("origin") or "").rstrip("/")
+        referer = request.headers.get("referer") or ""
+        referer_ok = any(referer.startswith(o + "/") or referer == o for o in ALLOWED_LOCAL_ORIGINS)
+        if origin:
+            if origin not in ALLOWED_LOCAL_ORIGINS:
+                return JSONResponse(status_code=403, content={"detail": "Fremder Origin-Header abgelehnt."})
+        elif not referer_ok:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Zustandsändernde Anfragen erfordern einen lokalen Origin- oder Referer-Header."},
+            )
+    return await call_next(request)
 
 
 def _safe_doc_path(file_name: str, base_dir: str = PCLOUD_DIR) -> str:
@@ -131,7 +161,7 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/sync")
-async def sync_file(file: UploadFile = File(...)):
+async def sync_file(file: UploadFile = File(...), overwrite: bool = False):
     safe_name = os.path.basename(file.filename or "")
     # Validierung der Dateiendung
     ext = os.path.splitext(safe_name)[1].lower()
@@ -143,6 +173,11 @@ async def sync_file(file: UploadFile = File(...)):
     os.makedirs(pcloud_dir, exist_ok=True)
     
     file_path = _safe_doc_path(safe_name, pcloud_dir)
+    if os.path.exists(file_path) and not overwrite:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Datei '{safe_name}' existiert bereits. Zum Überschreiben overwrite=true setzen.",
+        )
     
     try:
         # Datei direkt nach pCloud schreiben

@@ -110,6 +110,41 @@ if hat_code "$P_SCHALTER"; then
     fi
 fi
 
+P_TYPEFREE="projects/typefree"
+if hat_code "$P_TYPEFREE"; then
+    PY="$P_TYPEFREE/.venv/Scripts/python.exe"
+    if [[ -x "$PY" ]]; then
+        run_gate "typefree" "$P_TYPEFREE" \
+            "./.venv/Scripts/python.exe -m pytest windows/tests -q"
+    else
+        echo "  ⚠ typefree: venv fehlt ($PY) — kein Gate möglich"
+    fi
+fi
+
+P_REVIEW="projects/cross-model-review"
+if hat_code "$P_REVIEW"; then
+    if command -v python >/dev/null 2>&1; then
+        run_gate "cross-model-review" "$P_REVIEW" "python -m pytest tests -q"
+    fi
+fi
+
+P_RAG="projects/rag-knowledge-base"
+if hat_code "$P_RAG"; then
+    PY="$P_RAG/.venv/Scripts/python.exe"
+    if [[ -x "$PY" ]]; then
+        run_gate "rag-knowledge-base" "$P_RAG" "./.venv/Scripts/python.exe -m pytest tests -q"
+    elif command -v python >/dev/null 2>&1; then
+        run_gate "rag-knowledge-base" "$P_RAG" "python -m pytest tests -q"
+    fi
+fi
+
+P_DOC="projects/document-automation"
+if hat_code "$P_DOC"; then
+    if command -v node >/dev/null 2>&1; then
+        run_gate "document-automation" "$P_DOC" "node --test"
+    fi
+fi
+
 if [[ "$FAILED" -ne 0 ]]; then
     echo ""
     echo "  ⛔ VERIFIER-GATE: Commit abgebrochen. Erst Tests grün machen,"

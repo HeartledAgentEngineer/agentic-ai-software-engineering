@@ -23,7 +23,7 @@ flowchart LR
 
     subgraph OrbitDesk["OrbitDesk (Master-Schalter · Leitwarte)"]
         SIG["signale.py · claude_messen.py · codex_messen.py<br/>Validate 5h & weekly windows (0..100%)"]
-        ROL["modi.py · rollen.py · profil.py<br/>Per-topic Master / Worker / Model"]
+        ROL["modi.py · rollen.py<br/>Per-topic Master / Worker / Model (Profil v2)"]
         UEB["uebergabe.py · wechsel.py · assistent.py<br/>Topic lock -> Handover package -> Target ACK"]
         SIG --> ROL --> UEB
     end
@@ -61,7 +61,7 @@ flowchart LR
 ```
 src/master_schalter/
   signale.py, claude_messen.py, codex_messen.py   read, probe and validate the quotas
-  modi.py, rollen.py, profil.py                   roles, worker provider and model per topic
+  modi.py, rollen.py                              roles, worker provider and model per topic (Profil v2)
   uebergabe.py, wechsel.py                        handover package, switch under locks
   assistent*.py, postfach.py                      handover assistant and mailbox
   automatik.py, codex_senden.py                   automatic path

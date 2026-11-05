@@ -161,6 +161,9 @@ def _touch():
     global _last_request
     _last_request = _time.time()
     if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+        sec_site = (request.headers.get("Sec-Fetch-Site") or "").lower()
+        if sec_site and sec_site not in ("same-origin", "none"):
+            return jsonify({"error": "Cross-site state change rejected"}), 403
         origin = request.headers.get("Origin")
         if origin and origin not in ("http://localhost:5000", "http://127.0.0.1:5000"):
             return jsonify({"error": "Cross-origin state change rejected"}), 403

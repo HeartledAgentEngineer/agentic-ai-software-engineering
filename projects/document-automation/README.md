@@ -34,7 +34,7 @@ certificate PDFs          ─▶ merge_pdfs.js      ─▶ one application PDF
 ## Run it
 
 ```powershell
-npm test                 # 10 tests, no install needed
+npm test                 # 11 tests, no install needed
 npm run build:html       # HTML only, no browser needed
 npm install              # once, for the PDF step
 npm run build            # HTML + A4 PDF into output/
@@ -44,7 +44,7 @@ npm run merge            # needs the certificate PDFs, see merge_pdfs.js
 ## Tests
 
 `test/cv.test.js` (Node's built-in test runner) covers the sample data, every validation rule, HTML escaping, date
-formatting and the exit codes of `build.js`. The PDF itself is checked by eye — a visual test would need a browser
+formatting, the exit codes of `build.js`, and the error paths of `merge_pdfs.js`. The PDF itself is checked by eye — a visual test would need a browser
 in CI and buys little for a one-page layout.
 
 ← [Back to overview](../../README.md)

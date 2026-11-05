@@ -44,7 +44,7 @@ flowchart TB
     subgraph Harnesses["Agent Harnesses & Model Families"]
         PLAN["Planner (Thinker)<br/>Claude Code · Antigravity · Codex<br/>Frontier models"]
         WORK["Worker (Builder)<br/>Codex · Claude Sonnet · Hermes (OpenRouter)<br/>Scoped worktrees"]
-        REV["Cross-Model Reviewer<br/>pruefkreis.py · Different model family<br/>Read-only sandbox"]
+        REV["Cross-Model Reviewer<br/>pruefkreis.py · Different model family<br/>Codex read-only sandbox · Hermes -t file,todo"]
         PRIV["Privacy Boundary<br/>Hermes + OpenRouter / Microsoft Foundry<br/>Sensitive data stays isolated"]
     end
     subgraph Gates["Deterministic Verification Gates"]

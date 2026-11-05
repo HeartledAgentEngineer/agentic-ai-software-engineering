@@ -41,7 +41,7 @@ call without a timeout, so a hanging API froze the whole query. It now has 30 s 
 `test_embeddings.py` is a separate, manual plausibility check against the live API: a related pair (dog/cat) must
 come out closer than an unrelated pair (dog/car).
 
-**Local-only scope.** `main.py` binds to `127.0.0.1:8000` with localhost CORS and checks that uploaded or opened files stay inside the configured document folder (`RAG_DOCUMENTS_DIR`, default `P:\RAG_Documents`).
+**Local-only scope.** `main.py` binds to `127.0.0.1:8000`, validates `Host` and local `Origin`/`Referer` headers on state-changing requests (with optional `RAG_API_TOKEN`), refuses to overwrite existing files in `/sync` unless `overwrite=true` is passed explicitly, and checks that uploaded or opened files stay inside `RAG_DOCUMENTS_DIR` (default `P:\RAG_Documents`).
 
 ## Run it
 
