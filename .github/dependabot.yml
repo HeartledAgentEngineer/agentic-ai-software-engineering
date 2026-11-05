@@ -1,0 +1,22 @@
+# Security and version updates as pull requests, reviewed before merge.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+  - package-ecosystem: pip
+    directories:
+      - /projects/master-schalter
+      - /projects/typefree/windows
+      - /projects/concertify
+      - /projects/personal-ai-agent/backend
+      - /projects/rag-knowledge-base
+    schedule:
+      interval: monthly
+  - package-ecosystem: npm
+    directories:
+      - /projects/document-automation
+      - /projects/elevator-digital-twin/ads_bridge
+    schedule:
+      interval: monthly

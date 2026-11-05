@@ -1,0 +1,16 @@
+# API Keys - niemals hochladen!
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Logdatei und Kostenzählung liegen neben der EXE
+*.log
+verbrauch.json
+
+# System
+.DS_Store
+Thumbs.db

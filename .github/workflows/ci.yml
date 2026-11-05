@@ -1,0 +1,123 @@
+# Continuous integration for the showcase.
+# Every project with a test suite runs it on each push and pull request.
+# Windows-only tools (tray app, dictation tool) run on a Windows runner.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0          # scan the whole history, not only the last commit
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  lint:
+    name: Lint (ruff)
+    needs: secrets          # a leaked key stops the run before any test starts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install ruff==0.6.9
+      - run: ruff check --output-format=github .
+
+  python-tests:
+    name: Tests · ${{ matrix.name }}
+    needs: secrets
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: master-schalter
+            os: windows-latest
+            dir: projects/master-schalter
+            install: pip install -e ".[leiste,dev]"
+            test: python -m pytest -q
+          - name: typefree
+            os: windows-latest
+            dir: projects/typefree
+            install: pip install -r windows/requirements.txt -r windows/requirements-dev.txt
+            test: python -m pytest -q windows/tests
+          - name: concertify
+            os: ubuntu-latest
+            dir: projects/concertify
+            install: pip install -r requirements.txt pytest
+            test: python -m pytest -q tests
+          - name: cross-model-review
+            os: ubuntu-latest
+            dir: projects/cross-model-review
+            install: pip install pytest
+            test: python -m pytest -q tests
+          - name: rag-knowledge-base
+            os: ubuntu-latest
+            dir: projects/rag-knowledge-base
+            install: pip install pytest -r requirements.txt
+            test: python -m pytest -q tests
+          - name: personal-ai-agent
+            os: ubuntu-latest
+            dir: projects/personal-ai-agent/backend
+            install: pip install -r requirements.txt -r requirements-dev.txt
+            test: python -m pytest -q tests
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: ${{ matrix.install }}
+      - run: ${{ matrix.test }}
+
+  c-university:
+    name: C · university foundations (2020 code, characterization tests)
+    needs: secrets
+    # Windows: the 2020 code uses scanf_s from the Microsoft C runtime. clang ships with the runner image.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: projects/university-foundations/mail-order-c
+    steps:
+      - uses: actions/checkout@v6
+      - run: clang --version
+      - run: CC=clang bash check.sh
+
+  javascript:
+    name: JavaScript syntax
+    needs: secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          package-manager-cache: false
+      - name: node --check on every script
+        run: |
+          find projects -name '*.js' -not -path '*/node_modules/*' -print0 \
+            | xargs -0 -n1 node --check
+      - name: Tests · document-automation (node:test, no install needed)
+        working-directory: projects/document-automation
+        run: node --test

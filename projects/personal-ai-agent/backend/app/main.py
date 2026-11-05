@@ -1,0 +1,455 @@
+"""FastAPI application entry point."""
+
+import logging
+import os
+import socket
+from contextlib import asynccontextmanager
+from typing import Optional
+
+from fastapi import FastAPI, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import FileResponse, HTMLResponse, Response
+from starlette.types import Scope
+
+from app.config import settings, bindung_hinweis
+from app.sicherheit import (
+    FRONTEND_DATEIEN,
+    SCHLUESSEL_SEITEN,
+    SicherheitsMiddleware,
+    client_ist_loopback,
+    cors_herkunft,
+    schluessel_einsetzen,
+)
+from app.db.chroma_client import MemoryStoreError, chroma_client
+from app.router import (
+    chat,
+    memory,
+    auth,
+    transcribe,
+    speak,
+    llm_models,
+    archiv,
+    archiv_wissen,
+    auftraege,
+    upload,
+    dateien,
+    gesichter,
+    hermes_steuerung,
+    selbsttest,
+    fotos,
+    beziehungen,
+    cloud,
+    erzaehlen,
+    gruppen,
+    diagnose,
+    laeuft,
+    system_update,
+    datenstand,
+    tageslauf,
+    voice_stream,
+)
+
+# Configure logging
+logging.basicConfig(
+    level=getattr(logging, settings.log_level.upper(), logging.INFO),
+    format="%(asctime)s | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+# uvicorn's eigener Logger schreibt WARN-Meldungen wie 'Invalid HTTP request
+# received', wenn ein fremdes Netzgerät den offenen LAN-Port (8080) abklopft.
+# Das ist harmlos (der Server lehnt die kaputten Anfragen ab), aber es flutet
+# das Terminal. Echte Fehler (ERROR) bleiben sichtbar — nur der WARN-Spam
+# wird stillgelegt.
+logging.getLogger("uvicorn.error").setLevel(logging.ERROR)
+logger = logging.getLogger(__name__)
+
+# Path to frontend directory (relative to this backend/app/main.py)
+FRONTEND_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
+)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifecycle: startup and shutdown events."""
+    # Startup
+    logger.info("=" * 50)
+    logger.info("Personal AI Agent – Starting up...")
+    logger.info("=" * 50)
+
+    # Server-Protokoll (To-do Punkt 16): schreibt die Serverausgaben mit
+    # Zeitstempel in EINE Datei, die die Oberflaeche anzeigt
+    # (GET /api/system/protokoll). Ohne gesetzten Pfad (Startweg ohne
+    # Protokoll) passiert hier nichts — kein Schreibzugriff, keine Datei.
+    from app.services import protokoll as server_protokoll
+
+    protokoll_pfad = server_protokoll.einrichten()
+    if protokoll_pfad:
+        logger.info("Serverausgaben werden protokolliert: %s", protokoll_pfad)
+
+    # Initialize memory store
+    try:
+        chroma_client.connect()
+        memory_count = chroma_client.count()
+        logger.info("Memory store ready: %d memories", memory_count)
+    except Exception as e:
+        logger.warning(
+            "Memory store initialization failed: %s. "
+            "Memory features will be unavailable until restart.",
+            e,
+        )
+
+    # Check LLM configuration
+    from app.services.llm_service import llm_service
+
+    if llm_service.is_configured:
+        logger.info(
+            "LLM configured: model=%s, base_url=%s",
+            settings.llm_model,
+            settings.openrouter_base_url,
+        )
+    else:
+        logger.warning(
+            "LLM NOT configured! Set OPENROUTER_API_KEY in .env"
+        )
+
+    logger.info("Server starting on %s:%s", settings.host, settings.port)
+
+    # Datenschutz-Wächter (N24a): Warnt beim Start, wenn der Server auf allen
+    # Schnittstellen lauscht UND kein API-Key gesetzt ist. Die Bindung wird
+    # bewusst NICHT erzwungen — die Entscheidung trifft der Betreiber über
+    # HOST_BIND in der .env. Der Text enthält kein Geheimnis und keine Geräte-IP.
+    _bindung_hinweis = bindung_hinweis(settings.host, bool(settings.api_key))
+    if _bindung_hinweis:
+        logger.warning(_bindung_hinweis)
+
+    # Selbstheilung Track C (lokaler Hermes):
+    # (1) Inbox-Daemon sicherstellen — ein toter Daemon war die Live-Ursache
+    #     fuer 'Hermes reagiert nicht'. Der Guard war vorher NUR
+    #     `hermes_local_kanal == "aktiv"`; ist der Kanal leer (Standard), lief
+    #     die Selbstheilung nie und Track C antwortete ins Leere. Jetzt greift
+    #     sie auch bei leerem Kanal, sobald der lokale Hermes nutzbar ist.
+    # (2) Liegengebliebene tmux-Jobsessions aufraeumen — sie bleiben nach
+    #     Server-Neustart/Absturz als tote, in Termux rot durchgestrichene
+    #     Eintraege stehen und mussten manuell geschlossen werden
+    #     (Wunsch des Betreibers 2026-09-15).
+    try:
+        from app.services.hermes_local import (
+            ist_verfuegbar as hermes_local_ist_verfuegbar,
+            raeume_alte_job_sessions_auf,
+            sicherstelle_inbox_daemon,
+        )
+
+        kanal = str(getattr(settings, "hermes_local_kanal", "") or "").strip().lower()
+        if hermes_local_ist_verfuegbar() and kanal in ("", "aktiv"):
+            if sicherstelle_inbox_daemon():
+                logger.info("Inbox-Daemon aktiv (Server-Startup).")
+            else:
+                logger.warning("Inbox-Daemon beim Startup nicht gestartet.")
+
+        aufgeraeumt = raeume_alte_job_sessions_auf()
+        if aufgeraeumt:
+            logger.info(
+                "tmux-Aufraeumen: %d liegengebliebene Session(s) beendet.", aufgeraeumt
+            )
+    except Exception as e:
+        logger.warning("Track-C-Startup-Check fehlgeschlagen: %s", e)
+
+    # Datenhygiene: zurueckgebliebene 'laeuft'-Auftraege aus einem frueheren
+    # Serverleben schliessen. Ihre Worker-Threads sind mit dem alten Prozess
+    # gestorben, koennen ihren Status also nie mehr finalisieren — ohne diese
+    # Aufraeumung bleiben sie fuer immer auf 'laeuft' stehen.
+    try:
+        from app.services.auftrag_service import auftrag_service
+
+        geschlossen = auftrag_service.verwaiste_auftraege_schliessen()
+        if geschlossen:
+            logger.info("Datenhygiene: %d verwaiste Auftraege geschlossen.", geschlossen)
+    except Exception as e:
+        logger.warning("Aufraeumen verwaister Auftraege fehlgeschlagen: %s", e)
+
+    yield
+
+    # Shutdown
+    logger.info("Shutting down Personal AI Agent...")
+    logger.info("Goodbye.")
+
+
+# Create FastAPI app
+app = FastAPI(
+    title="Personal AI Agent",
+    description="Ein datenschutzkonformer, persönlicher KI-Assistent",
+    version="0.1.0",
+    lifespan=lifespan,
+    # P0 (12.10.2026): keine API-Doku-Seiten. /openapi.json legte die ganze
+    # API-Oberfläche offen, /docs lud Skripte aus einem CDN.
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+# CORS ist aus (P0, 12.10.2026). Vorher stand hier allow_origins=["*"] mit
+# Zugangsdaten — jede Webseite im Browser durfte unsere Antworten lesen. Die
+# Oberfläche kommt vom selben Server und braucht kein CORS. Nur eine in
+# CORS_HERKUNFT ausdrücklich genannte Seite darf lesen (ohne *, ohne Zugangsdaten;
+# wirkt nach einem Neustart).
+_cors_liste = sorted(cors_herkunft())
+if _cors_liste:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_liste,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+# Host- und Herkunftsprüfung plus Sicherheitskopfzeilen auf jeder Antwort
+# (app/sicherheit.py). Als Letztes hinzugefügt = äußerste Schicht: Sie prüft
+# vor allem anderen, auch vor dem Frontend und den schlüsselfreien Routen.
+app.add_middleware(SicherheitsMiddleware)
+
+# Register API routers (they define their own /api prefix)
+# API-Key-Schutz (Hotel-WLAN): Ist `settings.api_key` gesetzt (aus .env),
+# verlangen ALLE AP-Routen (außer /api/health und /api/auth) den Header
+# X-API-Key. Ohne Key: 401. Ohne gesetzten Key bleibt alles offen (dev).
+app.include_router(chat.router, dependencies=[Depends(auth.require_api_key)])
+app.include_router(memory.router, dependencies=[Depends(auth.require_api_key)])
+app.include_router(auth.router)  # auth selbst bleibt offen (Login)
+app.include_router(transcribe.router, dependencies=[Depends(auth.require_api_key)])
+app.include_router(speak.router, dependencies=[Depends(auth.require_api_key)])
+app.include_router(llm_models.router, dependencies=[Depends(auth.require_api_key)])
+app.include_router(archiv.router, dependencies=[Depends(auth.require_api_key)])
+# Zweiter Archiv-Router (eigene Datei, 25.09.2026): Zeitachse, Original
+# nachlesen, Bewusstseins-Baustein. Prefix `/api/archiv/wissen` — er liegt
+# UNTER dem Prefix von `archiv.router` (`/api/archiv`), teilt sich aber keine
+# einzige Route mit ihm: dort `/status` und `/suche`, hier `/wissen/...`.
+# Deshalb kollidiert hier nichts, obwohl beide Pfade mit /api/archiv beginnen.
+app.include_router(archiv_wissen.router, dependencies=[Depends(auth.require_api_key)])
+app.include_router(auftraege.router, dependencies=[Depends(auth.require_api_key)])
+app.include_router(upload.router, dependencies=[Depends(auth.require_api_key)])
+app.include_router(dateien.router, dependencies=[Depends(auth.require_api_key)])
+app.include_router(gesichter.router, dependencies=[Depends(auth.require_api_key)])
+app.include_router(hermes_steuerung.router, dependencies=[Depends(auth.require_api_key)])
+# Selbsttest (2026-09-25): Zustand des Systems OHNE Kabel ablesbar — der
+# Nutzer läuft auf dem Handy und hat unterwegs kein ADB. Liefert Commit,
+# Archiv-Index, Inbox-Daemon, letzte Protokollzeilen, Erinnerungen,
+# Sprachmodelle und Serverzeit als JSON; die Oberfläche zeigt es als
+# Klartext-Blatt. Nie ein 500er — fehlende Quellen stehen als error-Text drin.
+app.include_router(selbsttest.router, dependencies=[Depends(auth.require_api_key)])
+# Fotos-Uebersicht (2026-09-27, Nachtlauf N11): Zahlen und Event-Namen aus der
+# kleinen Datei ~/foto_sortierung/fotos_uebersicht.json (nur Zahlen, keine
+# Bilder). Beantwortet am Handy Fragen wie "wie viele Events gab's?" und
+# "zeig mir die Urlaube 2021". Rein lesend, kein Netz; fehlt die Datei,
+# antwortet die Route mit HTTP 200, ok=false und deutschem error-Text.
+app.include_router(fotos.router, dependencies=[Depends(auth.require_api_key)])
+# Beziehungen (2026-09-29, Nachtlauf N28): "wer war mit wem wo" an einem Tag aus
+# der kleinen Datei ~/foto_sortierung/beziehungen.jsonl (N27e) plus der
+# Uebersicht beziehungen.json. Rein lesend, kein Netz, keine Bilder; fehlt eine
+# Datei, antwortet die Route mit HTTP 200, ok=false und deutschem error-Text.
+app.include_router(beziehungen.router, dependencies=[Depends(auth.require_api_key)])
+# pCloud (2026-09-26): Kontostand, Ordnerliste, Namenssuche, Vorschaubild und
+# Datei-Download — ausschliesslich lesend (services/pcloud_service.py). Ohne
+# PCLOUD_TOKEN in der .env antworten die Routen mit HTTP 503 und Klartext;
+# der Key-Schutz ist derselbe wie bei allen anderen /api-Routen.
+app.include_router(cloud.router, dependencies=[Depends(auth.require_api_key)])
+# Erzähl-Diashow (Auftrag E8a, 28.09.2026): Ereignis auswählen, sich durch die
+# Diashow klicken und zu jedem Bild eine Geschichte tippen/sprechen. Liest nur
+# ~/foto_sortierung/ereignisse.jsonl (PC-only), haengt Geschichten NUR an
+# ~/foto_sortierung/geschichten.jsonl an. Ohne die Ereignisdatei antwortet die
+# Route mit HTTP 200, ok=false und deutschem error-Text (wie fotos.router).
+app.include_router(erzaehlen.router, dependencies=[Depends(auth.require_api_key)])
+# Personen benennen im Gruppenmodus (Plan Foto-Gedaechtnis Schritt 2, 01.10.2026):
+# liest personen_beispiele.json / gesicht_zuordnung.jsonl (vom PC uebergeben),
+# schreibt Namen und Vorgaben im Format von personen_gruppieren.py nach
+# ~/foto_sortierung (Sicherung *.vorher, Protokoll, Rueckgaengig). Immer HTTP 200.
+app.include_router(gruppen.router, dependencies=[Depends(auth.require_api_key)])
+# Ueberlauf-Waechter (01.10.2026): die Oberflaeche meldet nur Messwerte, wenn eine
+# Blase rechts herausragt; Ablage im kabel-lesbaren Diagnose-Ordner. Immer HTTP 200.
+app.include_router(diagnose.router, dependencies=[Depends(auth.require_api_key)])
+# Statusleiste (10.10.2026): Was laeuft gerade im Hintergrund? Fasst
+# angemeldete Backend-Arbeiten, laufende Auftraege (Status 'laeuft') und die
+# kabel-lesbaren Protokolldateien zusammen (app/services/laufende_arbeiten.py).
+# Rein lesend, fehlertolerant: fehlende Quellen ergeben eine leere Liste.
+# Die Oberflaeche pollt die Route fuer die dauerhafte Leiste oben.
+app.include_router(laeuft.router, dependencies=[Depends(auth.require_api_key)])
+# Update und Neustart (2026-10-16): nur über HTTPS und nach derselben
+# API-Key-/Sitzungs-Abhängigkeit wie die übrigen /api-Routen. Der Endpunkt
+# startet sein fest verdrahtetes Termux-Skript erst nach dem Senden der Antwort.
+app.include_router(system_update.router, dependencies=[Depends(auth.require_api_key)])
+# Datenstand (2026-10-18, To-do/gesamtplan T0): „liegt eine Fotoquelle wirklich
+# auf DIESEM Gerät?" — der fertige datensparsame Quellenstatus
+# (app/services/import_status.py) wird hier für die Oberfläche lesbar. Rein
+# lesend, mit Zwischenspeicher (eine volle Messung liest rund 250 MB), Schutz
+# wie beim Protokoll (Loopback immer, fremd nur HTTPS).
+app.include_router(datenstand.router, dependencies=[Depends(auth.require_api_key)])
+# Tagesimport (2026-10-26, C3): Stand und Schalter des taeglichen Handy-Imports im
+# Checks-Fenster. Liest/schreibt nur die kleine Schalterdatei tageslauf.json (Datenordner
+# TAGESLAUF_DATEN, sonst ~/foto_sortierung); Bericht und Stand des Werkzeugs nur lesend.
+app.include_router(tageslauf.router, dependencies=[Depends(auth.require_api_key)])
+# Bidirektionaler Voice Mode & Telefon-Agent (2026-10-31, Stufe D):
+# Live-Audio-Streaming (WebSocket), Barge-In, Voice-Session-Manager und App-Sprachsteuerung.
+app.include_router(voice_stream.router, dependencies=[Depends(auth.require_api_key)])
+
+def _lan_ip() -> Optional[str]:
+    """LAN-Adresse des Geräts ermitteln, ohne Netzwerkverkehr zu erzeugen.
+
+    Der UDP-Socket wird nur nominell "verbunden" – dabei wählt das
+    Betriebssystem die Schnittstelle, über die es hinausgehen würde, und
+    verrät so die eigene Adresse im Heimnetz.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(0.2)
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+    except Exception:
+        return None
+
+
+@app.get("/api/health", tags=["system"])
+async def health_check():
+    """Health check endpoint."""
+    from app.services.llm_service import llm_service
+
+    lan_ip = _lan_ip()
+
+    memory_status = {"memory_available": True}
+    try:
+        memory_status["memory_count"] = chroma_client.count()
+    except MemoryStoreError:
+        # Erreichbarkeit des Servers ist nicht Verfügbarkeit des Gedächtnisses.
+        # Unbekannte Anzahl weglassen: weder einen leeren Bestand vortäuschen
+        # noch in bestehenden Oberflächen „null Erinnerungen“ anzeigen.
+        memory_status["memory_available"] = False
+
+    return {
+        "status": "ok",
+        "version": "0.1.0",
+        "llm_configured": llm_service.is_configured,
+        **memory_status,
+        # Damit man vom PC aus zugreifen kann, ohne den Server zu beenden.
+        "lan_ip": lan_ip,
+        "lan_url": f"http://{lan_ip}:{settings.port}" if lan_ip else None,
+        # Datenschutz-Wächter (N24a): Text (oder null), wenn ohne API-Key auf
+        # allen Schnittstellen gelauscht wird. Kein Geheimnis, keine Geräte-IP.
+        "bindung_warnung": bindung_hinweis(settings.host, bool(settings.api_key)),
+    }
+
+
+@app.get("/api/hello", tags=["system"])
+async def hello_world():
+    """Hello-World-Endpoint: minimaler Health-/Smoke-Test.
+
+    Beweist, dass der Server läuft und das Routing/Serialisieren
+    funktioniert – ganz ohne Datenbank- oder LLM-Abhängigkeit.
+    """
+    return {
+            "message": "Hello, World!",
+            "status": "ok",
+            "service": "Personal AI Agent",
+        }
+
+
+@app.get("/health", tags=["system"])
+async def health():
+    """Liveness-Endpoint auf Wurzelebene (ohne /api-Prefix).
+
+    Reine Lebendigkeitsprüfung für Load-Balancer, Container-Healthchecks
+    (z. B. Docker HEALTHCHECK) oder Monitoring-Sonden: antwortet immer
+    sofort mit HTTP 200, solange der Prozess läuft – bewusst OHNE
+    Datenbank- oder LLM-Abhängigkeit, damit der Check nicht durch einen
+    ausgefallenen Teil-Dienst falsch negativ wird (anders als /api/health,
+    das Status, LLM und Memory prüft).
+    """
+    return {"status": "ok", "service": "Personal AI Agent"}
+
+
+@app.get("/ping", tags=["system"])
+async def ping():
+    """Minimaler Ping-Endpoint („Liveness“-Smoke-Test).
+
+    Reine Lebendigkeitsprüfung ohne jede Abhängigkeit (keine Datenbank,
+    kein LLM, keine externen Calls): antwortet immer sofort mit HTTP 200,
+    solange der Prozess läuft. Bewusst minimal gehalten – nur ein
+    statisches Pong, damit Monitoring- bzw. Aufruf-Seiten einen schnellen
+    Check auf „läuft der Server überhaupt?“ haben.
+    """
+    return {"ping": "pong"}
+
+
+@app.get("/status", tags=["system"])
+async def status():
+    """Minimaler Status-Endpoint.
+
+    Bewusst schlank gehalten: reine Lebendigkeits-/Bereitschaftsprüfung
+    ohne Datenbank- oder LLM-Abhängigkeit. Antwortet immer sofort mit
+    HTTP 200, solange der Prozess läuft.
+    """
+    return {"status": "ok", "service": "Personal AI Agent", "endpoint": "/status"}
+
+
+
+class NoCacheStaticFiles(StaticFiles):
+    """Statische Dateien OHNE Caching ausliefern.
+
+    FastAPI/Starlette standardmäßig statische Dateien mit erlaubtem Browser-Cache
+    (304 Not Modified). Dann behält der Browser nach einem Update die ALTE
+    app.js/style.css und zeigt weiterhin die alte Oberfläche — obwohl die Datei
+    längst geändert wurde (das Kernproblem 'ich sehe Korrekturen nicht').
+    Diese Unterklasse setzt auf jede Antwort Cache-Control: no-store, sodass der
+    Browser immer die aktuelle Datei holt und nie etwas Altes behält.
+
+    P0 (12.10.2026):
+    - Ausgeliefert wird nur, was in ``sicherheit.FRONTEND_DATEIEN`` steht. Alles
+      andere (Tests, Sicherungskopien, wecken.js) bekommt 404. Verglichen wird
+      der aufgelöste Pfad, damit auch ``%74ests/…`` oder ``Tests/…`` nicht greifen.
+    - In ``index.html`` und ``hermes_status.html`` setzt der Server den
+      API-Schlüssel ins Meta-Feld ``agent-schluessel``. Fremde Seiten können
+      dieses HTML nicht lesen: kein CORS, CORP same-origin, Host-Prüfung.
+      Vorher holte das Frontend den Schlüssel über die offene Route
+      ``/api/konfig`` — und jede fremde Webseite konnte das auch.
+    """
+
+    def _erlaubter_name(self, path: str) -> Optional[str]:
+        """Name aus der Positivliste, auf den ``path`` zeigt — sonst ``None``."""
+        basis = os.path.normcase(os.path.realpath(str(self.directory)))
+        ziel = os.path.normcase(os.path.realpath(os.path.join(basis, path)))
+        if ziel == basis:
+            return "index.html"
+        for name in FRONTEND_DATEIEN:
+            if ziel == os.path.normcase(os.path.join(basis, name)):
+                return name
+        return None
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        name = self._erlaubter_name(path)
+        if name is None:
+            raise StarletteHTTPException(status_code=404)
+        if name in SCHLUESSEL_SEITEN:
+            if scope["method"] not in ("GET", "HEAD"):
+                raise StarletteHTTPException(status_code=405)
+            # H1 (14.10.2026): den Schlüssel bekommt nur das Gerät selbst (App-Hülle,
+            # Browser am Handy). Andere Geräte im WLAN bekommen ein leeres Meta-Feld.
+            schluessel = settings.api_key if client_ist_loopback(scope) else None
+            with open(os.path.join(str(self.directory), name), encoding="utf-8") as datei:
+                antwort: Response = HTMLResponse(schluessel_einsetzen(datei.read(), schluessel))
+        else:
+            antwort = await super().get_response(name, scope)
+        try:
+            antwort.headers["Cache-Control"] = "no-store, max-age=0"
+            antwort.headers["Pragma"] = "no-cache"
+            antwort.headers["Expires"] = "0"
+        except Exception:
+            pass
+        return antwort
+
+
+# Serve frontend static files at / – MUSS als Letztes registriert werden.
+# Starlette matcht Routen in Registrierungsreihenfolge; dieser Mount fängt
+# alles unter / ab und würde jede danach definierte API-Route verdecken.
+if os.path.isdir(FRONTEND_DIR):
+    app.mount("/", NoCacheStaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+    logger.info("Frontend served from: %s (Cache-Control: no-cache)", FRONTEND_DIR)
+else:
+    logger.warning("Frontend directory not found: %s", FRONTEND_DIR)

@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.sln text eol=crlf
+*.png binary
+*.ico binary
+# 2020 student code stays byte-exact (Windows-1252, CRLF)
+projects/university-foundations/**/original/** -text

@@ -1,0 +1,12315 @@
+/**
+ * Personal AI Agent – Frontend Application
+ * 
+ * Features:
+ * - Chat-UI mit Nachrichtenverlauf
+ * - Verbindung zum FastAPI-Backend
+ * - TTS (Text-to-Speech) via SpeechSynthesis API
+ * - Auto-Resize der Texteingabe
+ * - Markdown-Unterstützung für Antworten
+ * - Spracheingabe via AudioWorklet (WAV) + OpenRouter (wie TypeFREE)
+ */
+
+/**
+ * BACKEND-ADRESSE
+ * ----------------
+ * Immer dieselbe Adresse, von der die Seite geladen wurde. Das Backend
+ * liefert das Frontend selbst aus, also stimmt das immer – egal ob man am
+ * Handy über localhost draufgeht oder vom PC über die Heimnetz-IP.
+ *
+ * Früher ließ sich die Adresse über einen localStorage-Eintrag 'api_base'
+ * umbiegen. Das ist seit P0 (12.10.2026) entfernt: Ein eingeschleustes
+ * Skript hätte damit alle Anfragen samt Schlüssel an einen fremden Server
+ * lenken können. Ein alter Eintrag wird beim Start gelöscht.
+ *
+ * Sicherheit: Der API-Key steht NUR in der .env auf dem Handy, nie im
+ * versionierten Frontend-Code. Das Backend setzt ihn beim Ausliefern in das
+ * Meta-Feld agent-schluessel von index.html ein (siehe unten).
+ */
+try { localStorage.removeItem('api_base'); } catch (_e) { /* Speicher gesperrt */ }
+const API_BASE = location.origin;
+
+/** API-Key aus dem Meta-Feld, das das Backend in index.html einsetzt (P0,
+ *  12.10.2026). Vorher kam er über die offene Route /api/konfig – die konnte
+ *  jede fremde Webseite ebenso abrufen. Leeres Feld = kein Key konfiguriert,
+ *  dann bleibt der Schutz deaktiviert. */
+const API_KEY = (() => {
+    try {
+        const feld = document.querySelector('meta[name="agent-schluessel"]');
+        return (feld && feld.getAttribute('content')) || '';
+    } catch (_e) {
+        return '';
+    }
+})();
+
+/**
+ * Zentrale fetch-Kapselung: hängt den X-API-Key an alle Anfragen an unser
+ * eigenes Backend (/api/*) an, damit der Server den Key verlangen darf.
+ * Andere URLs (z.B. externe) bleiben unangetastet.
+ *
+ * Statt alle ~25 fetch-Aufrufe umzuschreiben, wird der GLOBAL window.fetch
+ * einmal gepatcht — so sind auch künftige Aufrufe automatisch abgedeckt.
+ */
+(function () {
+    if (!API_KEY) return;              // kein Key konfiguriert -> nichts patchen
+    const originalFetch = window.fetch;
+    window.fetch = (url, options = {}) => {
+        const u = String(url);
+        const istApi = u.startsWith(`${API_BASE}/api/`) || u.startsWith('/api/');
+        if (istApi) {
+            const headers = new Headers(options.headers || {});
+            if (!headers.has('X-API-Key')) headers.set('X-API-Key', API_KEY);
+            options = { ...options, headers };
+        }
+        return originalFetch(url, options);
+    };
+})();
+
+// =========================================
+// Websuche – drei Zustände
+// =========================================
+const WEB_MODI = ['off', 'manual', 'auto'];
+
+const WEB_TEXTE = {
+    off: {
+        label: 'Web',
+        titel: 'Websuche aus – antippen für „bei jeder Nachricht"',
+    },
+    manual: {
+        label: 'Web an',
+        titel: 'Sucht bei JEDER Nachricht – rund 0,8 Cent pro Stück, auch bei „danke"',
+    },
+    auto: {
+        label: 'Web auto',
+        titel: 'Das Modell entscheidet selbst, ob es sucht – kostet nur bei echter Suche',
+    },
+};
+
+/** Gespeicherten Modus lesen. Übersetzt die frühere Ja/Nein-Speicherung mit. */
+function ladeWebModus() {
+    const gespeichert = localStorage.getItem('web_search');
+    if (gespeichert === '1') return 'manual';   // alte Fassung: eingeschaltet
+    if (WEB_MODI.includes(gespeichert)) return gespeichert;
+    return 'off';
+}
+
+// =========================================
+// State
+// =========================================
+const state = {
+    // Merkt sich, welches Gespräch zuletzt lief. Ohne das stünde die
+    // Oberfläche nach jedem Neuladen vor einem leeren Fenster, obwohl der
+    // Server den Verlauf noch hat.
+    conversationId: localStorage.getItem('conversation_id') || null,
+    isOnline: false,
+    messages: [],
+    isRecording: false,
+    isTranscribing: false,
+    // Sichtbarer Zustand der Spracheingabe ('' / recording / hoert_zu /
+    // transcribing / polishing / spricht). Siehe setMicStatus().
+    micStatus: '',
+    // Websuche kostet je Anfrage extra – Wunsch bleibt zwischen Sitzungen erhalten.
+    webSearch: ladeWebModus(),
+    // Gewähltes Modell. null = das aus der Server-Konfiguration.
+    model: localStorage.getItem('model') || null,
+    // Katalog, wie ihn /api/models liefert. Wird beim ersten Öffnen geholt.
+    katalog: null,
+    favoriten: [],
+    modellHinweis: '',
+    // Aktive Filter-Chips im Auswahl-Blatt, kombinierbar (UND-Verknüpfung).
+    filters: new Set(),
+    // Kennt das Backend die Anbieter-Whitelist des Kontos? Ohne sie beziehen
+    // sich alle Anbieterzahlen auf den Weltmarkt, nicht auf die eigene Lage.
+    whitelistAktiv: false,
+    // Datenschutz-Riegel: schickt provider.data_collection="deny" mit.
+    //
+    // Fest auf an, und der Schalter ist aus der Leiste genommen. Der frühere
+    // Wert aus dem Speicher wird bewusst ignoriert: Ausgeblendet UND
+    // abschaltbar wäre die gefährliche Kombination – man hielte sich für
+    // geschützt, weil man den Schalter nicht mehr sieht.
+    noRetention: true,
+    // Der AbortController der laufenden Antwort, sonst null. Dient zugleich
+    // als Antwort auf die Frage "schreibt der Agent gerade?" – die
+    // Denke-nach-Anzeige taugt dafuer nicht, die verschwindet schon beim
+    // ersten Textstueck.
+    abbruch: null,
+    // Nachrichten, die waehrend einer laufenden Antwort abgeschickt wurden.
+    // Eintraege: { text, element } – element ist die graue Wartet-Blase.
+    warteschlange: [],
+    // Vom Nutzer ausgewählte, aber noch nicht abgeschickte Dateien
+    // Eintraege: { id, filename, type, url, mime, data_url, text, file }
+    pendingFiles: [],
+    // Stand des offenen Chats für die sichtbare Kennzeichnung (Anzeige über
+    // dem Verlauf): Anzahl Nachrichten + Zeit der letzten. Fix 2026-09-25.
+    chatAnzahl: undefined,
+    chatZeit: '',
+};
+
+// =========================================
+// DOM References
+// =========================================
+const dom = {
+    messages: document.getElementById('messages'),
+    loading: document.getElementById('loading'),
+    input: document.getElementById('message-input'),
+    sendBtn: document.getElementById('send-btn'),
+    micBtn: document.getElementById('mic-btn'),
+    micStatus: document.getElementById('mic-status'),
+    newChatBtn: document.getElementById('new-chat-btn'),
+    chatsBtn: document.getElementById('chats-btn'),
+    chatSheet: document.getElementById('chat-sheet'),
+    chatsClose: document.getElementById('chats-close'),
+    chatList: document.getElementById('chat-list'),
+    chatHint: document.getElementById('chat-hint'),
+    // Erinnerungen (Gedächtnis): Blatt mit Liste + Einzel-Löschen.
+    gedaechtnisBtn: document.getElementById('gedaechtnis-btn'),
+    memorySheet: document.getElementById('memory-sheet'),
+    memoryClose: document.getElementById('memory-close'),
+    memoryList: document.getElementById('memory-list'),
+    memoryHint: document.getElementById('memory-hint'),
+    // Selbsttest: Blatt mit Systemzustand (Commit, Index, Daemon, Logs …).
+    selbsttestSheet: document.getElementById('selbsttest-sheet'),
+    selbsttestClose: document.getElementById('selbsttest-close'),
+    selbsttestText: document.getElementById('selbsttest-text'),
+    selbsttestHint: document.getElementById('selbsttest-hint'),
+    selbsttestReload: document.getElementById('selbsttest-reload'),
+    systemUpdateBtn: document.getElementById('system-update-btn'),
+    systemUpdateStatus: document.getElementById('system-update-status'),
+    webBtn: document.getElementById('web-btn'),
+    statusIndicator: document.getElementById('status-indicator'),
+    statusText: document.querySelector('.status-text'),
+    modelBtn: document.getElementById('model-btn'),
+    modelLabel: document.getElementById('model-label'),
+    modelSheet: document.getElementById('model-sheet'),
+    modelClose: document.getElementById('model-close'),
+    modelSearch: document.getElementById('model-search'),
+    modelList: document.getElementById('model-list'),
+    modelHint: document.getElementById('model-hint'),
+    modelFilters: document.getElementById('model-filters'),
+    privacyBtn: document.getElementById('privacy-btn'),
+    privacyLabel: document.getElementById('privacy-label'),
+    loopBtn: document.getElementById('loop-btn'),
+    loopLabel: document.getElementById('loop-label'),
+    streamSettingsBtn: document.getElementById('stream-settings-btn'),
+    streamMenu: document.getElementById('stream-menu'),
+    codechatBtn: document.getElementById('codechat-btn'),
+    // Datei-Upload
+    uploadBtn: document.getElementById('upload-btn'),
+    fileInput: document.getElementById('file-input'),
+    filePreview: document.getElementById('file-preview'),
+    filePreviewList: document.getElementById('file-preview-list'),
+};
+// JEDES im Chat sichtbare Foto per Klick maximierbar (Vollbild) machen — auch
+// hochgeladene/gezeigte Bilder in Nachrichten, nicht nur Quiz (Wunsch des Betreibers
+// 2026-09-10). Global über den #messages-Container: jeder Klick auf ein <img>
+// (ohne Button/Öffn-Child) öffnet das Vollbild. Quiz-Bilder liefern dabei ihre
+// Gesicht-Kästen (dataset.quizKarte), alle anderen nur das Bild.
+if (dom.messages) {
+    dom.messages.addEventListener('click', (ev) => {
+        // nur direkte Klicks auf ein Bild (nicht auf Buttons darin)
+        const t = ev.target;
+        if (!t || t.tagName !== 'IMG') return;
+        if (ev.button !== undefined && ev.button !== 0) return; // nur linke Taste
+        // Läuft gerade eine Textauswahl (langer Druck, Wunsch 2026-09-25), ist
+        // dieser Klick Teil der Auswahl-Geste – dann kein Vollbild aufziehen,
+        // sonst waere die gerade gestartete Auswahl wieder weg.
+        const sel = window.getSelection ? window.getSelection() : null;
+        if (sel && !sel.isCollapsed && String(sel).trim()) return;
+        // Quiz-Bilder haben ihren eigenen Antipper (macheBildAntippbar) mit
+        // Gesicht-Kästen — den NICHT unterdrücken: nur öffnen, wenn kein
+        // .quiz-marke-Umbruch/eigener Handler das Bild bereits behandelt.
+        // Erkennung: Bild liegt in einer Quiz-Karte (dataset.quizKarte) -> lassen.
+        let inQuizKarte = false;
+        try {
+            let node = t.parentElement;
+            while (node && node !== document.body) {
+                if (node.dataset && node.dataset.quizKarte === '1') { inQuizKarte = true; break; }
+                node = node.parentElement;
+            }
+        } catch (_e) {}
+        if (inQuizKarte) return;   // Quiz-Handler (mit Kästen) übernimmt
+        ev.preventDefault();
+        ev.stopPropagation();
+        // Alle anderen Chat-Bilder: nur Vollbild (kein Gesicht-Editor).
+        zeigeBildVollbild(t, []);
+    }, true); // capture, damit es vor inneren Handlern greift
+}
+// Coding-/Hermes-Chat-Umschalter (conv_code <-> conv_main).
+if (dom.codechatBtn) {
+    dom.codechatBtn.addEventListener('click', () => {
+        const ziel = (state.conversationId === 'conv_code') ? 'conv_main' : 'conv_code';
+        chatWechseln(ziel);
+    });
+}
+
+// =========================================
+// Utility: Simple Markdown Parser
+// =========================================
+/** Zeichenweise Auszeichnung – auch innerhalb von Tabellenzellen gebraucht.
+ *  Links (Markdown-Links + rohe URLs) werden klickbar gemacht: http/https/www →
+ *  <a target="_blank" rel="noopener noreferrer">.
+ *
+ *  Erwartet MASKIERTEN Text (escapeHtml lief schon, siehe parseMarkdown).
+ *  Darum endet eine URL an jeder Entität außer &amp; – ein maskiertes
+ *  Anführungszeichen (&quot;) oder ein Apostroph (&#39;) kann so nie in ein
+ *  href-Attribut geraten. Die Roh-URL erlaubt ')' (Wiki-Links wie …/X_(Y)),
+ *  der Markdown-Link nicht, weil dort ')' die Adresse abschließt. */
+function inlineMarkdown(text) {
+    let t = text;
+    // 1) Markdown-Links [text](url) → parken (Platzhalter), damit der Roh-URL-
+    //    Schritt sie nicht doppelt auseinanderreißt.
+    const geparkt = [];
+    t = t.replace(/\[([^\]]+)\]\((https?:\/\/(?:[^\s&)\u0000]|&amp;)+)\)/g, (m, text_, url) => {
+        geparkt.push(`<a href="${url}" target="_blank" rel="noopener noreferrer">${text_}</a>`);
+        return `\u0000L${geparkt.length - 1}\u0000`;
+    });
+    // 2) Roh-URLs (https://…, http://…, www.…) → klickbar (außer die geparkten).
+    t = t.replace(/(^|[^"\u0000])(https?:\/\/(?:[^\s&\u0000]|&amp;)+|www\.(?:[^\s&\u0000]|&amp;)+)/g, (_m, davor, url) => {
+        const href = url.startsWith('www.') ? 'https://' + url : url;
+        return `${davor}<a href="${href}" target="_blank" rel="noopener noreferrer">${url}</a>`;
+    });
+    // 3) Geparkte Markdown-Links wieder einsetzen.
+    t = t.replace(/\u0000L(\d+)\u0000/g, (_, i) => geparkt[parseInt(i, 10)] || '');
+    return t
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+}
+
+/** Eine Markdown-Tabelle in HTML umsetzen. */
+function tabelleZuHtml(kopfZeile, koerper) {
+    const zellen = (zeile) =>
+        zeile.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map(z => inlineMarkdown(z.trim()));
+
+    const kopf = zellen(kopfZeile);
+    const zeilen = koerper.trim().split('\n').filter(z => z.trim());
+
+    let html = '<div class="table-wrap"><table><thead><tr>';
+    kopf.forEach(z => { html += `<th>${z}</th>`; });
+    html += '</tr></thead><tbody>';
+    zeilen.forEach(zeile => {
+        html += '<tr>';
+        zellen(zeile).forEach(z => { html += `<td>${z}</td>`; });
+        html += '</tr>';
+    });
+    return html + '</tbody></table></div>';
+}
+
+function parseMarkdown(text) {
+    // Fertige Blöcke werden geparkt und erst ganz am Ende wieder eingesetzt.
+    // Sonst zerlegt die Absatz- und Zeilenumbruch-Behandlung weiter unten
+    // ihr Innenleben – aus Tabellenzeilen würden <br> mitten im <table>.
+    const geparkt = [];
+    const parke = (html) => `\u0000${geparkt.push(html) - 1}\u0000`;
+
+    // Das Nullzeichen ist unser Platzhalter-Rand; aus der Eingabe fliegt es raus.
+    text = String(text ?? '').replace(/\u0000/g, '');
+
+    // Codeblöcke maskieren sich in codeBlockZuHtml selbst.
+    text = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+        parke(codeBlockZuHtml(lang, code)));
+
+    // Sicherheit (P0, 12.10.2026): ALLES Übrige wird maskiert, BEVOR daraus
+    // HTML entsteht. Vorher gingen Modellantworten roh in innerHTML – ein
+    // <img onerror=…> in einer Antwort lief als Skript. Die Markdown-Zeichen
+    // | - : * ` [ ] ( ) bleiben dabei unberührt.
+    text = escapeHtml(text);
+
+    // Tabelle: Kopfzeile, Trennzeile aus Strichen, dann beliebig viele Zeilen.
+    text = text.replace(
+        /^[ \t]*\|(.+)\|[ \t]*\r?\n[ \t]*\|[ \t]*:?-{2,}:?[ \t]*(?:\|[ \t]*:?-{2,}:?[ \t]*)*\|[ \t]*\r?\n((?:[ \t]*\|.*\|[ \t]*\r?\n?)*)/gm,
+        (_, kopf, koerper) => parke(tabelleZuHtml(kopf, koerper)));
+
+    text = inlineMarkdown(text);
+    text = text.replace(/^- (.+)$/gm, '<li>$1</li>');
+    text = text.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
+    text = text.replace(/\n\n/g, '</p><p>');
+    text = text.replace(/\n/g, '<br>');
+
+    let html = `<p>${text}</p>`;
+    // Blockelemente gehören nicht in einen Absatz – <table> in <p> ist
+    // ungültig und der Browser würde den Absatz vorzeitig schließen.
+    html = html.replace(/<p>\s*(\u0000\d+\u0000)\s*<\/p>/g, '$1');
+    html = html.replace(/<br>\s*(\u0000\d+\u0000)/g, '$1');
+    html = html.replace(/(\u0000\d+\u0000)\s*<br>/g, '$1');
+    return html.replace(/\u0000(\d+)\u0000/g, (_, i) => geparkt[i]);
+}
+
+/** Text für HTML maskieren – für Inhalt UND Attributwerte (auch " und ').
+ *  Reiner Zeichenersatz ohne DOM; die Tests schneiden die Funktion wörtlich
+ *  aus, darum keine Hilfsfunktion dazwischen. */
+function escapeHtml(text) {
+    return String(text ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+/**
+ * Codeblock als HTML — bei einem Patch (`diff`/`patch`) Zeile für Zeile mit
+ * eigener Klasse.
+ *
+ * Wunsch des Betreibers 2026-09-15: „Code-Schnipsel anzeigen, plus minus". Vorher
+ * lief JEDER Codeblock durch dieselbe `<pre><code>`-Ausgabe; ein Diff stand
+ * damit als grauer Block da, in dem Hinzufügungen und Löschungen nicht zu
+ * unterscheiden waren. Jetzt bekommen `+`/`-`/`@@`/Datei-Kopfzeilen eigene
+ * Klassen (Farben in style.css, .diff …) — lesbar wie ein normales Patch-Fenster.
+ * Alle Zeilen werden escaped, das Diff-HTML ist also kein Injektionsweg.
+ */
+function codeBlockZuHtml(lang, code) {
+    const roh = escapeHtml(code.trim());
+    const l = String(lang || '').toLowerCase();
+    if (l !== 'diff' && l !== 'patch') return `<pre><code>${roh}</code></pre>`;
+    const zeilen = roh.split('\n').map(z => {
+        let k = 'd-kontext';
+        if (/^\+\+\+/.test(z) || /^---/.test(z)) k = 'd-kopf';
+        else if (/^\+/.test(z)) k = 'd-plus';
+        else if (/^-/.test(z)) k = 'd-minus';
+        else if (/^@@/.test(z)) k = 'd-hunk';
+        return `<span class="${k}">${z}</span>`;
+    }).join('\n');
+    return `<pre class="diff"><code>${zeilen}</code></pre>`;
+}
+
+/**
+ * Markdown für einen noch unfertigen Text.
+ *
+ * Ein angefangener Codeblock wird für die Anzeige provisorisch geschlossen –
+ * sonst stünden die drei Backticks als roher Text da, bis das Gegenstück
+ * eintrifft. Halbfertige Sternchen brauchen keine Behandlung: Sie finden
+ * kein Gegenstück, bleiben sichtbar und formatieren sich von selbst,
+ * sobald es ankommt.
+ */
+function parseMarkdownPartial(text) {
+    const fences = (text.match(/```/g) || []).length;
+    return parseMarkdown(fences % 2 === 1 ? text + '\n```' : text);
+}
+
+// =========================================
+// UI Functions
+// =========================================
+/** Steht die Ansicht nah genug am unteren Rand? */
+function isAtBottom(toleranz = 80) {
+    const el = dom.messages.parentElement;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < toleranz;
+}
+
+/**
+ * Nach unten scrollen.
+ *
+ * Ohne `force` nur dann, wenn der Nutzer ohnehin unten steht. Scrollt er
+ * während einer laufenden Antwort nach oben, um etwas nachzulesen, bleibt
+ * die Ansicht dort stehen, statt ihm ständig weggerissen zu werden.
+ *
+ * Wichtig: Der Zustand muss VOR dem Einfügen neuen Inhalts geprüft werden –
+ * danach ist die Seite bereits gewachsen und man steht nie mehr "unten".
+ */
+function scrollToBottom(force = false) {
+    if (!force && !isAtBottom()) return;
+    const el = dom.messages.parentElement;
+    el.scrollTop = el.scrollHeight;
+}
+
+/** Erkennt ein Options-/Auswahl-Menü in einer rohen Hermes-Ausgabe und liefert
+ *  { fragen:[{frage, optionen:[{nummer,text}]}], optionen:[…flach], frage }
+ *  oder null (wenn weniger als 2 Optionen gefunden werden).
+ *
+ *  Wichtig (Wunsch des Betreibers 2026-09-15): Eine Ausgabe mit MEHREREN Fragen
+ *  wird in einzelne Frage-Blöcke zerlegt — früher landeten alle Antworten
+ *  flach untereinander und die Fragen waren gar nicht mehr zu sehen (nur der
+ *  Text VOR der ersten Option galt als „Frage"). Regel jetzt: eine Textzeile
+ *  NACH bereits gesehenen Optionen eröffnet die nächste Frage.
+ *  Versteht "1. …", "1) …" und die CLI-Markierung "❯ 1. …"; Layout-Pipes ("|")
+ *  werden vorher zu Zeilenumbrüchen. */
+function parseOptionsMenue(roh) {
+    if (!roh || typeof roh !== 'string') return null;
+    // Stream-Zeilen tragen Emojis und oft einen [ISO-Zeitstempel] vorne
+    // ("💬 2. …" / "[2026-09-15T10:14:02+02:00] 💬 …"). Ohne Abstreifen würde
+    // eine Optionszeile als FRAGETEXT missdeutet und die Frage ginge verloren.
+    const zeilen = roh.replace(/\|/g, '\n').split('\n').map(z => z
+        .replace(/^\s*\[[^\]]{4,40}\]\s*/, '')
+        .replace(/^[❯>\s]*(?:🧠|💬|🔧|⏹|❓|✅)\s*/, '')
+        .trim()).filter(Boolean);
+    // GEGENPROBE-SCHUTZ (Wunsch des Betreibers 2026-09-15): Ein Gedanken-/
+    // Reasoning-Absatz mit Aufzählung ("1. … 2. …") ist KEINE Abfrage — sonst
+    // standen dort 12 klickbare "Antworten", deren Frage ein Denkfetzen war.
+    if (/Reasoning\b|^\s*(Let me|Let's|The user|I |I'll|Okay|So the|This is|First,|Now I)\b/im.test(roh)) return null;
+    const bloecke = [];
+    let block = null;
+    const neuerBlock = () => {
+        block = { frage: [], optionen: [] };
+        bloecke.push(block);
+        return block;
+    };
+    for (const zeile of zeilen) {
+        const m = zeile.match(/^[❯>»\s]*(\d+)[.)]\s*(.+)$/);
+        if (m) {
+            if (!block) neuerBlock();
+            block.optionen.push({ nummer: parseInt(m[1], 10), text: m[2].trim() });
+            continue;
+        }
+        const text = zeile.replace(/[❯>»]+/g, '').trim();
+        if (!text) continue;
+        // Textzeile nach Optionen = Beginn der nächsten Frage.
+        if (block && block.optionen.length) neuerBlock();
+        if (!block) neuerBlock();
+        block.frage.push(text);
+    }
+    // Frage-PFLICHT: Optionen ohne Fragentext sind eine Aufzählung, kein Menü.
+    const fragen = bloecke
+        .map(b => ({ frage: b.frage.join(' ').trim(), optionen: b.optionen }))
+        .filter(b => b.optionen.length > 0 && b.frage
+            && !/^(Let me|Let's|The user|I |I'll|Okay|So the|This is|Now I)\b/i.test(b.frage)
+            && b.frage.length <= 300);
+    const flach = fragen.reduce((alle, b) => alle.concat(b.optionen), []);
+    if (flach.length < 2) return null;
+    // Prosa-Schutz: sehr lange Options-Beschriftungen sind Aufzählungen aus
+    // einem Fließtext — es sei denn, es ist eine echte CLI-Auswahl (❯ /
+    // "(Recommended)" / "Other (type your answer)"), die darf lang sein.
+    const marker = /❯|\(Recommended\)|Other \(type your answer\)/im.test(roh);
+    if (!marker && flach.some(o => o.text.length > 90)) return null;
+    return { fragen, optionen: flach, frage: fragen[0].frage };
+}
+
+/** Klickbarer Durchklick-Assistent für MEHRERE Fragen: erst Frage 1 mit ihren
+ *  Optionen, nach der Wahl Frage 2 usw. — nie alle Antworten untereinander.
+ *  Am Ende geht EINE Nachricht mit allen Antworten (Frage → Wahl) an den
+ *  Agenten, damit er die Zuordnung eindeutig hat. */
+function _bauOptionsAssistent(box, fragen) {
+    const antworten = [];
+    let index = 0;
+    const schritt = document.createElement('div');
+    schritt.style.cssText = 'font-size:0.72rem;color:#9a9a9a';
+    const frageEl = document.createElement('div');
+    frageEl.style.cssText = 'font-weight:600;margin-bottom:2px';
+    const liste = document.createElement('div');
+    liste.style.cssText = 'display:flex;flex-direction:column;gap:6px';
+    const stand = document.createElement('div');
+    stand.style.cssText = 'font-size:0.75rem;color:#7aaa;white-space:pre-line';
+    box.appendChild(schritt);
+    box.appendChild(frageEl);
+    box.appendChild(liste);
+    box.appendChild(stand);
+
+    function zeichne() {
+        const f = fragen[index];
+        schritt.textContent = `Frage ${index + 1} von ${fragen.length}`;
+        // Die Frage steht IMMER sichtbar über ihren Antworten.
+        frageEl.textContent = f.frage || '(ohne Fragentext)';
+        liste.innerHTML = '';
+        f.optionen.forEach((opt, i) => {
+            const btn = document.createElement('button');
+            btn.className = 'option-button';
+            btn.textContent = `${i + 1}. ${opt.text}`;
+            btn.style.cssText =
+                'text-align:left;padding:8px 10px;border:1px solid #3a3a3a;border-radius:8px;' +
+                'background:#1e1e1e;color:inherit;cursor:pointer;font-size:0.85rem';
+            btn.addEventListener('click', () => waehlen(opt));
+            liste.appendChild(btn);
+        });
+        stand.textContent = antworten.map((a, i) => `✓ ${i + 1}. ${a.text}`).join('\n');
+    }
+    function waehlen(opt) {
+        antworten.push({ frage: fragen[index].frage, text: opt.text });
+        if (index + 1 < fragen.length) {
+            index++;
+            zeichne();
+            return;
+        }
+        sende();
+    }
+    function sende() {
+        liste.innerHTML = '';
+        schritt.textContent = 'Beantwortet';
+        frageEl.textContent = 'Alle Fragen beantwortet — Antworten werden gesendet …';
+        stand.textContent = antworten.map((a, i) => `✓ ${i + 1}. ${a.text}`).join('\n');
+        const text = 'Meine Antworten:\n' + antworten
+            .map((a, i) => `${i + 1}) ${a.frage ? a.frage + ' → ' : ''}${a.text}`)
+            .join('\n');
+        // Nur EINE Nachricht am Ende: der Agent sieht Antwort UND zugehörige Frage.
+        if (typeof sendMessage === 'function') sendMessage(text);
+    }
+    zeichne();
+    return box;
+}
+
+/** Baut klickbare Options-Buttons für ein erkanntes Auswahl-Menü. Klick sendet
+ *  die gewählte Option als Nachricht an den Agenten (nicht den rohen String).
+ *  Bei nur EINER Frage: Frage + Optionen direkt. Bei mehreren Fragen greift der
+ *  Durchklick-Assistent (Fragen nacheinander, nie alle Antworten untereinander). */
+function bauOptionsUi(menu) {
+    const box = document.createElement('div');
+    box.className = 'options-menu';
+    box.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:4px';
+    const fragen = (menu && menu.fragen && menu.fragen.length)
+        ? menu.fragen
+        : [{ frage: (menu && menu.frage) || '', optionen: (menu && menu.optionen) || [] }];
+    if (fragen.length > 1) return _bauOptionsAssistent(box, fragen);
+    const menuEinfach = { frage: fragen[0].frage, optionen: fragen[0].optionen };
+    if (menuEinfach.frage) {
+        const f = document.createElement('div');
+        f.style.cssText = 'font-weight:600;margin-bottom:4px';
+        f.textContent = menuEinfach.frage;
+        box.appendChild(f);
+    }
+    menuEinfach.optionen.forEach(opt => {
+        const btn = document.createElement('button');
+        btn.className = 'option-button';
+        btn.textContent = `${opt.nummer}. ${opt.text}`;
+        btn.style.cssText =
+            'text-align:left;padding:8px 10px;border:1px solid #3a3a3a;border-radius:8px;' +
+            'background:#1e1e1e;color:inherit;cursor:pointer;font-size:0.85rem';
+        btn.addEventListener('click', () => {
+            // Option als Antwort senden (geht an den laufenden Hermes-Auftrag
+            // bzw. als normale Nachricht an den Agenten).
+            sendMessage(opt.text);
+        });
+        box.appendChild(btn);
+    });
+    return box;
+}
+
+/**
+ * A/B-Wahl bei erkannten Hermes-Aufgaben im normalen Chat(Wunsch des Betreibers
+ * 2026-09-07): Statt stiller Auto-Delegation wählen, ob die Aufgabe an
+ *  den Coding-Chat(A) oder als eigener paralleler Hermes-Thread hier(B)
+ *  geht. Wird nach finishReply wieder in die Blase eingehängt(die
+ *  Markdown-Uebernahme würde die Buttons sonst wegloeschen).
+ */
+function bauWahlUi(contentDiv, aufgabe) {
+    const zeile = document.createElement('div');
+    zeile.className = 'wahl-zeile';
+    zeile.style.cssText =
+        'display:flex;flex-wrap:wrap;gap:8px;margin-top:8px';
+    // A: An den Coding-Chat übergeben (conv_code delegiert immer direkt
+    //    an Hermes; Hermes baut seinen Kontext dort selbst auf).
+    const btnA = document.createElement('button');
+    btnA.className = 'wahl-knopf';
+    btnA.textContent = '⎇ An Coding-Chat übergeben';
+    btnA.style.cssText =
+        'flex:1;min-width:150px;padding:10px 12px;border:1px solid #4a7;' +
+        'border-radius:10px;background:#1f3a2a;color:#8f8;cursor:pointer;' +
+        'font-size:0.85rem;text-align:center';
+    btnA.addEventListener('click', () => {
+        btnA.disabled = true;
+        btnA.textContent = '… wechsle zum Coding-Chat';
+        if (typeof chatWechseln === 'function') chatWechseln('conv_code');
+        setTimeout(() => {
+            if (typeof sendMessage === 'function' && aufgabe) {
+                const nurNachricht = (aufgabe.split('\n\n[Kontext')[0] || aufgabe).trim();
+                sendMessage(nurNachricht);
+            }
+        }, 250);
+    });
+
+    // B: Als eigener paralleler Hermes-Thread hier starten(Daemon-Thread;
+    //    man kann parallel weiterfragen und eingreifen,/eingabe-Kommentare).
+    const btnB = document.createElement('button');
+    btnB.className = 'wahl-knopf';
+    btnB.textContent = '⚙  Hier parallel bearbeiten(Hermes-Thread)';
+    btnB.style.cssText =
+        'flex:1;min-width:170px;padding:10px 12px;border:1px solid #57a;' +
+        'border-radius:10px;background:#1f2a3a;color:#9cf;cursor:pointer;' +
+        'font-size:0.85rem;text-align:center';
+    btnB.addEventListener('click', async () => {
+        btnB.disabled = true;
+        btnB.textContent = '… Hermes-Thread startet';
+        try {
+            const res = await fetch(`${API_BASE}/api/hermes/aktivieren`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ aufgabe, kontext: '' }),
+            });
+            const dat = await res.json().catch(() => ({}));
+            if (res.ok && dat.auftrag_id) {
+                _laufenderAuftragKurz = dat.auftrag_id;
+                aktualisiereStatusAnzeige();
+                addMessage(
+                    '▶️ Hermes-Thread läuft im Hintergrund – parallel weiterfragen möglich. ' +
+                    'Um einzugreifen, einfach eine Nachricht schreiben.'
+                );
+            } else {
+                addMessage('⚠️ Hermes-Thread konnte nicht gestartet werden.');
+            }
+        } catch (_) {
+            addMessage('⚠️ Hermes-Thread konnte nicht gestartet werden.');
+        }
+    });
+
+    zeile.appendChild(btnA);
+    zeile.appendChild(btnB);
+    contentDiv.appendChild(zeile);
+    scrollToBottom(true);
+}
+
+/** Baut einen Korrektur-Button für fälschlich erkannte Hermes-Aufgaben.
+ *  Klick leitet die ursprüngliche Nutzer-Nachricht an den normalen LLM weiter
+ *  (die alte Hermes-Meldung bleibt sichtbar, um den Fehler zu belegen). */
+function baueKorrekturButton(fehlerFall) {
+    const btn = document.createElement('button');
+    btn.className = 'korrektur-button';
+    btn.textContent = fehlerFall
+        ? '↩️ An lokalen Agenten senden'
+        : '⚠️ Keine Hermes-Aufgabe – an LLM weitergeben';
+    btn.style.cssText =
+        'margin-top:8px;padding:8px 10px;border:1px solid #555;border-radius:8px;' +
+        'background:#2a2a2a;color:inherit;cursor:pointer;font-size:0.8rem';
+    btn.addEventListener('click', async () => {
+        // Ursprüngliche Nutzer-Nachricht = letzte 'user'-Nachricht im Verlauf.
+        let frag = '';
+        for (let i = state.messages.length - 1; i >= 0; i--) {
+            if (state.messages[i].role === 'user') { frag = state.messages[i].content; break; }
+        }
+        if (!frag) return;
+        btn.disabled = true;
+        btn.textContent = '… Hermes wird beendet, Hermes antwortet';
+        // 1) Laufenden Hermes-Auftrag abbrechen (tmux-Session + Buch-Status),
+        //    damit nicht im Hintergrund weitergearbeitet wird.
+        if (_laufenderAuftragKurz) {
+            try {
+                await fetch(`${API_BASE}/api/auftraege/${_laufenderAuftragKurz}/abbrechen`, { method: 'POST' });
+            } catch (_) { /* Abbruch-Fehlschlag ist nicht kritisch */ }
+            _laufenderAuftragKurz = null;
+            aktualisiereStatusAnzeige();
+        }
+        // 2) Aufgabe an den normalen LLM weiterleiten (force_agent=true:
+        //    NICHT durch den Hermes-Router — sonst erkennt er die Aufgabe
+        //    wieder als Hermes-Aufgabe und es geht erneut an den PC (Loop).
+        sendMessage(frag, false, false, true);
+        btn.textContent = '… wird vom Agenten beantwortet';
+    });
+    // Umlenk-Buttons IMMER nebeneinander (Flex-Reihe) — auch wenn kein
+    // Auftrag mehr "läuft" (der Agent-Button sendet die Frage einfach
+    // neu an den normalen LLM; der Handy-Button nur bei laufendem Job).
+    const zeile = document.createElement('div');
+    zeile.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px';
+    // Klare Labels (Nutzervorgabe): nebeneinander, Handy-Format ist breit.
+    btn.textContent = '↩️ An Agent zurückgeben';
+    btn.style.cssText =
+        'flex:1;min-width:130px;padding:8px 10px;border:1px solid #555;' +
+        'border-radius:8px;background:#2a2a2a;color:inherit;cursor:pointer;font-size:0.8rem;text-align:center';
+    zeile.appendChild(btn);
+    // "↪️ An lokalen Hermes übergeben" — IMMER sichtbar (nicht nur bei
+    // laufendem Auftrag): sendet die Frage explizit an den Handy-Hermes
+    // (ziel=handy → Backend startet Track C direkt, kein PC-Versuch).
+    const btnHandy = document.createElement('button');
+    btnHandy.className = 'korrektur-button';
+    btnHandy.textContent = '↪️ An lokalen Hermes übergeben';
+    btnHandy.style.cssText =
+        'flex:1;min-width:130px;padding:8px 10px;border:1px solid #4a7;' +
+        'border-radius:8px;background:#1f3a2a;color:#8f8;cursor:pointer;font-size:0.8rem;text-align:center';
+    btnHandy.addEventListener('click', async () => {
+        // Ursprüngliche Nutzer-Nachricht = letzte 'user'-Nachricht.
+        let frag = '';
+        for (let i = state.messages.length - 1; i >= 0; i--) {
+            if (state.messages[i].role === 'user') { frag = state.messages[i].content; break; }
+        }
+        if (!frag) return;
+        btnHandy.disabled = true;
+        btnHandy.textContent = '… wird an lokalen Hermes übergeben';
+        // Laufenden Auftrag abbrechen (falls vorhanden), dann lokal senden.
+        if (_laufenderAuftragKurz) {
+            try {
+                await fetch(`${API_BASE}/api/auftraege/${_laufenderAuftragKurz}/abbrechen`, { method: 'POST' });
+            } catch (_) {}
+            _laufenderAuftragKurz = null;
+            aktualisiereStatusAnzeige();
+        }
+        sendMessage(frag, false, false, false, 'handy');
+    });
+    zeile.appendChild(btnHandy);
+    return zeile;
+}
+
+/** Ziel-Etiketten für die „Wohin wurde delegiert?"-Pille (Passend zu den
+ *  ziel-Werten des Backends: pc / handy / buch). */
+const ZIEL_LABELS = {
+    pc: '→ Hermes (PC)',
+    handy: '→ Hermes (Handy)',
+    buch: '→ Hermes',
+};
+
+/** Kleine Ziel-Pille unter einer Delegations-Antwort: zeigt auf einen Blick,
+ *  wohin die Hermes-Aufgabe weitergeleitet wurde. `ziel` kommt aus dem
+ *  SSE-done-Event bzw. aus der ChatResponse (Fallback-Weg). */
+function addZielChip(contentDiv, ziel) {
+    if (!ziel || !ZIEL_LABELS[ziel]) return;
+    // Ziel merken (pc/handy/buch) → Status-Badge zeigt "Hermes (PC/Handy)".
+    _zielAktuell = ziel;
+    // Automatische Delegation an Hermes (pc/handy) → Hermes-Button aktivieren
+    // und den Zustand feuern (ohne die /aktivieren-API erneut zu starten):
+    // Der nochmalige Klick auf "Hermes" schaltet danach wieder AUS.
+    // Wunsch des Betreibers: im Übergabefall steht der Button auf an.
+    if ((ziel === 'pc' || ziel === 'handy') && typeof loopAktiv !== 'undefined' && !loopAktiv) {
+        _setzeLoopZustand(true);
+    }
+    const chip = document.createElement('div');
+    chip.className = 'ziel-chip';
+    chip.textContent = ZIEL_LABELS[ziel];
+    chip.style.cssText =
+        'display:inline-block;margin-top:8px;padding:3px 10px;' +
+        'border:1px solid #444;border-radius:999px;font-size:0.75rem;' +
+        'color:#bbb;background:#222';
+    contentDiv.appendChild(chip);
+    aktualisiereStatusAnzeige();
+}
+
+/** Zeigt eine bis dahin verborgene Blase samt Zeitstempel und Datumspille.
+ *
+ *  Live angelegte Blasen (Streaming) starten OHNE sichtbaren Inhalt: Sie
+ *  bleiben selbst verborgen, ihr Zeitstempel bleibt verborgen und die
+ *  Datumspille wird aufgeschoben — bis das erste echte Textzeichen da ist
+ *  (Wunsch des Betreibers 2026-09-25: „keine leeren Blasen, Zeitstempel und Symbol
+ *  erst mit dem ersten Textzeichen rendern"). Diese Funktion holt alles nach;
+ *  sie ist der EINZIGE Weg, eine solche Blase sichtbar zu machen.
+ */
+function zeigeBlaseMitText(div, contentDiv, text) {
+    if (!div) return;
+    // Aufgeschobene Datumspille jetzt einhängen — aber nur, wenn der
+    // Kalendertag seit dem Anlegen wirklich gewechselt hat.
+    const bannerIso = div.dataset.bannerIso;
+    if (bannerIso) {
+        delete div.dataset.bannerIso;
+        const tagKey = datumSchluessel(bannerIso);
+        if (tagKey !== _letzteBannerDatum) {
+            dom.messages.insertBefore(baueDatumBanner(bannerIso), div);
+            _letzteBannerDatum = tagKey;
+        }
+    }
+    div.hidden = false;
+    div.style.display = '';
+    const zeit = div.querySelector('[data-lazy-zeit="1"]');
+    if (zeit) {
+        zeit.hidden = false;
+        delete zeit.dataset.lazyZeit;
+    }
+    if (contentDiv && typeof text === 'string') contentDiv.textContent = text;
+}
+
+/** Trägt die Blase schon LESBAREN Text? (Befund der Betreiber 16.10.2026)
+ *
+ *  Ein führender Zeilenumbruch oder ein Markdown-Rest wie „**" rendert nichts
+ *  Sichtbares. Wird die Antwort-Blase dann gezeigt, steht eine sichtbare, LEERE
+ *  Blase im Verlauf („darüber erscheint eine leere Blase" — während darunter die
+ *  „Denke nach…"-Bubble den Arbeitsschritt zeigt). Deshalb wird die Blase nur
+ *  gezeigt, wenn hier `true` herauskommt; sonst bleibt es unsichtbar.
+ */
+function blaseHatLesbarenText(contentDiv) {
+    return (((contentDiv && contentDiv.textContent) || '').trim()).length > 0;
+}
+
+/** Legt eine Nachrichtenblase an und gibt ihren Inhaltsbereich zurück,
+ *  damit der Streaming-Weg sie nachträglich befüllen kann. */
+function addMessage(content, role, zeit, bildPfad, opts) {
+    const div = document.createElement('div');
+    div.className = `message ${role}`;
+    // Live-Blase ohne Inhalt (Streaming startet mit ''): Sie bleibt unsichtbar,
+    // ihr Zeitstempel ebenfalls, und die Datumspille wird aufgeschoben. Erst
+    // das erste echte Textzeichen macht sie sichtbar (zeigeBlaseMitText) —
+    // sonst standen Zeitstempel und Symbol VOR dem Text im Verlauf.
+    const _ohneInhalt = (content === '' || content === undefined || content === null);
+    const _liveLeer = _ohneInhalt && zeit === undefined && role === 'assistant';
+    // Roh-Text der Blase fürs Kontextmenü (Kopieren/Bearbeiten): bei
+    // User-Nachrichten exakt wie getippt, bei Assistant der Markdown-Rohtext.
+    // Gestreamte Blasen haben hier zunächst '' — dort greift der Fallback
+    // auf den sichtbaren Text (siehe kontextTextAusBlase).
+    div.dataset.klarText = content;
+    // Innere Spalte: Blaseninhalt über dem Zeitstempel-Label. Ohne sie lägen
+    // Content und Uhrzeit im flex-row nebeneinander statt untereinander.
+    // Klein, deshalb inline statt style.css (die Konvention bei Mini-Stilen).
+    // min-width:0 ist Pflicht (Befund 13.10.2026): Als Flex-Kind der Zeile
+    // hätte die Spalte sonst min-width:auto und könnte nicht schmaler werden
+    // als ihr breitester Inhalt. Eine Tabelle mit langen Spaltenköpfen (auch
+    // halb eingelaufen) machte sie breiter als den Chat und schob den
+    // Vorlese-Knopf über den rechten Rand – am Handy half nur Neustart.
+    const inner = document.createElement('div');
+    inner.style.cssText = 'display:flex;flex-direction:column;min-width:0';
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'message-content';
+    if (role === 'assistant') {
+        // Ist die Antwort ein erkanntes Auswahl-Menü, render klickbare Buttons
+        // statt des rohen Textes (Smart-Output). Sonst normale Markdown-Blase.
+        const options = parseOptionsMenue(content);
+        if (options) {
+            contentDiv.appendChild(bauOptionsUi(options));
+        } else {
+            contentDiv.innerHTML = parseMarkdown(content);
+        }
+        // Falsch erkannte Hermes-Aufgabe korrigierbar machen: Zeigt die
+        // Meldung "Hermes-Aufgabe erkannt"/"Coding-Auftrag erkannt", gibt es
+        // einen Button, der die Aufgabe stattdessen an den normalen LLM
+        // weiterleitet (kein Umbau der alten Meldung — sie bleibt als Beleg).
+        // NUR bei LIVE-Nachrichten (zeit === undefined): beim Laden der
+        // History (zeit gesetzt) erscheint der Button nicht — sonst sähe es
+        // nach F5 so aus, als liefe gerade ein Auftrag (Button auf alten
+        // Blasen), obwohl nichts mehr läuft.
+        if ((zeit === undefined
+            && (/Hermes-Aufgabe erkannt|Coding-Auftrag erkannt/.test(content)
+                || /Fehler im lokalen Hermes-Job|Abbruch-Fehlschlag|⚠️ Fehler/.test(content)
+                || /wurde an den PC-Hermes übergeben/.test(content)
+                || /arbeitet länger als das Timeout/.test(content)
+                || /arbeitet gerade an der Aufgabe/.test(content)))
+            // "Übergeben"-Blasen im VERLAUF: Button auch nach Reload zeigen,
+            // wenn wirklich noch ein Auftrag läuft (der PC könnte arbeiten;
+            // man will umlenken können).
+            || (/wurde an den PC-Hermes übergeben/.test(content)
+                && _laufenderAuftragKurz)) {
+            contentDiv.appendChild(baueKorrekturButton(
+                /Fehler im lokalen Hermes-Job|Abbruch-Fehlschlag/.test(content)
+            ));
+                }
+    } else {
+        contentDiv.innerHTML = `<p>${escapeHtml(content)}</p>`;
+    }
+    inner.appendChild(contentDiv);
+    // WhatsApp-artige Datumstrennung: Immer wenn sich der Kalendertag ändert,
+    // kommt vor der Blase eine dezente zentrierte Pille (Heute/Gestern/Datum).
+    // Live versendete Blasen (zeit === undefined) hängen am aktuellen Tag.
+    const bannerIso = (zeit === undefined) ? new Date().toISOString() : (zeit || null);
+    if (bannerIso) {
+        const tagKey = datumSchluessel(bannerIso);
+        if (tagKey !== _letzteBannerDatum) {
+            if (_liveLeer) {
+                // Aufschieben: Eine Datumspille allein über einer noch leeren
+                // Blase wäre selbst ein sichtbarer leerer Eintrag.
+                div.dataset.bannerIso = bannerIso;
+            } else {
+                dom.messages.appendChild(baueDatumBanner(bannerIso));
+                _letzteBannerDatum = tagKey;
+            }
+        }
+    }
+    // Zeitstempel unter dem Text, dezent, NUR die Uhrzeit mit Sekunden – das
+    // Datum steht in der Pille darüber. Sekunden sind wichtig, wenn Hermes
+    // viele Nachrichten kurz hintereinander schickt. „undefined" (live
+    // versendet) → jetzt; ein explizit leeres (null/'') lässt die Blase ohne
+    // Label – für alte Verlaufs-Nachrichten ohne bekannte Uhrzeit.
+    const label = (zeit === undefined)
+        ? formatUhrzeit(new Date().toISOString())
+        : (zeit ? formatUhrzeit(zeit) : null);
+    if (label) {
+        const zeitDiv = document.createElement('div');
+        zeitDiv.style.cssText = 'font-size:0.7rem;color:#9a9a9a;text-align:right;margin-top:4px;padding:0 4px';
+        zeitDiv.textContent = label;
+        if (_liveLeer) {
+            // Zeitstempel erst mit dem ersten Textzeichen zeigen.
+            zeitDiv.hidden = true;
+            zeitDiv.dataset.lazyZeit = '1';
+        }
+        inner.appendChild(zeitDiv);
+    }
+    // WhatsApp-artiger '↩ Antworten'-Knopf: erlaubt, auf genau diese
+    // Nachricht (Text ODER Bild) konkret zu antworten. Nur bei realem Inhalt.
+    const zitatText = (content || '').trim();
+    if (zitatText) {
+        const antBtn = document.createElement('button');
+        antBtn.type = 'button';
+        antBtn.textContent = '↩ Antworten';
+        antBtn.title = 'Auf diese Nachricht antworten (Zitat-Kontext)';
+        antBtn.style.cssText =
+            'background:none;border:none;color:#7aaa;font-size:0.7rem;cursor:pointer;' +
+            'padding:2px 4px;text-align:right;align-self:flex-end;border-radius:6px;opacity:0.75';
+        antBtn.addEventListener('mouseenter', () => { antBtn.style.color = '#8cf'; antBtn.style.opacity = '1'; });
+        antBtn.addEventListener('mouseleave', () => { antBtn.style.color = '#7aaa'; antBtn.style.opacity = '0.75'; });
+        antBtn.addEventListener('click', () => {
+            const zeitRef = (zeit === undefined) ? new Date().toISOString() : (zeit || '');
+            setzeAntwortAuf(role, zitatText, zeitRef, bildPfad);
+        });
+        inner.appendChild(antBtn);
+    }
+    div.appendChild(inner);
+    // Vorlese-Knopf auch fuer fertige/geladene Assistant-Nachrichten (History-
+    // Replay, Hermes-Replies etc.): Nur bei vorhandenem Text. Der Live-Stream
+    // steigt UEBER eine leere Blase ein (content===''), deren Vorleser separat
+    // in der Stream-Logik an den Text gekoppelt wird (kein Doppel-Button).
+    if (role === 'assistant' && content) {
+        addSpeakControls(div, () => content, () => true);
+    }
+    if (_liveLeer) div.hidden = true;   // sichtbar erst mit echtem Text
+    dom.messages.appendChild(div);
+    // Stiller Modus (opts.silent): kein Auto-Scroll, kein state.messages-Push
+    // — für den schnellen Chat-Wechsel, bei dem der Verlauf in einem Rutsch
+    // (Fragment) gebaut und danach einmal nach unten gescrollt wird. Beim
+    // normalen Streaming (Standard) bleibt das alte Verhalten erhalten.
+    if (!opts || !opts.silent) {
+        scrollToBottom(true);   // eigene Aktion – hier wird immer nachgezogen
+        state.messages.push({ role, content });
+    }
+    return contentDiv;
+}
+
+/** Wem schreibt der Nutzer gerade? — sichtbares Badge im Header.
+ *  - Hermes läuft (_laufenderAuftragKurz) → 🔴 Hermes (direkt)
+ *  - normale Antwort/Stream läuft → 🟡 Agent (antwortet)
+ *  - sonst → 🟢 Agent (LLM + Gedächtnis)
+ *  Wird bei jedem relevanten Zustandswechsel aufgerufen. */
+function setzeTutZeile(text) {
+    // Seit 2026-09-06 (Auftrag der Betreiber): Der Arbeitsschritt-Text (z. B.
+    // "🔍 Agent liest deine Nachricht…" / "⚙️ Hermes bearbeitet deine Aufgabe…")
+    // wandert in die untere animierte "Denke nach…"-Bubble (#loading) statt
+    // unscheinbar oben im Header zu stehen. Die alte Header-Zeile
+    // (#agent-tut-zeile) wird ausgeblendet, damit nichts doppelt erscheint.
+    // Seit 2026-09-11: Statt der generischen "Hermes bearbeitet deine Aufgabe…"
+    // zeigt die Bubble den LETZTEN ECHTEN Hermes-Gedanken (was er wirklich tut),
+    // sobald einer eingetroffen ist (Wunsch des Betreibers).
+    const el = document.getElementById('agent-tut-zeile');
+    if (el) { el.style.display = 'none'; el.textContent = ''; }
+    let anzeige = text;
+    if (text && (text.indexOf('Hermes bearbeitet') !== -1 || text.indexOf('Hermes (') !== -1)
+        && _letzterHermesGedanke) {
+        anzeige = '🧠 ' + _letzterHermesGedanke;
+    }
+    const bubbleText = document.querySelector('#loading .loading-text');
+    if (bubbleText) bubbleText.textContent = anzeige ? anzeige : 'Denke nach...';
+}
+
+// Letzter echter Hermes-Gedanke (für die #loading-Bubble als "was macht Hermes").
+let _letzterHermesGedanke = '';
+let _gedankenGesetzt = null;   // Dedup-Set (auftrag|text), siehe fuegeGedanke
+
+function aktualisiereStatusAnzeige() {
+    const badge = document.getElementById('chat-modus-badge');
+    if (!badge) return;
+    if (_laufenderAuftragKurz) {
+        // Konkret zeigen, WER arbeitet (PC-Hermes vs. Handy-Hermes).
+        const ziel = _zielAktuell || '';
+        badge.textContent = ziel === 'pc'
+            ? '🔴 Hermes (PC) arbeitet'
+            : ziel === 'handy'
+                ? '🔴 Hermes (Handy) arbeitet'
+                : '🔴 Hermes arbeitet';
+        badge.style.color = '#f88';
+        badge.style.borderColor = '#f55';
+        badge.style.background = '#2a1515';
+    } else if (_hermesArbeitetAussen) {
+        // Hermes-Auftrag laeuft, aber nicht ueber dieses Frontend gestartet
+        // (z. B. aus Termux/der Session selbst). Header-Badge trotzdem rot.
+        badge.textContent = '🔴 Hermes arbeitet';
+        badge.style.color = '#f88';
+        badge.style.borderColor = '#f55';
+        badge.style.background = '#2a1515';
+    } else if (typeof hermesStreamBereit !== 'undefined' && hermesStreamBereit) {
+        // Stream von DIESER Hermes-Session ist bereit/laueft (Wunsch:
+        // "Hermes denkt (Stream bereit)") - sichtbar, bevor/waerend Text
+        // gestreamt wird.
+        badge.textContent = '🔴 Hermes denkt (Stream bereit)';
+        badge.style.color = '#fff';
+        badge.style.borderColor = '#4a7';
+        badge.style.background = '#1f3a2a';
+    } else if (state.abbruch) {
+        // Loop-Modus oder laufender Hermes-Auftrag -> "Hermes antwortet";
+        // sonst normaler Chat -> "Agent antwortet". (Wunsch des Betreibers:
+        // bei loop aus wieder Agent, ausser automatisch an Hermes delegiert.)
+        badge.textContent = (typeof loopAktiv !== 'undefined' && loopAktiv)
+            ? '🟡 Hermes antwortet'
+            : '🟡 Agent antwortet';
+        badge.style.color = '#fc6';
+        badge.style.borderColor = '#c90';
+        badge.style.background = '#2a2215';
+    } else {
+        // Ruhezustand: kein dauerhaftes "🟢 Agent"-Badge nötig — der
+        // Status ist nur bei Aktivität interessant (Hermes/Agent arbeitet).
+        badge.textContent = '';
+        badge.style.color = '';
+        badge.style.borderColor = '';
+        badge.style.background = '';
+        badge.style.fontSize = '0';
+        badge.style.padding = '0';
+    }
+}
+
+/** Schaltet die animierte "Denke nach..."-Bubble unten im Chat (#loading).
+ *  WhatsApp-"Tippt gerade"-Stil (Stand 2026-09-06, Auftrag der Betreiber): Waehrend
+ *  eine Antwort verarbeitet wird, erscheint am unteren Rand des Chats eine
+ *  animierte Bubble (drei Punkte + Text), sobald das erste Textstueck da ist
+ *  bzw. die Antwort fertig ist, verschwindet sie wieder. Gilt fuer Haupt- und
+ *  Coding-/Hermes-Chat (conv_code) gleichermassen. */
+function setLoading(loading) {
+    // #loading ist das am Ende von chat-container liegende Element: sichtbar
+    // machen beim Start, verstecken sobald etwas angekommen/fertig ist.
+    if (dom.loading) {
+        dom.loading.classList.toggle('hidden', !loading);
+        if (loading) scrollToBottom(true);
+    }
+    // Die Eingabe bleibt absichtlich offen: Waehrend der Agent schreibt, soll
+    // man schon die naechste Nachricht tippen und anhaengen koennen.
+    updateSendButton();
+    aktualisiereStatusAnzeige();
+}
+
+// =========================================
+// Health-Check: Drei-Phasen-Logik
+// =========================================
+// Phase 1 (checkAndAutoClose) laeuft EINMAL beim Seitenstart:
+//   Wenn der Server nach 5s nicht erreichbar ist, wird der Tab geschlossen.
+//   Das verhindert leere Fenster, wenn der Server noch nicht da ist.
+//
+// Phase 2 (checkHealth) laeuft alle 30s per Intervall:
+//   Zeigt Online/Offline an und laedt die Seite NICHT automatisch neu.
+//   Frueher wurde bei Server-Rueckkehr window.location.reload() gerufen,
+//   was bei schnellen Neustarts (--reload) eine Reload-Schleife ausloeste.
+//
+// Phase 3: Nach 5s ohne Server-Kontakt wird der Tab geschlossen.
+//   Der Timer wird abgebrochen, sobald der Server wieder antwortet.
+
+// Merkt sich, ob der Server gerade offline war. Sobald er nach einem
+// Neustart wieder da ist, wird die UI aktualisiert, statt die Seite
+// neu zu laden – das verhindert Reload-Schleifen und neue Tabs.
+let serverWarOffline = false;
+let neuladenInArbeit = false;
+
+const SYMBOL_SENDEN = '<svg viewBox="0 0 24 24" width="24" height="24">'
+    + '<path fill="currentColor" d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>';
+
+const SYMBOL_ABBRECHEN = '<svg viewBox="0 0 24 24" width="24" height="24">'
+    + '<path fill="currentColor" d="M7 7h10v10H7z"/></svg>';
+
+// ── Roboter-Symbol im Kopf = Serverzustand (20.10.2026, Wunsch des Betreibers:
+// "Server läuft ins Symbol integrieren") ─────────────────────────────────────
+// Drei Zustaende wie serverZustandPunkt(): 'ok' (Roboter, Server laeuft, Modell
+// bereit), 'kein-modell' (Roboter mit orangem Ton, Modell nicht geladen), 'weg'
+// (schlafend + grau, Server nicht erreichbar). Zwei Quellen schreiben ins
+// Symbol: der 5-s-Takt auf /api/health (Server-Zustand, laeuft auch bei
+// geschlossenem Checks-Fenster) und setOnline() (Chat-Health/Senden). Damit sie
+// sich nicht widersprechen, merkt sich der Takt den letzten Detailzustand.
+let letzterServerDetail = 'ok';
+
+/** REIN (ohne DOM): Aussehen des Roboter-Symbols je Zustand. */
+function agentGesichtFuer(zustand) {
+    if (zustand === 'weg') {
+        return { zeichen: '😴', klasse: 'agent-face-weg', titel: 'Server nicht erreichbar' };
+    }
+    if (zustand === 'kein-modell') {
+        return { zeichen: '🤖', klasse: 'agent-face-kein-modell',
+            titel: 'Server läuft · Modell nicht geladen' };
+    }
+    return { zeichen: '🤖', klasse: 'agent-face-ok', titel: 'Server läuft · Modell bereit' };
+}
+
+/** REIN: Zustand fuer setOnline(online) — online zeigt 'kein-modell', falls das
+ *  der letzte Detailzustand aus dem Health-Takt war, sonst 'ok'. */
+function agentZustandFuerOnline(online, letzterDetail) {
+    if (!online) return 'weg';
+    return letzterDetail === 'kein-modell' ? 'kein-modell' : 'ok';
+}
+
+/** Zeichnet das Roboter-Symbol (kleine DOM-Funktion, nutzt agentGesichtFuer). */
+function zeichneAgentGesicht(zustand) {
+    const face = document.getElementById('agent-face');
+    if (!face) return;
+    const g = agentGesichtFuer(zustand);
+    face.textContent = g.zeichen;
+    face.className = g.klasse;
+    face.style.filter = '';
+    face.title = g.titel;
+}
+
+function setOnline(online) {
+    state.isOnline = online;
+    // Status-Punkt/-Text sind entfernt (Agent-Gesicht zeigt den Status).
+    // Guards, damit der Health-Check nicht an null crasht.
+    if (dom.statusIndicator) {
+        dom.statusIndicator.className = `status ${online ? 'online' : 'offline'}`;
+        dom.statusText.textContent = online ? 'Online' : 'Offline';
+    }
+    // Agent-Gesicht (Roboter-Symbol): Serverzustand, siehe agentGesichtFuer().
+    zeichneAgentGesicht(agentZustandFuerOnline(online, letzterServerDetail));
+}
+
+/**
+ * Der Sende-Knopf hat drei Gesichter, je nach Lage:
+ *
+ *   Antwort laeuft, Eingabe leer   → Stopp: bricht die Antwort ab
+ *   Antwort laeuft, Eingabe gefuellt → Senden: haengt an die Warteschlange an
+ *   nichts laeuft                  → Senden: schickt sofort ab
+ *
+ * Ein eigener dritter Knopf waere auf dem Handy nur verlorene Daumenflaeche.
+ */
+function updateSendButton() {
+    // Während der Aufnahme bleibt der Knopf bedienbar: Ein Druck darauf
+    // beendet die Aufnahme und schickt das Diktat gleich ab. Deshalb zeigt er
+    // IMMER das Senden-Symbol — nie den Stopp-Würfel. Sonst war nicht
+    // erkennbar, dass ein Druck hier nur die Aufnahme beendet und KEINE
+    // laufende Hermes-Aufgabe abbricht (Wunsch/Grund 2026-09-15: Zwischen-
+    // nachricht per Sprache war während der Arbeit so nicht absendbar).
+    if (state.isRecording) {
+        dom.sendBtn.innerHTML = SYMBOL_SENDEN;
+        dom.sendBtn.classList.remove('stopping');
+        dom.sendBtn.title = 'Aufnahme beenden & senden';
+        dom.sendBtn.disabled = false;
+        return;
+    }
+    const hatText = !!dom.input.value.trim();
+        // Stopp-Modus auch, wenn nur ein Hermes-Auftrag läuft (_laufenderAuftragKurz),
+        // auch ohne aktiven Stream (state.abbruch) — sonst verschwindet der
+        // Abbrechen-Knopf, während Hermes noch arbeitet.
+        const stoppModus = (!!state.abbruch || !!_laufenderAuftragKurz) && !hatText;
+
+    dom.sendBtn.innerHTML = stoppModus ? SYMBOL_ABBRECHEN : SYMBOL_SENDEN;
+    dom.sendBtn.classList.toggle('stopping', stoppModus);
+    dom.sendBtn.title = stoppModus
+        ? 'Antwort abbrechen'
+        : (state.abbruch ? 'Nachricht anhängen – wird danach gesendet' : 'Nachricht senden (Strg+Enter)');
+    dom.sendBtn.disabled = !hatText && !stoppModus;
+}
+
+function setWebSearch(modus) {
+    if (!WEB_MODI.includes(modus)) modus = 'off';
+    state.webSearch = modus;
+    localStorage.setItem('web_search', modus);
+
+    const texte = WEB_TEXTE[modus];
+    dom.webBtn.classList.toggle('active', modus !== 'off');
+    dom.webBtn.classList.toggle('auto', modus === 'auto');
+    dom.webBtn.setAttribute('aria-pressed', modus !== 'off' ? 'true' : 'false');
+    dom.webBtn.title = texte.titel;
+
+    const beschriftung = dom.webBtn.querySelector('span');
+    if (beschriftung) beschriftung.textContent = texte.label;
+}
+
+/** Reihum: aus → bei jeder Nachricht → Modell entscheidet → aus */
+function naechsterWebModus() {
+    const i = WEB_MODI.indexOf(state.webSearch);
+    return WEB_MODI[(i + 1) % WEB_MODI.length];
+}
+
+/** Hängt die Fundstellen unter eine Antwort. */
+function addSources(contentDiv, quellen) {
+    if (!quellen || !quellen.length) return;
+    const box = document.createElement('div');
+    box.className = 'sources';
+
+    const titel = document.createElement('span');
+    titel.className = 'sources-title';
+    titel.textContent = quellen.length === 1 ? 'Quelle' : 'Quellen';
+    box.appendChild(titel);
+
+    quellen.forEach((q, i) => {
+        const a = document.createElement('a');
+        a.href = q.url;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = `${i + 1}. ${q.title}`;
+        box.appendChild(a);
+    });
+    contentDiv.appendChild(box);
+}
+
+/** Fundstellen zusammenführen, doppelte Adressen fliegen raus. */
+function mergeQuellen(...listen) {
+    const gesehen = new Set();
+    const ergebnis = [];
+    for (const liste of listen) {
+        for (const q of liste || []) {
+            if (q && q.url && !gesehen.has(q.url)) {
+                gesehen.add(q.url);
+                ergebnis.push(q);
+            }
+        }
+    }
+    return ergebnis;
+}
+
+// ── Sichtbarer Zustand der Spracheingabe (Roadmap D3) ───────────────────────
+// „Mikrofon offen / hört zu / denkt nach / spricht" — man muss sehen, wann man
+// sprechen kann. Vorher stand der Zustand NUR im Tooltip des Mikrofon-Knopfs;
+// auf dem Handy gibt es keinen Tooltip, er war also unsichtbar.
+const MIC_STATUS = {
+    '':             { klasse: '',             text: '' },
+    'recording':    { klasse: 'recording',    text: 'Mikrofon offen' },
+    'hoert_zu':     { klasse: 'recording',    text: 'hört zu' },
+    'transcribing': { klasse: 'transcribing', text: 'denkt nach' },
+    'polishing':    { klasse: 'polishing',    text: 'denkt nach' },
+    'spricht':      { klasse: 'spricht',      text: 'spricht' },
+};
+
+function setMicStatus(status) {
+    const eintrag = MIC_STATUS[status] || MIC_STATUS[''];
+    state.micStatus = MIC_STATUS[status] ? status : '';
+    dom.micBtn.classList.remove('recording', 'transcribing', 'polishing', 'spricht');
+    if (eintrag.klasse) {
+        dom.micBtn.classList.add(eintrag.klasse);
+    }
+    const titles = {
+        '': 'Spracheingabe',
+        'recording': 'Mikrofon offen – klicken zum Stoppen',
+        'hoert_zu': 'hört zu – klicken zum Stoppen',
+        'transcribing': 'denkt nach …',
+        'polishing': 'denkt nach …',
+        'spricht': 'spricht (Browser-Stimme)',
+    };
+    dom.micBtn.title = titles[state.micStatus] || 'Spracheingabe';
+    // Dieselbe Beschriftung für Screenreader – der Knopf trägt nur ein Symbol.
+    dom.micBtn.setAttribute('aria-label', dom.micBtn.title);
+    // Sichtbare Zustandszeile über der Eingabe. Leerer Zustand = unsichtbar.
+    if (dom.micStatus) {
+        dom.micStatus.textContent = eintrag.text;
+        dom.micStatus.hidden = !eintrag.text;
+    }
+}
+
+// =========================================
+// Datei-Upload
+// =========================================
+
+/** Maximale Anzahl gleichzeitig ausgewählter Dateien */
+const MAX_DATEIEN = 5;
+
+/**
+ * Büroklammer-Klick: Dateiauswahl öffnen.
+ * Ist bereits die Maximalzahl erreicht, wird stattdessen der Nutzer
+ * darauf hingewiesen – sonst stapeln sich die Dateien unsichtbar.
+ */
+dom.uploadBtn.addEventListener('click', () => {
+    if (state.pendingFiles.length >= MAX_DATEIEN) {
+        // Kurze Rückmeldung ohne Browser-Dialog. Der Hinweis verschwindet
+        // nach dem nächsten Klick von selbst.
+        const rest = dom.uploadBtn.querySelector('span');
+        if (!rest) {
+            const badge = document.createElement('span');
+            badge.textContent = `Max ${MAX_DATEIEN}`;
+            badge.style.cssText = 'position:absolute;top:-6px;right:-6px;font-size:0.6rem;background:var(--error);color:#fff;border-radius:8px;padding:0 5px;line-height:1.4';
+            dom.uploadBtn.style.position = 'relative';
+            dom.uploadBtn.appendChild(badge);
+            setTimeout(() => badge.remove(), 2000);
+        }
+        return;
+    }
+    dom.fileInput.click();
+});
+
+/**
+ * Datei(en) ausgewählt → hochladen zum Backend.
+ */
+dom.fileInput.addEventListener('change', async () => {
+    const files = dom.fileInput.files;
+    if (!files || files.length === 0) return;
+
+    // Prüfen, wie viele noch hinzukommen dürfen
+    const platz = MAX_DATEIEN - state.pendingFiles.length;
+    const auswahl = Array.from(files).slice(0, platz);
+
+    for (const file of auswahl) {
+        // Validierung schon clientseitig
+        const isImage = file.type.startsWith('image/');
+        const isPdf = file.type === 'application/pdf';
+        if (!isImage && !isPdf) {
+            console.warn('Nicht unterstützter Dateityp:', file.type);
+            continue;
+        }
+        if (file.size > 20 * 1024 * 1024) {
+            console.warn('Datei zu groß (>20 MB):', file.name);
+            continue;
+        }
+
+        // Hochladen
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const res = await fetch(`${API_BASE}/api/upload`, {
+                method: 'POST',
+                body: formData,
+            });
+
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                console.warn('Upload fehlgeschlagen:', err.detail || res.status);
+                continue;
+            }
+
+            const data = await res.json();
+
+            // Für PDFs haben wir den extrahierten Text bereits
+            state.pendingFiles.push({
+                id: data.id,
+                filename: data.filename,
+                type: data.type,
+                url: data.url,
+                mime: data.mime,
+                data_url: data.data_url,  // base64 image für Vision-API
+                text: data.konvertiert,   // extrahierter PDF-Text
+                file: file,               // Referenz für lokale Vorschau
+            });
+
+            _fuegeVorschauHinzu(data, file);
+            // Bild angehängt, aber das Modell kann keine Vision?
+            _warneFallsModellKeinBild();
+        } catch (err) {
+            console.warn('Netzwerkfehler beim Upload:', err);
+        }
+    }
+
+    // Input zurücksetzen, damit dieselbe Datei erneut gewählt werden kann
+    dom.fileInput.value = '';
+    _aktualisiereUploadKnopf();
+});
+
+/**
+ * Vorschau-Element für eine hochgeladene Datei hinzufügen.
+ */
+function _fuegeVorschauHinzu(data, file) {
+    dom.filePreview.classList.remove('hidden');
+
+    const item = document.createElement('div');
+    item.className = 'file-preview-item';
+    item.dataset.fileId = data.id;
+
+    if (data.type === 'image') {
+        const img = document.createElement('img');
+        img.src = URL.createObjectURL(file);
+        img.alt = data.filename;
+        img.loading = 'lazy';
+        item.appendChild(img);
+    } else {
+        const icon = document.createElement('span');
+        icon.className = 'pdf-icon';
+        icon.textContent = '📄';
+        item.appendChild(icon);
+    }
+
+    const name = document.createElement('span');
+    name.className = 'file-name';
+    name.textContent = data.filename;
+    name.title = data.filename;
+    item.appendChild(name);
+
+    const remove = document.createElement('button');
+    remove.className = 'file-remove';
+    remove.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>';
+    remove.title = 'Entfernen';
+    remove.addEventListener('click', () => _entferneDatei(data.id));
+    item.appendChild(remove);
+
+    dom.filePreviewList.appendChild(item);
+}
+
+/**
+ * Eine Datei aus der Vorschau und der pending-Liste entfernen.
+ */
+function _entferneDatei(fileId) {
+    state.pendingFiles = state.pendingFiles.filter(f => f.id !== fileId);
+    const item = dom.filePreviewList.querySelector(`[data-file-id="${fileId}"]`);
+    if (item) item.remove();
+    if (state.pendingFiles.length === 0) {
+        dom.filePreview.classList.add('hidden');
+    }
+    _aktualisiereUploadKnopf();
+
+    // Datei auf dem Server löschen (fehlertolerant)
+    fetch(`${API_BASE}/api/uploads/${fileId}`, { method: 'DELETE' })
+        .catch(() => {});
+}
+
+/**
+ * Upload-Knopf-Styling aktualisieren.
+ */
+function _aktualisiereUploadKnopf() {
+    dom.uploadBtn.classList.toggle('has-files', state.pendingFiles.length > 0);
+}
+
+// =========================================
+// Vision-Prüfung: Kann das Modell Bilder?
+// =========================================
+// Der häufigste Grund, warum „Bilder nicht gelesen werden“, ist kein
+// Upload-Fehler, sondern das Modell: DeepSeek V4 Flash (Standard) hat
+// keine Vision-Modalität. Der Katalog kennt das Feld `bilder` – die
+// Oberfläche muss es nur vor dem Senden abfragen.
+
+/** Kann das aktuell gewählte Modell Bilder verarbeiten?
+ *  true/false aus dem Katalog; null, wenn unbekannt (Katalog nicht geladen). */
+function modellKannBilder() {
+    if (!state.katalog || !state.model) return null;
+    const m = state.katalog.find(x => x.id === state.model);
+    if (!m) return null;
+    return Boolean(m.bilder || m.dateien);
+}
+
+// Verhindert, dass dieselbe Warnung bei jedem Senden erneut erscheint.
+// Wird zurückgesetzt, sobald keine Dateien mehr anhängen.
+let visionHinweisGezeigt = false;
+
+/** Warnt im Chat, wenn Bilder angehängt sind, das Modell aber keine
+ *  verarbeiten kann. Tut nichts, wenn das Modell Vision kann oder die
+ *  Fähigkeit unbekannt ist (dann entscheidet der Server-Fehlertext). */
+function _warneFallsModellKeinBild() {
+    const kann = modellKannBilder();
+    if (kann === null || kann || visionHinweisGezeigt) return;
+    visionHinweisGezeigt = true;
+    addMessage(
+        `⚠️ **${kurzName(state.model)} kann keine Bilder verarbeiten**\n\n`
+        + `Du hast ein Bild angehängt, aber das gewählte Modell unterstützt `
+        + `keine Bild-Eingabe – es wird das Bild nicht sehen. Wechsle in der `
+        + `Modellauswahl zu einem Vision-Modell (Filter „Bilder/Dateien“), `
+        + `z. B. \`openai/gpt-5-nano\` oder \`anthropic/claude-sonnet-5\`.`,
+        'assistant'
+    );
+}
+
+/**
+ * Zeigt die angehängten Dateien in einer Chat-Nachricht an.
+ * Ruft man nach addMessage() auf, um das contentDiv zu befüllen.
+ */
+function _zeigeDateienInNachricht(contentDiv, files) {
+    if (!files || files.length === 0) return;
+
+    files.forEach(f => {
+        if (f.type === 'image' && f.data_url) {
+            // Bild direkt anzeigen (Base64 data URL)
+            const img = document.createElement('img');
+            img.src = f.data_url;
+            img.alt = f.filename;
+            img.loading = 'lazy';
+            img.title = f.filename;
+            contentDiv.appendChild(img);
+        } else if (f.type === 'image' && f.url) {
+            // Bild vom Server laden
+            const img = document.createElement('img');
+            img.src = `${API_BASE}${f.url}`;
+            img.alt = f.filename;
+            img.loading = 'lazy';
+            img.title = f.filename;
+            contentDiv.appendChild(img);
+        } else {
+            // PDF-Icon anzeigen
+            const fileDiv = document.createElement('div');
+            fileDiv.className = 'message-file';
+            fileDiv.innerHTML = `<span class="file-icon">📄</span><span class="file-meta">${escapeHtml(f.filename)}</span>`;
+            contentDiv.appendChild(fileDiv);
+        }
+    });
+}
+
+/**
+ * Vorschau nach erfolgreichem Senden leeren.
+ */
+function _raeumeDateiVorschau() {
+    state.pendingFiles = [];
+    dom.filePreviewList.innerHTML = '';
+    dom.filePreview.classList.add('hidden');
+    _aktualisiereUploadKnopf();
+}
+
+// =========================================
+// API Calls
+// =========================================
+
+async function checkHealth() {
+    try {
+        const res = await fetch(`${API_BASE}/api/health`);
+        if (res.ok) {
+            // Server erreichbar – Auto-Close-Timer ggf. abbrechen
+            if (autoCloseTimer) {
+                clearTimeout(autoCloseTimer);
+                autoCloseTimer = null;
+            }
+            if (serverWarOffline) {
+                serverWarOffline = false;
+                // Server war weg und ist jetzt wieder da → Status aktualisieren,
+                // aber NICHT die Seite neu laden. Das verhindert Reload-Schleifen
+                // bei schnellen Server-Neustarts (--reload) und öffnet keine neuen Tabs.
+            }
+            const data = await res.json();
+            setOnline(true);
+            if (data.memory_count !== undefined) {
+                updateFooterNote(data.memory_count);
+            }
+            return data;
+        }
+    } catch (err) {
+        console.warn('Health check failed:', err);
+    }
+    serverWarOffline = true;
+    setOnline(false);
+
+    // Auto-Close: Nach 5 Sekunden ohne Server-Verbindung Tab schließen.
+    // Läuft der Timer bereits (vorheriger Fehlversuch), tickt er weiter –
+    // kein neuer Timer, damit sich nicht mehrere überlagern.
+    if (!autoCloseTimer) {
+        autoCloseTimer = setTimeout(() => {
+            autoCloseTimer = null;
+            // Vor dem Schließen noch einmal prüfen – Server könnte
+            // inzwischen wieder da sein.
+            fetch(`${API_BASE}/api/health`)
+                .then(res => {
+                    if (res.ok) {
+                        // Server doch erreichbar – Tab offen lassen
+                        setOnline(true);
+                        serverWarOffline = false;
+                    } else {
+                        _tryCloseTab();
+                    }
+                })
+                .catch(() => {
+                    _tryCloseTab(); // Server immer noch weg
+                });
+        }, 5000);
+    }
+    return null;
+}
+
+/**
+ * Versucht den Tab zu schließen. window.close() funktioniert nur bei
+ * JS-geöffneten Tabs. Bei normalen Tabs zeigt es stattdessen eine
+ * Vollbild-Warnung mit self-destruct nach 30s.
+ */
+function _tryCloseTab() {
+    try {
+        window.close();
+        // Wenn window.close() erfolgreich war, landen wir nie hier
+    } catch (_) {}
+    // window.close() hat nicht funktioniert → Vollbild-Warnung anzeigen
+    _showCloseOverlay();
+}
+
+function _showCloseOverlay() {
+    // Prüfen, ob bereits ein Overlay existiert
+    if (document.getElementById('hermes-close-overlay')) return;
+
+    const overlay = document.createElement('div');
+    overlay.id = 'hermes-close-overlay';
+    overlay.style.cssText = `
+        position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+        background: #1a1a2e; color: #fff; z-index: 99999;
+        display: flex; flex-direction: column; align-items: center;
+        justify-content: center; font-family: sans-serif;
+        animation: fadeIn 0.3s ease;
+    `;
+    overlay.innerHTML = `
+        <div style="font-size:64px;margin-bottom:20px">🛑</div>
+        <h1 style="margin:0 0 10px 0;font-size:24px">Server nicht erreichbar</h1>
+        <p style="color:#aaa;margin:0 0 20px 0;text-align:center;max-width:400px">
+            Der Personal AI Agent wurde beendet oder ist nicht erreichbar.<br>
+            Bitte schließe diesen Tab manuell.
+        </p>
+        <div id="close-countdown" style="font-size:48px;font-weight:bold;color:#ff6b6b">30</div>
+        <p style="color:#888;font-size:12px;margin-top:10px">
+            Automatische Schließung in <span id="close-countdown-label">30</span>s
+        </p>
+        <button id="hermes-close-btn"
+                style="margin-top:20px;padding:10px 30px;background:#ff6b6b;color:#fff;
+                       border:none;border-radius:8px;cursor:pointer;font-size:16px">
+            Tab jetzt schließen
+        </button>
+    `;
+    document.body.innerHTML = '';
+    document.body.appendChild(overlay);
+    // Kein onclick-Attribut: Die Inhaltsrichtlinie (CSP, P0) sperrt Inline-Skripte.
+    const schliessen = document.getElementById('hermes-close-btn');
+    if (schliessen) {
+        schliessen.addEventListener('click', () => {
+            try { window.close(); } catch (_) {}
+            overlay.remove();
+        });
+    }
+
+    // Countdown von 30s
+    let count = 30;
+    const counter = document.getElementById('close-countdown');
+    const label = document.getElementById('close-countdown-label');
+    const timer = setInterval(() => {
+        count--;
+        if (counter) counter.textContent = String(count);
+        if (label) label.textContent = String(count);
+        if (count <= 0) {
+            clearInterval(timer);
+            try { window.close(); } catch (_) {}
+        }
+    }, 1000);
+}
+
+function updateFooterNote(memoryCount) {
+    const note = document.querySelector('.footer-note');
+    if (note) {
+        note.textContent = `${memoryCount} Erinnerungen`;
+    }
+}
+
+// =========================================
+// Modellauswahl
+// =========================================
+/* Hier stand der Modellname früher fest verdrahtet in der Fußzeile – und
+   zwar ein anderer als der, der tatsächlich lief. Deshalb kommt der Name
+   jetzt ausschließlich vom Server. */
+
+/** Kurzform für den Knopf: "anthropic/claude-sonnet-5" → "claude-sonnet-5"
+ *
+ *  Bewusst aus der ID abgeleitet und nicht aus dem Katalognamen: der lautet
+ *  etwa "DeepSeek: DeepSeek V4 Flash 0423" und beansprucht zwei Drittel der
+ *  Werkzeugleiste. Der volle Name steht in der Auswahlliste. */
+const LABEL_MAX = 18;
+
+function kurzName(id) {
+    if (!id) return 'Modell';
+    const kurz = id.includes('/') ? id.split('/').pop() : id;
+    return kurz.length > LABEL_MAX ? kurz.slice(0, LABEL_MAX - 1) + '…' : kurz;
+}
+
+function setModelLabel() {
+    if (dom.modelLabel) dom.modelLabel.textContent = kurzName(state.model);
+    if (dom.modelBtn) {
+        dom.modelBtn.classList.toggle('active', Boolean(state.model));
+        dom.modelBtn.title = state.model
+            ? `Modell: ${state.model} – antippen zum Wechseln`
+            : 'Modell wählen';
+    }
+}
+
+/** Preis lesbar machen. null bedeutet "variabel", nicht "kostenlos". */
+function preisText(m) {
+    if (m.eingabe_pro_mio === null && m.ausgabe_pro_mio === null) return 'Preis variabel';
+    const ein = m.eingabe_pro_mio === null ? '?' : m.eingabe_pro_mio;
+    const aus = m.ausgabe_pro_mio === null ? '?' : m.ausgabe_pro_mio;
+    return `$${ein} ein / $${aus} aus je Mio`;
+}
+
+function kontextText(m) {
+    if (!m.context_length) return '';
+    const k = m.context_length;
+    return k >= 1000000 ? `${(k / 1000000).toFixed(1)} Mio Kontext`
+         : k >= 1000    ? `${Math.round(k / 1000)}k Kontext`
+         : `${k} Kontext`;
+}
+
+/** Wissensstand lesbar: "2024-05-31" → "Stand 05/2024". */
+function wissensstandText(kc) {
+    if (!kc) return '';
+    const t = String(kc).slice(0, 7);               // JJJJ-MM
+    return /^\d{4}-\d{2}$/.test(t)
+        ? `Stand ${t.slice(3, 5)}/${t.slice(0, 4)}`
+        : `Stand ${String(kc).slice(0, 10)}`;
+}
+
+/** Laengste Antwort in einem Zug, lesbar. */
+function maxAusgabeText(n) {
+    if (!n) return '';
+    return n >= 1000000 ? `bis ${(n / 1000000).toFixed(1)} Mio Ausgabe`
+         : n >= 1000    ? `bis ${Math.round(n / 1000)}k Ausgabe`
+         : `bis ${n} Ausgabe`;
+}
+
+/** Cache-Preis fuer schon gesehenen Kontext, lesbar. */
+function cacheText(p) {
+    if (p === null || p === undefined) return '';
+    return `Cache $${p}/Mio`;
+}
+
+async function ladeKatalog(erzwingen = false) {
+    if (state.katalog && !erzwingen) return state.katalog;
+    try {
+        const res = await fetch(`${API_BASE}/api/models`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const daten = await res.json();
+        state.katalog = daten.models || [];
+        state.favoriten = daten.favoriten || [];
+        state.whitelistAktiv = Boolean(daten.whitelist_aktiv);
+        state.modellHinweis = daten.hinweis || '';
+        // Ohne eigene Wahl gilt das Modell aus der Server-Konfiguration.
+        if (!state.model && daten.aktuell) state.model = daten.aktuell;
+        if (daten.notliste) {
+            state.modellHinweis =
+                'Der Modellkatalog war nicht erreichbar – dies ist eine Notliste. '
+                + state.modellHinweis;
+        }
+        setModelLabel();
+        return state.katalog;
+    } catch (err) {
+        console.warn('Modellkatalog konnte nicht geladen werden:', err);
+        state.katalog = [];
+        state.modellHinweis = 'Modellliste nicht erreichbar. Läuft das Backend?';
+        return [];
+    }
+}
+
+/** Grobe Schätzung der bisherigen Gesprächslänge in Token. */
+function geschaetzteToken() {
+    const zeichen = state.messages.reduce((s, m) => s + (m.content || '').length, 0);
+    return Math.round(zeichen / 3);
+}
+
+function zeileFuer(m, nutzbar = true) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'model-row'
+        + (m.id === state.model ? ' selected' : '')
+        + (nutzbar ? '' : ' unavailable');
+
+    // Zeile 1: Modellname – eigene Zeile, vollständig, nichts abschneiden.
+    const name = document.createElement('div');
+    name.className = 'model-name';
+    name.textContent = m.name || m.id;
+    row.appendChild(name);
+
+    // Zeile 2: Info-Labels (Badges) in eigener Reihe unter dem Namen. So hat
+    // der Name die volle Breite und die Plaketten wickeln sich bei Bedarf um.
+    const badges = document.createElement('div');
+    badges.className = 'model-badges';
+
+    // Bei aktivem Riegel stehen ohnehin nur speicherfreie Modelle in der
+    // Liste – dann ist die Plakette an jedem Eintrag reines Rauschen. Sie
+    // erscheint nur, wenn der Riegel aus ist und die Liste gemischt wäre.
+    if (m.speicherfrei && !state.noRetention) {
+        const b = document.createElement('span');
+        b.className = 'badge eu';
+        b.textContent = 'kein Speichern';
+        b.title = 'Keiner der möglichen Anbieter speichert Prompts';
+        badges.appendChild(b);
+    } else if (m.anbieter_speichernd) {
+        const b = document.createElement('span');
+        b.className = 'badge warn';
+        // "weltweit" ist kein Beiwerk: Ohne bekannte Whitelist zählt die Zahl
+        // alle Anbieter der Welt, nicht die, die dein Konto erreichen kann.
+        b.textContent = state.whitelistAktiv
+            ? `${m.anbieter_speichernd}/${m.anbieter_gesamt} speichern`
+            : `${m.anbieter_speichernd}/${m.anbieter_gesamt} weltweit`;
+        b.title = state.whitelistAktiv
+            ? 'Ohne Datenschutz-Riegel kann die Anfrage bei einem dieser Anbieter landen'
+            : 'Gezählt über alle Anbieter weltweit – deine Whitelist ist dem Backend nicht bekannt';
+        badges.appendChild(b);
+    }
+    if (m.eu) {
+        const b = document.createElement('span');
+        b.className = 'badge eu';
+        // Bewusst "EU-fähig", nicht "EU": Das Routing selbst ist für dieses
+        // Konto gesperrt (403) und braucht einen Enterprise-Vertrag.
+        b.textContent = 'EU-fähig';
+        b.title = 'Würde über den EU-Endpunkt bedient – erfordert einen Enterprise-Vertrag';
+        badges.appendChild(b);
+    }
+    if (m.tools === false) {
+        const b = document.createElement('span');
+        b.className = 'badge warn';
+        b.textContent = 'ohne Werkzeuge';
+        b.title = 'Beherrscht keine Werkzeugaufrufe';
+        badges.appendChild(b);
+    }
+    // Stärke-Profil als gut sichtbarer Marker (für die Gruppierung).
+    if (m.staerke && STAERKE_LABEL[m.staerke]) {
+        const prof = document.createElement('span');
+        prof.className = 'badge st' + m.staerke;
+        prof.textContent = STAERKE_LABEL[m.staerke];
+        badges.appendChild(prof);
+    }
+    // Preis-Leistungs-Abzeichen aus den echten Preisen.
+    if (m.preis_leistung) {
+        const pl = document.createElement('span');
+        const positiv = m.preis_leistung === 'sehr günstig' || m.preis_leistung === 'günstig';
+        pl.className = 'badge ' + (positiv ? 'eu' : 'warn');
+        pl.textContent = 'Preis-Leistung: ' + m.preis_leistung;
+        pl.title = 'Grobe Einstufung anhand des Eingabepreises pro Mio Token';
+        badges.appendChild(pl);
+    }
+    row.appendChild(badges);
+
+    // Wofuer das Modell gedacht ist. VOLLER Text, nichts kürzen, damit die
+    // Frage "wofür" wirklich mit vollständigen Sätzen beantwortet wird.
+    if (m.beschreibung) {
+        const desc = document.createElement('p');
+        desc.className = 'model-desc';
+        desc.textContent = m.beschreibung;
+        row.appendChild(desc);
+    }
+    // Benchmark-Referenz (falls gepflegt) als nüchterne Zusatzinfo.
+    if (m.benchmark_ref) {
+        const bm = document.createElement('p');
+        bm.className = 'model-benchmark';
+        bm.textContent = '📊 ' + m.benchmark_ref;
+        row.appendChild(bm);
+    }
+
+    // Eigene Einsatzempfehlung (deutsch) – die Antwort auf "wofür nehme ich das?"
+    if (m.verwendung) {
+        const use = document.createElement('p');
+        use.className = 'model-usecase';
+        use.innerHTML = '<b>Beste für:</b> ';
+        use.appendChild(document.createTextNode(m.verwendung));
+        row.appendChild(use);
+    }
+
+    const meta = document.createElement('span');
+    meta.className = 'model-meta';
+    if (!nutzbar) {
+        meta.textContent = 'nicht mehr mit deinen Einstellungen nutzbar';
+    } else {
+        const teile = [preisText(m), kontextText(m),
+                       wissensstandText(m.wissensstand),
+                       maxAusgabeText(m.max_ausgabe),
+                       cacheText(m.cache_pro_mio)].filter(Boolean);
+        meta.textContent = teile.join(' · ');
+    }
+    row.appendChild(meta);
+
+    if (nutzbar) {
+        row.addEventListener('click', () => waehleModell(m));
+    }
+    return row;
+}
+
+function gruppenTitel(text) {
+    const h = document.createElement('div');
+    h.className = 'sheet-group';
+    h.textContent = text;
+    return h;
+}
+
+/** Filter-Chips sind UND-verknüpft: jeder weitere schränkt weiter ein. */
+function passtZuFiltern(m) {
+    // Bei aktivem Riegel sind speichernde Anbieter ohnehin gesperrt. Sie
+    // trotzdem aufzulisten hieße, Modelle anzubieten, die beim Absenden
+    // scheitern – und die Angabe "1/2 speichern" beantwortet die einzige
+    // Frage nicht, die zählt: kann ich das nehmen oder nicht.
+    if (state.noRetention && !m.speicherfrei) return false;
+
+    for (const f of state.filters) {
+        // Stärke-Profil-Filter: "staerke:bilder" → m.staerke === 'bilder'
+        if (f.startsWith('staerke:')) {
+            const profil = f.slice('staerke:'.length);
+            if (!m.staerke || m.staerke !== profil) return false;
+            continue;
+        }
+        if (f === 'bilder') {
+            if (!m.bilder && !m.dateien) return false;
+        } else if (!m[f]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** Ranking: Reihung nach Stärke-Profil und Preis-Leistung.
+ * Ziel: Die "beste für den Job"-Modelle stehen oben, teure/unpassende unten.
+ * Primaer: Stärke-Profil (preis_leistung/bilder/coding/reasoning/alltag),
+ * Sekundaer: Preis-Leistungs-Stufe (sehr günstig > günstig > mittel > teuer),
+ * Tertiaer: Eingabepreis aufsteigend.
+ */
+const STAERKE_RANG = { preis_leistung: 0, bilder: 1, coding: 2, reasoning: 3, alltag: 4 };
+const PREIS_RANG = { 'sehr günstig': 0, 'günstig': 1, 'mittel': 2, 'teuer': 3 };
+
+function staerkeWert(m) {
+    return STAERKE_RANG[m.staerke] ?? STAERKE_RANG.alltag;
+}
+function preisWert(m) {
+    return PREIS_RANG[m.preis_leistung] ?? 3;
+}
+function sortiereNachRanking(a, b) {
+    const s = staerkeWert(a) - staerkeWert(b);
+    if (s !== 0) return s;
+    const p = preisWert(a) - preisWert(b);
+    if (p !== 0) return p;
+    return (a.eingabe_pro_mio ?? Infinity) - (b.eingabe_pro_mio ?? Infinity);
+}
+
+/** Gruppen-Label für das Stärke-Profil eines Modells (deutsch). */
+const STAERKE_LABEL = {
+    preis_leistung: 'Preis-Leistung-Fokus',
+    bilder: 'Bilder verstehen / multimodal',
+    coding: 'Programmieren / Coding',
+    reasoning: 'Denken / Analyse (Reasoning)',
+    alltag: 'Allrounder',
+};
+
+function zeichneListe() {
+    const suche = (dom.modelSearch.value || '').trim().toLowerCase();
+    dom.modelList.innerHTML = '';
+    const alle = state.katalog || [];
+
+    if (!alle.length) {
+        dom.modelList.appendChild(gruppenTitel('Keine Modelle verfügbar'));
+        return;
+    }
+
+    const gefiltert = alle.filter(passtZuFiltern);
+    const aktiv = state.filters.size > 0;
+
+    // Favoriten nur zeigen, wenn weder gesucht noch gefiltert wird – sonst
+    // stehen oben Einträge, die der Filter gerade ausschließen sollte.
+    if (!suche && !aktiv) {
+        dom.modelList.appendChild(gruppenTitel('Favoriten'));
+        state.favoriten.forEach(id => {
+            const treffer = alle.find(m => m.id === id);
+            // Nicht mehr verfügbare Favoriten bleiben sichtbar und ausgegraut –
+            // sonst verschwinden sie still und man rätselt, warum.
+            dom.modelList.appendChild(
+                treffer ? zeileFuer(treffer) : zeileFuer({ id, name: id }, false)
+            );
+        });
+        dom.modelList.appendChild(gruppenTitel(`Alle ${alle.length} Modelle`));
+    }
+
+    const treffer = gefiltert.filter(m =>
+        !suche || m.id.toLowerCase().includes(suche)
+               || (m.name || '').toLowerCase().includes(suche));
+
+    if (aktiv || suche) {
+        let trefferTitel;
+        if (treffer.length) {
+            trefferTitel = `${treffer.length} von ${alle.length} Modellen`;
+        } else {
+            // Mehrere „Stärke“-Chips sind unerfüllbar, weil jedes Modell genau
+            // EINE primäre Stärke hat – der Hinweis erklärt das statt zu raten.
+            const staerkeChips = [...state.filters].filter(f => f.startsWith('staerke:')).length;
+            trefferTitel = staerkeChips > 1
+                ? 'Keine Treffer – ein Modell hat genau EINE Stärke; nur ein „Stärke“-Profil wählen'
+                : 'Keine Treffer – Filter lockern';
+        }
+        dom.modelList.appendChild(gruppenTitel(trefferTitel));
+    }
+
+    // Ranking: Treffer nach Stärke-Profil + Preis-Leistung sortieren.
+    treffer.sort(sortiereNachRanking);
+
+    if (aktiv || suche) {
+        // Gruppierte Anzeige nach Stärke-Profil (nur wenn sortiert wird).
+        let letzteGruppe = null;
+        treffer.slice(0, 120).forEach(m => {
+            const grp = STAERKE_LABEL[m.staerke] || STAERKE_LABEL.alltag;
+            if (grp !== letzteGruppe) {
+                dom.modelList.appendChild(gruppenTitel(grp));
+                letzteGruppe = grp;
+            }
+            dom.modelList.appendChild(zeileFuer(m));
+        });
+    } else {
+        treffer.slice(0, 120).forEach(m => dom.modelList.appendChild(zeileFuer(m)));
+    }
+}
+
+function setPrivacy(an) {
+    state.noRetention = an;
+    localStorage.setItem('no_retention', an ? '1' : '0');
+    dom.privacyBtn.classList.toggle('active', an);
+    dom.privacyBtn.setAttribute('aria-pressed', an ? 'true' : 'false');
+    dom.privacyLabel.textContent = an ? 'Riegel an' : 'Riegel';
+    dom.privacyBtn.title = an
+        ? 'Nur Anbieter ohne Speicherung. Passt keiner, wird die Anfrage abgelehnt statt still weitergereicht.'
+        : 'Datenschutz-Riegel aus – OpenRouter darf zu Anbietern routen, die Prompts speichern';
+}
+
+async function waehleModell(m) {
+    // Modelle unterscheiden sich um den Faktor 100 in der Kontextlänge. Ein
+    // Wechsel mitten in einem langen Gespräch kann sofort scheitern.
+    const belegt = geschaetzteToken();
+    if (m.context_length && belegt > m.context_length * 0.7) {
+        const weiter = confirm(
+            `Dieses Gespräch ist bereits rund ${belegt.toLocaleString('de-DE')} Token lang.\n`
+            + `${m.name || m.id} fasst ${m.context_length.toLocaleString('de-DE')}.\n\n`
+            + 'Der Verlauf passt möglicherweise nicht mehr. Trotzdem wechseln?'
+        );
+        if (!weiter) return;
+    }
+
+    state.modelVorher = state.model;
+    state.model = m.id;
+    localStorage.setItem('model', m.id);
+    // Nach einem Wechsel darf die Vision-Warnung neu bewertet werden.
+    visionHinweisGezeigt = false;
+    setModelLabel();
+    schliesseBlatt();
+    await zeigeDetails(m.id);
+}
+
+/** Datenschutz-Profil unter der Antwort einblenden, wenn gewechselt wurde. */
+async function zeigeDetails(modelId) {
+    try {
+        const res = await fetch(`${API_BASE}/api/models/${modelId}/details`);
+        if (!res.ok) return;
+        const daten = await res.json();
+        const alleAnbieter = daten.anbieter || [];
+        if (!alleAnbieter.length) return;
+
+        // Nur die Anbieter beurteilen, die dieses Konto auch erreichen kann.
+        // Die übrigen stehen als Fußnote darunter – sie sind der Grund, eine
+        // Whitelist später zu ändern, aber nicht Teil der aktuellen Lage.
+        const anbieter = alleAnbieter.filter(a => a.erreichbar !== false);
+        const gesperrt = alleAnbieter.filter(a => a.erreichbar === false);
+
+        // Drei Zustände, nicht zwei: true, false und "kein Profil gefunden".
+        // Unbekanntes als "speichert nicht" zu zeigen wäre ein falsches
+        // Sicherheitsversprechen.
+        const speichernd = anbieter.filter(a => a.speichert === true);
+        const unbekannt = anbieter.filter(a => a.speichert === null);
+        const zeilen = [
+            `**Modell gewechselt:** ${daten.name || modelId}`,
+            '',
+            `${anbieter.length} ${daten.whitelist_aktiv ? 'für dich erreichbare' : 'mögliche'} `
+            + `Anbieter, davon ${speichernd.length} mit Speicherung.`,
+        ];
+        if (speichernd.length) {
+            const namen = speichernd
+                .map(a => a.aufbewahrung_tage ? `${a.name} (${a.aufbewahrung_tage} T.)` : a.name)
+                .slice(0, 6);
+            zeilen.push(`Speichern Prompts: ${namen.join(', ')}`);
+        }
+        const trainierend = anbieter.filter(a => a.trainiert === true);
+        if (trainierend.length) {
+            zeilen.push(`⚠️ Trainieren auf Daten: ${trainierend.map(a => a.name).join(', ')}`);
+        }
+        if (unbekannt.length) {
+            zeilen.push(`❓ Ohne Angabe: ${unbekannt.map(a => a.name).join(', ')}`);
+        }
+        if (gesperrt.length) {
+            zeilen.push('', `_Nicht in deiner Whitelist (${gesperrt.length}): `
+                + `${gesperrt.map(a => a.name).slice(0, 8).join(', ')}_`);
+        }
+        zeilen.push('', `_${daten.hinweis || ''}_`);
+        addMessage(zeilen.join('\n'), 'assistant');
+    } catch (err) {
+        console.warn('Modell-Details nicht abrufbar:', err);
+    }
+}
+
+function schliesseBlatt() {
+    dom.modelSheet.hidden = true;
+}
+
+async function oeffneBlatt() {
+    dom.modelSheet.hidden = false;
+    dom.modelSearch.value = '';
+    dom.modelList.innerHTML = '';
+    dom.modelList.appendChild(gruppenTitel('Lade Modelle …'));
+    await ladeKatalog();
+    dom.modelHint.textContent = state.modellHinweis;
+    zeichneListe();
+}
+
+const SYMBOL_LAUTSPRECHER = '<svg viewBox="0 0 24 24" width="16" height="16">'
+    + '<path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05'
+    + 'c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06'
+    + 'c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>';
+
+const SYMBOL_PAUSE = '<svg viewBox="0 0 24 24" width="16" height="16">'
+    + '<path fill="currentColor" d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>';
+
+// Nur ein Vorleser gleichzeitig – sonst reden zwei Antworten durcheinander.
+let aktiverVorleser = null;
+
+// ── Schwebendes Mini-Audio-Control ─────────────────────────────────────────
+// Solange ein Vorleser AKTIV ist (spielt oder pausiert), bleibt unten rechts
+// ein kompakter Knopf sichtbar, der beim Scrollen durch den ganzen Chat
+// weiterläuft (position:fixed). So verliert man den laufenden Vorleser nie.
+let _schwebeVorleser = null;      // steuerung des aktiven Vorlesers
+let _schwebeSpielt = false;       // true = gerade abspielend
+let schwebendesControl = null;
+
+function baueSchwebendesControl() {
+    const c = document.createElement('button');
+    c.id = 'schwebendes-audio';
+    c.type = 'button';
+    c.title = 'Vorlesen steuern';
+    c.setAttribute('aria-label', 'Vorlesen steuern');
+    c.innerHTML = SYMBOL_LAUTSPRECHER;
+    c.style.cssText =
+        'position:fixed;right:22px;bottom:158px;z-index:900;display:none;'
+        + 'align-items:center;justify-content:center;width:60px;height:60px;'
+        + 'border-radius:50%;background:var(--accent);color:#fff;border:none;'
+        + 'box-shadow:0 4px 16px rgba(0,0,0,.45);cursor:pointer;'
+        + 'font-size:26px;line-height:1';
+    c.addEventListener('click', () => {
+        if (_schwebeVorleser) _schwebeVorleser.toggle();
+        _aktualisiereSchwebendesControl();
+    });
+    document.body.appendChild(c);
+    return c;
+}
+
+/** Synchronisiert das schwebende Control mit dem Zustand des aktiven Vorlesers.
+ *  Wird bei jedem Zustandswechsel des Vorlesers aufgerufen (zeigeZustand). */
+function _aktualisiereSchwebendesControl() {
+    if (!schwebendesControl) schwebendesControl = baueSchwebendesControl();
+    const sichtbar = Boolean(aktiverVorleser);
+    _schwebeVorleser = aktiverVorleser;
+    _schwebeSpielt = Boolean(aktiverVorleser && !(aktiverVorleser._pausiert));
+    schwebendesControl.style.display = sichtbar ? 'flex' : 'none';
+    schwebendesControl.title = _schwebeSpielt ? 'Pause' : 'Vorlesen';
+    schwebendesControl.setAttribute('aria-label', _schwebeSpielt ? 'Audio pausieren' : 'Audio vorlesen');
+    schwebendesControl.innerHTML = _schwebeSpielt ? SYMBOL_PAUSE : SYMBOL_LAUTSPRECHER;
+}
+
+// Ab dieser Länge wird ein Stück abgeschickt. Kürzere Sätze werden gesammelt,
+// sonst entsteht für jedes "Ja." eine eigene Anfrage.
+const MIN_STUECK_LAENGE = 60;
+
+/**
+ * Eine Markdown-Tabelle als gesprochene Sätze (29.09.2026).
+ *
+ * Vorher las die Stimme Tabellen Zelle für Zelle mit Strichen vor, ohne zu
+ * sagen, welche Spalte gemeint ist. Jetzt wird jede Zeile ein Satz: die erste
+ * Zelle nennt die Zeile, die übrigen Zellen tragen ihre Spaltenüberschrift,
+ * z. B. „Xperia T, Fotos: 3200, mit Ort: 80 %."
+ */
+function tabelleFuerStimme(block) {
+    const istTrenner = (z) => /^\|?[\s:|-]+\|?$/.test(z) && z.includes('-');
+    const zellen = (z) => z.replace(/^\|/, '').replace(/\|$/, '')
+        .split('|').map((c) => textFuerStimme(c));
+    const daten = block.split('\n').map((z) => z.trim())
+        .filter((z) => z.startsWith('|') && !istTrenner(z)).map(zellen);
+    if (!daten.length) return '';
+    const [kopf, ...zeilen] = daten;
+    if (!zeilen.length) return kopf.filter(Boolean).join(', ') + '.';
+    const saetze = zeilen.map((zeile) => zeile
+        .map((wert, i) => (!wert ? null : (i > 0 && kopf[i] ? `${kopf[i]}: ${wert}` : wert)))
+        .filter(Boolean).join(', ') + '.');
+    const anzahl = zeilen.length === 1 ? '1 Zeile' : `${zeilen.length} Zeilen`;
+    return `Tabelle mit ${anzahl}. ${saetze.join(' ')}`;
+}
+
+/** Ersetzt alle Tabellen eines ganzen Textes durch gesprochene Sätze. */
+function tabellenImTextFuerStimme(text) {
+    return text.replace(/(?:^[ \t]*\|.*(?:\n|$))+/gm,
+        (block) => tabelleFuerStimme(block) + '\n');
+}
+
+/** Räumt Markdown aus einem Stück, damit die Stimme keine Sternchen liest. */
+function textFuerStimme(text) {
+    return text
+        .replace(/```/g, '')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/[*_#>]/g, '')
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+/**
+ * Vorlese-Bedienung oben rechts an einer Antwort.
+ *
+ * Liest mit, während die Antwort noch geschrieben wird: Sobald ein Stück
+ * Text abgeschlossen ist, wird es geholt und in eine Warteschlange gelegt.
+ * Die Stimme läuft dem Text hinterher, statt auf das Ende zu warten.
+ *
+ * @param messageDiv  Die Nachrichten-Hülle (Geschwister der Sprechblase)
+ * @param holeText    Liefert den bisher eingetroffenen Volltext
+ * @param istFertig   Sagt, ob die Antwort vollständig ist
+ */
+function addSpeakControls(messageDiv, holeText, istFertig) {
+    const leiste = document.createElement('div');
+    leiste.className = 'speak-controls';
+
+    // Ein einziger Knopf steuert alles: Vorlesen starten, dann pausieren und
+    // fortsetzen. Ein zweiter Stopp-Knopf war daneben nur Ballast — auf dem
+    // Handy zaehlt jeder Millimeter Daumenflaeche.
+    const abspielBtn = document.createElement('button');
+    abspielBtn.className = 'speak-btn';
+    abspielBtn.title = 'Vorlesen';
+    abspielBtn.innerHTML = SYMBOL_LAUTSPRECHER;
+    // Baumuster ohne sichtbaren Text: das aria-label ist die einzige
+    // Beschriftung für Screenreader und muss IMMER gesetzt sein.
+    abspielBtn.setAttribute('aria-label', 'Audio vorlesen');
+
+    leiste.appendChild(abspielBtn);
+    messageDiv.appendChild(leiste);
+
+    let aktiv = false;        // Vorlesen überhaupt eingeschaltet?
+    let pausiert = false;
+    let gelesenBis = 0;       // Position im Rohtext, bis wohin abgeschickt wurde
+    let warteschlange = [];
+    let aktuellesAudio = null;
+    let holtGerade = false;
+
+    const zeigeZustand = () => {
+        const spielt = aktiv && !pausiert;
+        abspielBtn.innerHTML = spielt ? SYMBOL_PAUSE : SYMBOL_LAUTSPRECHER;
+        abspielBtn.title = spielt ? 'Pause' : 'Vorlesen';
+        // aria-label parallel zum title halten – der Knopf trägt nur ein SVG.
+        abspielBtn.setAttribute('aria-label', spielt ? 'Audio pausieren' : 'Audio vorlesen');
+        // Farbe über .playing, Vergrößerung über .active (nur an 'spielt'
+        // gekoppelt – halte(true) setzt pausiert/aktiv zurück, wodurch .active
+        // via zeigeZustand automatisch wieder entfernt wird).
+        abspielBtn.classList.toggle('playing', spielt);
+        abspielBtn.classList.toggle('active', spielt);
+        // Zustand für das globale schwebende Control spiegeln + aktualisieren.
+        if (aktiverVorleser) {
+            aktiverVorleser._aktiv = aktiv;
+            aktiverVorleser._pausiert = pausiert;
+        }
+        _aktualisiereSchwebendesControl();
+    };
+
+    /** Nächstes abgeschlossenes Stück, oder null wenn noch nichts fertig ist. */
+    const naechstesStueck = () => {
+        const rest = holeText().slice(gelesenBis);
+        if (!rest) return null;
+
+        // Eine Tabelle wird als GANZES Stück gelesen, damit jede Zeile ihre
+        // Spaltenüberschriften kennt. Solange sie noch einläuft, wird gewartet.
+        const tabelle = rest.match(/^\s*(?:[ \t]*\|.*(?:\n|$))+/);
+        if (tabelle) {
+            const bisEnde = tabelle[0].length === rest.length;
+            if (bisEnde && !istFertig()) return null;
+            gelesenBis += tabelle[0].length;
+            return tabelleFuerStimme(tabelle[0]) || ' ';
+        }
+
+        // Ein Stück endet an einem Satzzeichen oder Absatz. Ist die Antwort
+        // fertig, wird der Rest genommen, auch ohne Satzzeichen.
+        const treffer = rest.match(/^[\s\S]*?(?:[.!?…:](?=\s|$)|\n)/);
+        let stueck = treffer ? treffer[0] : (istFertig() ? rest : null);
+        if (stueck === null) return null;
+
+        // Kurze Sätze sammeln, bis genug beisammen ist – sonst entsteht für
+        // jedes "Ja." eine eigene Anfrage.
+        if (!istFertig() && stueck.trim().length < MIN_STUECK_LAENGE
+            && stueck.length < rest.length) {
+            return null;
+        }
+
+        gelesenBis += stueck.length;
+        return stueck;
+    };
+
+    /** Holt fortlaufend fertige Stücke, solange welche da sind. */
+    const nachfuellen = async () => {
+        if (holtGerade || !aktiv) return;
+        holtGerade = true;
+        try {
+            while (aktiv) {
+                const stueck = naechstesStueck();
+                if (stueck === null) break;
+
+                const sauber = textFuerStimme(stueck);
+                if (sauber.length < 2 || !/[a-zA-ZäöüÄÖÜß]/.test(sauber)) continue;
+
+                const res = await fetch(`${API_BASE}/api/speak`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: sauber.slice(0, 2000) }),
+                });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                if (!aktiv) break;   // während des Holens gestoppt
+
+                warteschlange.push(new Audio(URL.createObjectURL(await res.blob())));
+                spieleWeiter();
+            }
+        } catch (err) {
+            console.warn('Vorlesen abgebrochen:', err);
+            if (!warteschlange.length && !aktuellesAudio) {
+                // Nichts konnte geholt werden – Browser-Stimme als Rückfall.
+                if (!speakResponse(holeText())) {
+                    abspielBtn.classList.add('failed');
+                    abspielBtn.title = 'Vorlesen fehlgeschlagen – Grund steht im Server-Log';
+                }
+                halte(true);
+            }
+        } finally {
+            holtGerade = false;
+            abspielBtn.classList.remove('busy');
+        }
+    };
+
+    function spieleWeiter() {
+        if (!aktiv || pausiert || aktuellesAudio) return;
+        const naechstes = warteschlange.shift();
+        if (!naechstes) return;
+        aktuellesAudio = naechstes;
+        aktuellesAudio.onended = () => {
+            aktuellesAudio = null;
+            spieleWeiter();
+            // Am Ende angekommen und nichts mehr zu erwarten? Zurücksetzen.
+            if (!aktuellesAudio && !warteschlange.length && istFertig()
+                && gelesenBis >= holeText().length) {
+                halte(true);
+            }
+        };
+        aktuellesAudio.play().catch(err => console.warn('Wiedergabe:', err));
+    }
+
+    /** Anhalten. Mit zuruecksetzen=true wird auch der Fortschritt verworfen. */
+    function halte(zuruecksetzen) {
+        if (aktuellesAudio) {
+            aktuellesAudio.pause();
+            aktuellesAudio = null;
+        }
+        warteschlange = [];
+        aktiv = false;
+        pausiert = false;
+        if (zuruecksetzen) gelesenBis = 0;
+        if (aktiverVorleser === steuerung) aktiverVorleser = null;
+        zeigeZustand();
+    }
+
+    abspielBtn.addEventListener('click', () => {
+        if (aktiv && !pausiert) {
+            pausiert = true;
+            if (aktuellesAudio) aktuellesAudio.pause();
+            zeigeZustand();
+            return;
+        }
+        if (aktiv && pausiert) {
+            pausiert = false;
+            if (aktuellesAudio) aktuellesAudio.play();
+            else spieleWeiter();
+            zeigeZustand();
+            return;
+        }
+        // Neu starten – ein anderer laufender Vorleser wird abgelöst.
+        if (aktiverVorleser && aktiverVorleser !== steuerung) aktiverVorleser.stopp();
+        aktiverVorleser = steuerung;
+        aktiv = true;
+        pausiert = false;
+        abspielBtn.classList.add('busy');
+        zeigeZustand();
+        nachfuellen();
+    });
+
+
+    const steuerung = {
+        /** Wird gerufen, wenn neuer Text eingetroffen ist. */
+        neuerText: () => { if (aktiv && !pausiert) nachfuellen(); },
+        stopp: () => halte(true),
+        /** Toggle Play/Pause für ein externes (schwebendes) Steuer-Control. */
+        toggle: () => {
+            if (aktiv && !pausiert) {
+                pausiert = true;
+                if (aktuellesAudio) aktuellesAudio.pause();
+                zeigeZustand();
+                return;
+            }
+            if (aktiv && pausiert) {
+                pausiert = false;
+                if (aktuellesAudio) aktuellesAudio.play();
+                else spieleWeiter();
+                zeigeZustand();
+                return;
+            }
+            // Neu starten – ein anderer laufender Vorleser wird abgelöst.
+            if (aktiverVorleser && aktiverVorleser !== steuerung) aktiverVorleser.stopp();
+            aktiverVorleser = steuerung;
+            aktiv = true;
+            pausiert = false;
+            abspielBtn.classList.add('busy');
+            zeigeZustand();
+            nachfuellen();
+        },
+    };
+    return steuerung;
+}
+
+// ── Gedanken-Blasen: nach dem Tippen einklappen (Wunsch 2026-09-25) ─────────
+// Eine Gedanken-Blase tippt ihren Text und klappt danach von selbst ein: Es
+// bleibt eine schmale Zeile stehen (Zeit · 🧠 Kurzfassung). Antippen klappt
+// sie wieder auf — dann bleibt sie offen. Ziel: Man liest einmal mit, danach
+// nimmt der Verlauf kaum noch Platz ein.
+const GEDANKE_EINKLAPPEN_MS = 2500;   // kurze Lesezeit nach dem letzten Zeichen
+const GEDANKE_KURZ_MAX = 90;          // Zeichen der Kurzfassung
+
+/** Kurzfassung einer Gedanken-Blase: erste inhaltliche Zeile, gekürzt. */
+function gedankeKurzfassung(text) {
+    const erste = String(text || '').split('\n').map(z => z.trim()).find(Boolean) || '';
+    return erste.length > GEDANKE_KURZ_MAX
+        ? erste.slice(0, GEDANKE_KURZ_MAX - 1).trimEnd() + '…'
+        : erste;
+}
+
+/** Ändert das Layout, ohne dass die Blickposition springt.
+ *
+ *  Beim Einklappen wird der Verlauf kürzer. Wer gerade unten steht, bleibt
+ *  unten; wer weiter oben liest, behält genau seine Zeile. Die Höhe wird VOR
+ *  der Änderung gemessen (danach ist sie weg).
+ *
+ *  Zwei Fallen, beide hier abgefangen:
+ *   - Die Höhe ändert sich über die Schrumpf-Animation GLEITEND. Deshalb wird
+ *     der Bezugswert nach jedem Ausgleich nachgeführt — sonst zieht jeder
+ *     weitere Aufruf dieselbe Differenz noch einmal ab (das ließ den Verlauf
+ *     um die doppelte Höhe springen).
+ *   - Wird der Inhalt kürzer, klemmt der Browser den Scrollwert am unteren
+ *     Rand selbst. Was er schon getan hat, wird nicht noch einmal abgezogen.
+ *  Rückgabe: eine Funktion, die den Ausgleich erneut anwendet (für das Ende
+ *  der Schrumpf-Animation).
+ */
+function mitGehaltenerScrollposition(aendern) {
+    const el = dom.messages.parentElement;
+    const warUnten = isAtBottom();
+    let letzteHoehe = el.scrollHeight;
+    let letzterScroll = el.scrollTop;
+    const ausgleich = () => {
+        if (warUnten) { scrollToBottom(true); return; }
+        const hoehe = el.scrollHeight;
+        const scroll = el.scrollTop;
+        const weggefallen = letzteHoehe - hoehe;
+        const selbstGeklemmt = Math.max(0, letzterScroll - scroll);
+        letzteHoehe = hoehe;
+        if (weggefallen <= 0) { letzterScroll = scroll; return; }
+        const rest = Math.max(0, weggefallen - selbstGeklemmt);
+        const ziel = Math.max(0, scroll - rest);
+        el.scrollTop = ziel;
+        letzterScroll = ziel;
+    };
+    aendern();
+    ausgleich();
+    return ausgleich;
+}
+
+/** Klappt eine Gedanken-Blase ein — schmale Zeile bleibt sichtbar. */
+function klappeGedankeEin(div) {
+    if (!div || div.classList.contains('gedanken-eingeklappt')) return;
+    const inhalt = div.querySelector('.gedanken-inhalt');
+    const kurz = div.querySelector('.gedanken-kurz');
+    if (kurz) {
+        // In der schmalen Zeile nur die Uhrzeit (nicht das volle Datum) —
+        // am Handy zählt jedes Zeichen.
+        const volleZeit = div.dataset.gedankeZeit || '';
+        const treffer = volleZeit.match(/(\d{1,2}:\d{2}(?::\d{2})?)\s*$/);
+        const zeit = treffer ? treffer[1] : volleZeit;
+        kurz.textContent = (zeit ? zeit + ' · ' : '') + '🧠 ' + gedankeKurzfassung(inhalt ? inhalt.textContent : '');
+    }
+    const ausgleich = mitGehaltenerScrollposition(() => div.classList.add('gedanken-eingeklappt'));
+    // Die Höhe schrumpft animiert — danach noch einmal nachziehen, sonst
+    // rutscht die Ansicht um die Resthöhe.
+    if (inhalt) inhalt.addEventListener('transitionend', ausgleich, { once: true });
+    setTimeout(ausgleich, 420);
+}
+
+/** Klappt eine Gedanken-Blase wieder auf. */
+function klappeGedankeAus(div) {
+    if (!div) return;
+    mitGehaltenerScrollposition(() => div.classList.remove('gedanken-eingeklappt'));
+}
+
+/** Zeigt eine Hermes-Zwischenmeldung (gedanke).
+ *  Hinweis: Frueher trug jede Zwischenmeldung einen eigenen "⏹ Hermes abbrechen"-
+ *  Knopf (fuegeGedankeMitAbbruchHinzu). Stand 2026-09-06 (Auftrag der Betreiber):
+ *  der Knopf in der Coding-Ansicht ist ueberfluessig — der Abbruch laeuft ueber
+ *  brichAb (globale Stop-Geste, z. B. leere Eingabe). Die Funktion rendert die
+ *  Zwischenmeldung jetzt ohne eigenen Abbruch-Button. */
+function fuegeGedankeMitAbbruchHinzu(text, zeitIso) {
+    // Erst bereinigen: KEINEN Inhalt -> keine (leere) Blase erzeugen.
+    const rein = String(text || '').replace(/^\[[^\]]+\]\s*/, '').trim();
+    if (!rein) return;
+    // Dedup: dieselbe Meldung (z. B. "Hermes uebernimmt...") kommt teils doppelt
+    // (Backend-Stream + /api/hermes/letzte-Poll) und ergibt sonst eine doppelte
+    // leere/identische Blase — nur beim ERSTEN Auftritt anzeigen.
+    if (!_gedankenGesetzt) _gedankenGesetzt = new Set();
+    const dk = (_laufenderAuftragKurz || 'stream') + '|' + rein;
+    if (_gedankenGesetzt.has(dk)) return;
+    _gedankenGesetzt.add(dk);
+    // Letzter echter Gedanke global merken: die untere #loading-Bubble zeigt dann
+    // WAS Hermes WIRKLICH tut statt der generischen "Hermes bearbeitet deine Aufgabe"
+    // (Wunsch des Betreibers 2026-09-11).
+    _letzterHermesGedanke = rein;
+    // Abfrage des Agenten (Frage + nummerierte Antworten, ggf. mehrere Fragen):
+    // als klickbares Menue zeigen statt als Text-Blase — und bei mehreren
+    // Fragen nacheinander (Durchklick-Assistent). Sonst standen die Antworten
+    // untereinander, ohne dass die Frage sichtbar war (Wunsch des Betreibers
+    // 2026-09-15). Kein Typewriter fuer Menues.
+    const menue = parseOptionsMenue(rein);
+    if (menue) {
+        const mdiv = document.createElement('div');
+        mdiv.className = 'message agent-zwischenmeldung';
+        const minner = document.createElement('div');
+        minner.className = 'message-content';
+        minner.appendChild(bauOptionsUi(menue));
+        mdiv.appendChild(minner);
+        dom.messages.appendChild(mdiv);
+        scrollToBottom(true);
+        return;
+    }
+    // Stueckweise in NEUE Blasen mit Zeitstempel, die nach und nach TYPEWRITER
+    // eintippen (Wunsch des Betreibers 2026-09-11): bessere Lesbarkeit als eine
+    // riesige fortlaufende Blase; jede Gedanken-Zeile erscheint frisch.
+    // Wunsch des Betreibers 2026-09-15: Der Kopf heisst nur noch "🧠 Gedanke" (das
+    // Wort "Hermes" ist dort ueberfluessig – der Chatpartner IST Hermes) und
+    // die Blase ist optisch klar von einer echten Antwort abgesetzt (gedaempft,
+    // kursiv, Randlinie links). Vorher sah ein Gedanke wie eine normale
+    // Nachricht aus und war nicht als Zwischenstand erkennbar.
+    const div = document.createElement('div');
+    div.className = 'message agent-zwischenmeldung gedanken-strom';
+    const kopf = document.createElement('div');
+    kopf.className = 'gedanken-kopf';
+    kopf.textContent = '🧠 Gedanke';
+    // Kopf und Zeitstempel erst mit dem ERSTEN Textzeichen zeigen: Vorher war
+    // die Blase leer, trug aber schon 🧠 und Uhrzeit („zwei leere Blasen").
+    kopf.hidden = true;
+    div.appendChild(kopf);
+    const inhalt = document.createElement('div');
+    inhalt.className = 'gedanken-inhalt';
+    div.appendChild(inhalt);
+    // Zeitstempel-Label (WhatsApp-artig) unter der Blase
+    const zeitSpan = document.createElement('div');
+    zeitSpan.className = 'message-time gedanken-zeit';
+    try { zeitSpan.textContent = formatZeit(zeitIso); } catch (_e) {
+        zeitSpan.textContent = '';
+    }
+    zeitSpan.hidden = true;
+    div.appendChild(zeitSpan);
+    // Schmale Zeile für den eingeklappten Zustand (Zeit · 🧠 Kurzfassung).
+    const kurzZeile = document.createElement('div');
+    kurzZeile.className = 'gedanken-kurz';
+    div.appendChild(kurzZeile);
+    // Zeit für die Kurzfassung merken (der Zeitstempel selbst ist im
+    // eingeklappten Zustand ausgeblendet).
+    div.dataset.gedankeZeit = zeitSpan.textContent || '';
+    // Antippen: eingeklappt → aufklappen (bleibt dann offen); aufgeklappt →
+    // einklappen. Die Blase ist der Schalter, kein zusätzlicher Knopf.
+    // Ausnahme (Wunsch des Betreibers 2026-09-25): Läuft gerade eine Textauswahl
+    // (langer Druck), ist dieser Klick Teil der Auswahl-Geste und darf die
+    // Blase NICHT umschalten – sonst waere die Auswahl sofort wieder weg.
+    div.addEventListener('click', () => {
+        const sel = window.getSelection ? window.getSelection() : null;
+        if (sel && !sel.isCollapsed && String(sel).trim()) return;
+        if (div.classList.contains('gedanken-eingeklappt')) {
+            div.dataset.gedankeManuell = '1';   // offen bleiben, nicht wieder einklappen
+            klappeGedankeAus(div);
+        } else {
+            klappeGedankeEin(div);
+        }
+    });
+    dom.messages.appendChild(div);
+    scrollToBottom(true);
+
+    // Typewriter: Zeichen für Zeichen eintippen (lesbare Geschwindigkeit).
+    // Je Satzzeichen ein kuerzerer Halt, damit es nicht zu schnell fliegt.
+    // WICHTIG (2026-09-15): Die Blasen tippen SERIELL nacheinander (Kette),
+    // nicht parallel. Vorher tippte jede neue Blase sofort los — bei einem
+    // Schwall von Gedanken sah das aus, als würden mehrere Nachrichten
+    // gleichzeitig/flimmernd geschrieben.
+    // Wunsch des Betreibers 2026-09-15: Bei Rueckstand wurde der Rest bisher SOFORT
+    // hineingeworfen ("alles auf einmal"). Jetzt wird stattdessen nur schneller
+    // getippt — jede Blase bleibt ein kleiner, lesbarer Abschnitt.
+    const rueckstand = _gedankenTippWartend;
+    // Tempo aus dem Zahnrad (state.streamMs): groesser = langsamer.
+    // Basis 18 ms je Zeichen beim Standardwert 120 - so wirkt der Regler
+    // im Chat auch auf das Tippen der Zwischenmeldungen (Wunsch 2026-09-15).
+    const _tempoFaktor = Math.max(0.25, Math.min(3, (state.streamMs || 120) / 120));
+    const interval = (rueckstand > 4 ? 4 : (rueckstand > 2 ? 9 : 18)) * _tempoFaktor;
+    _gedankenTippWartend++;
+    const tippen = () => new Promise((fertig) => {
+        let i = 0;
+        const tippe = () => {
+            if (i >= rein.length) { fertig(); return; }   // fertig
+            const ch = rein[i];
+            inhalt.textContent = rein.slice(0, i + 1);
+            if (i === 0) {
+                // Erstes echtes Textzeichen: JETZT Kopf und Zeitstempel zeigen.
+                // Vorher war die Blase leer, trug aber schon 🧠 und Uhrzeit.
+                kopf.hidden = false;
+                zeitSpan.hidden = false;
+            }
+            i++;
+            let delay = interval;
+            if ('.!?;:'.indexOf(ch) !== -1) delay = interval * 6;   // Satzende: kurze Pause
+            if (','.indexOf(ch) !== -1) delay = interval * 3;
+            setTimeout(tippe, delay);
+            if (i % 40 === 0) scrollToBottom(true);   // beim Fortschritt mitrollen
+        };
+        tippe();
+    });
+    _gedankenTippKette = _gedankenTippKette
+        .then(tippen)
+        .catch(() => {})
+        .then(() => { _gedankenTippWartend = Math.max(0, _gedankenTippWartend - 1); })
+        .then(() => {
+            // Text vollständig getippt → nach kurzer Lesezeit einklappen.
+            // Wer die Blase selbst aufgeklappt hat (data-gedanke-manuell),
+            // behält sie offen.
+            if (div.dataset.gedankeManuell === '1') return;
+            setTimeout(() => {
+                if (div.dataset.gedankeManuell !== '1') klappeGedankeEin(div);
+            }, GEDANKE_EINKLAPPEN_MS);
+        });
+}
+
+// Serielle Tipp-Kette fuer die Gedanken-Blasen (siehe fuegeGedankeMitAbbruchHinzu).
+let _gedankenTippKette = Promise.resolve();
+let _gedankenTippWartend = 0;
+
+// (nicht mehr verwendet: Gruppierung je Auftrag – ersetzt durch per-Gedanken-Blase)
+let _gedankenBlasen = {};
+
+/** Zeigt eine fluechtige Bild-Miniatur in der Antwortblase (WhatsApp-Stil).
+ *  Nach BILD_ANZEIGE_MS verschwindet sie automatisch; es bleibt ein
+ *  Platzhalter "Bild wieder anzeigen", der das Bild FRISCH vom Speicher
+ *  laedt (GET /api/dateien/daten?pfad=) — nichts wird persistiert. */
+const BILD_ANZEIGE_MS = 10000;
+
+function zeigeBildVorschau(container, dataUrl, pfad, rahmen) {
+    if (!container) return;
+    // Bindungs-Nachweis: Die Vorschau hängt an GENAU dieser Nachricht
+    // (container = Blase der Nachricht). Es gibt bewusst KEINEN globalen
+    // „letztes Bild"-Zustand — nach Reload flüchtig, aber nie an eine
+    // fremde Nachricht geheftet.
+    try { container.dataset.bildPfad = pfad || ''; } catch (_) {}
+    // Beim Nachladen (Rekursion aus dem '… lädt'-Knopf) den BESTEHENDEN
+    // Rahmen wiederverwenden und leeren. Vorher wurde ein zweiter Rahmen
+    // an container angehängt, wodurch der '… lädt'-Knopf des alten Rahmens
+    // dauerhaft sichtbar blieb, statt nach dem Laden zu verschwinden.
+    if (rahmen) {
+        rahmen.innerHTML = '';
+    } else {
+        rahmen = document.createElement('div');
+        rahmen.className = 'bild-vorschau';
+        rahmen.style.cssText =
+            'margin-top:8px;max-width:100%;display:flex;flex-direction:column;gap:6px';
+        container.appendChild(rahmen);
+    }
+
+    const img = document.createElement('img');
+    img.src = dataUrl;
+    img.alt = 'Bildvorschau';
+    img.style.cssText =
+        'max-width:100%;max-height:220px;border-radius:10px;border:1px solid #444;object-fit:cover';
+    rahmen.appendChild(img);
+
+    const hinweis = document.createElement('span');
+    hinweis.textContent = '🖼️ Bild wird kurz angezeigt (flüchtig)';
+    hinweis.style.cssText = 'font-size:0.7rem;color:#888';
+    rahmen.appendChild(hinweis);
+
+    container.appendChild(rahmen);
+
+    // Nach-Reload-Quiz: Ist diese Blase eine wiederhergestellte, offene Quiz-
+    // Karte (dataset.quizRekon gesetzt), wird der gelbe bbox-Rahmen + der
+    // Gesicht-Ausschnitt JETZT nachgezeichnet — hier existiert das <img>.
+    try {
+        const qr = container.dataset && container.dataset.quizRekon;
+        if (qr) {
+            const qd = JSON.parse(qr);
+            if (qd && qd.ui && qd.pfad) {
+                const gs = (qd.ui.gesichter) || [];
+                if (gs.length) {
+                    markiereGesichtImBild(img, gs, 0);
+                    try { img.addEventListener('load', () => markiereGesichtImBild(img, gs, 0)); } catch (_) {}
+                    // Gesicht-Ausschnitt (flüchtig) auch in der wiederhergestellten Karte
+                    const bb = gs[0] && gs[0].bbox;
+                    if (bb && bb.length >= 4) zeigeGesichtCropIn(container, dataUrl, bb, 240);
+                }
+            }
+        }
+    } catch (_) {}
+
+    // Nach BILD_ANZEIGE_MS: Bild weg, Platzhalter zum Nachladen da.
+    // ABER: HOCHGELADENE Bilder (upload-Pfad) bleiben dauerhaft angezeigt
+    // (Screenshots/Fehlerbilder im Coding-Chat etc.), kein 10s-Platzhalter.
+    // Ebenfalls dauerhaft: WIEHERGESTELLTE offene Quiz-Karten (quizRekon) —
+    // deren Bild ist die aktive Quiz-Frage und darf nicht nach 10s verschwinden.
+    // Nur fluechtige Dateisuche-Vorschauen werden nach 10s durch den
+    // 'Bild wieder anzeigen'-Knopf ersetzt.
+    const istQuizRekon = !!(container.dataset && container.dataset.quizRekon);
+    const istUpload = (pfad || '').indexOf('/uploads/') !== -1 || (pfad || '').indexOf('uploads/') === 0;
+    if (istUpload || istQuizRekon) {
+        return; // dauerhaft, kein 10s-Timer/Platzhalter
+    }
+    let timer = setTimeout(() => {
+        rahmen.innerHTML = '';
+        const btn = document.createElement('button');
+        btn.className = 'bild-nachladen';
+        btn.textContent = '🖼️ Bild wieder anzeigen';
+        btn.style.cssText =
+            'padding:6px 10px;border:1px solid #555;border-radius:8px;background:#2a2a2a;' +
+            'color:inherit;cursor:pointer;font-size:0.8rem';
+        btn.addEventListener('click', async () => {
+            if (!pfad) return;
+            btn.disabled = true;
+            btn.textContent = '… lädt';
+            try {
+                const res = await fetch(`${API_BASE}/api/dateien/daten?pfad=${encodeURIComponent(pfad)}`);
+                const daten = await res.json();
+                if (daten.data_url) {
+                    zeigeBildVorschau(container, daten.data_url, pfad, rahmen); // gleicher Rahmen (loop)
+                } else {
+                    btn.textContent = '⚠️ Bild nicht verfügbar';
+                }
+            } catch (_) {
+                btn.textContent = '⚠️ Laden fehlgeschlagen';
+            }
+        });
+        rahmen.appendChild(btn);
+    }, BILD_ANZEIGE_MS);
+}
+
+/** Beendet eine Antwortblase: Markdown rendern, Verlauf und Fußzeile setzen. */
+// ---------------------------------------------------------------------------
+// ÜBERLAUF-WÄCHTER (01.10.2026). Befund der Betreiber (mehrfach): eine frisch
+// gestreamte Antwort ragt am Handy rechts über den Rand, nach App-Neustart ist
+// dieselbe Nachricht richtig. Im Browser-Prüfstand nicht nachstellbar — daher
+// misst die App selbst und meldet NUR Messwerte (Fensterbreite, WebView-Zoom,
+// Seitenbreite, Blasenrand, die am weitesten herausragenden Elemente mit Tag/
+// Klasse/white-space/display) — nie Text. Ziel: console.warn (Logcat) und
+// POST /api/diagnose/ueberlauf (kabel-lesbarer Diagnose-Ordner). Je Blase und
+// Phase höchstens eine Meldung.
+// ---------------------------------------------------------------------------
+/** Reine Funktion: die bis zu `max` Elemente, die am weitesten über `grenze` ragen. */
+function ueberlaufTaeter(elemente, grenze, max) {
+    const n = max || 3;
+    return (elemente || [])
+        .filter(e => e && typeof e.rechts === 'number' && e.rechts > grenze + 1)
+        .sort((a, b) => b.rechts - a.rechts)
+        .slice(0, n);
+}
+
+function ueberlaufPruefen(contentDiv, phase) {
+    try {
+        if (!contentDiv || !contentDiv.isConnected) return null;
+        const merker = 'ueberlauf' + phase;
+        if (contentDiv.dataset[merker]) return null;
+        const W = document.documentElement.clientWidth || window.innerWidth;
+        const blase = contentDiv.closest('.message') || contentDiv;
+        const rb = blase.getBoundingClientRect();
+        const skala = (window.visualViewport && window.visualViewport.scale) || 1;
+        const seite = document.documentElement.scrollWidth;
+        const zuBreit = rb.right > W + 1 || seite > W + 1
+            || contentDiv.scrollWidth > contentDiv.clientWidth + 1 || Math.abs(skala - 1) > 0.01;
+        if (!zuBreit) return null;
+        contentDiv.dataset[merker] = '1';
+        const grenze = Math.min(W, contentDiv.getBoundingClientRect().right);
+        const quelle = seite > W + 1 ? document.body : contentDiv;
+        const elemente = Array.prototype.slice.call(quelle.querySelectorAll('*'), 0, 800).map((e) => {
+            const r = e.getBoundingClientRect();
+            const cs = getComputedStyle(e);
+            return { tag: e.tagName.toLowerCase(), klasse: String(e.className || '').slice(0, 120),
+                     rechts: Math.round(r.right), breite: Math.round(r.width),
+                     ws: cs.whiteSpace, display: cs.display };
+        });
+        const messung = {
+            phase: phase, fenster: W, skala: skala, seite_scroll: seite,
+            blase_rechts: Math.round(rb.right), inhalt_scroll: contentDiv.scrollWidth,
+            inhalt_breite: contentDiv.clientWidth, taeter: ueberlaufTaeter(elemente, grenze, 3),
+        };
+        console.warn('[UEBERLAUF] ' + JSON.stringify(messung));
+        fetch(`${API_BASE}/api/diagnose/ueberlauf`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(messung),
+        }).catch(() => {});
+        return messung;
+    } catch (_e) {
+        return null;
+    }
+}
+
+/** Misst ALLE sichtbaren Nachrichtenblasen einmal (Verlauf, Größenwechsel).
+ *
+ *  Der Wächter oben feuerte bisher nur für FRISCH gestreamte Antworten. Genau
+ *  deshalb blieb des Betreibers kaputte Blase ungemessen: sie kam aus dem Verlauf
+ *  (nach App-Start geladen). Diese Funktion geht die vorhandenen Blasen durch
+ *  und misst jede sichtbare — der dataset-Merker in ueberlaufPruefen sorgt
+ *  dafür, dass je Blase und Phase höchstens EINE Meldung entsteht.
+ *
+ *  Bewusst nur SICHTBARES (im Fenster liegende Blasen): je Messung läuft ein
+ *  DOM-Durchlauf, und außerhalb des Bildes wäre er Verschwendung. `max` deckelt
+ *  zusätzlich die Zahl der Messungen je Aufruf. Rückgabe = Zahl der Messungen.
+ */
+function ueberlaufAllePruefen(phase, max) {
+    try {
+        const grenze = max || 80;
+        const hoehe = window.innerHeight || 0;
+        const liste = document.querySelectorAll('.message-content');
+        let gemessen = 0;
+        for (let i = 0; i < liste.length && gemessen < grenze; i++) {
+            const contentDiv = liste[i];
+            if (!contentDiv || !contentDiv.isConnected) continue;
+            const r = contentDiv.getBoundingClientRect();
+            if (hoehe && (r.bottom < 0 || r.top > hoehe)) continue;  // außerhalb des Bildes
+            if (ueberlaufPruefen(contentDiv, phase)) gemessen++;
+        }
+        return gemessen;
+    } catch (_e) {
+        return 0;
+    }
+}
+
+// Größenwechsel (Drehen, Tastatur, Pinch-Zoom) = eigener Messgrund. Entprellt,
+// damit das Drehen nicht bei jedem Zwischenschritt rechnet; die aktuelle
+// Fensterbreite steckt im Phasennamen, sodass ZURÜCKdrehen erneut messen kann,
+// ohne bei derselben Breite doppelt zu melden.
+let _ueberlaufGroesseTimer = null;
+
+function ueberlaufBeiGroessenwechsel() {
+    if (_ueberlaufGroesseTimer) clearTimeout(_ueberlaufGroesseTimer);
+    _ueberlaufGroesseTimer = setTimeout(() => {
+        _ueberlaufGroesseTimer = null;
+        const W = document.documentElement.clientWidth || window.innerWidth;
+        ueberlaufAllePruefen('resize' + Math.round(W));
+    }, 400);
+}
+
+window.addEventListener('resize', ueberlaufBeiGroessenwechsel);
+window.addEventListener('orientationchange', ueberlaufBeiGroessenwechsel);
+
+function finishReply(contentDiv, entry, antwort, abschluss, vorleser) {
+    const untenGewesen = isAtBottom();
+    contentDiv.innerHTML = parseMarkdown(antwort);
+    entry.content = antwort;
+    // Sichtbarkeits-Garantie (Wunsch des Betreibers 2026-09-15): In der Stream-
+    // Ansicht startet die Antwort-Blase VERBORGEN, damit nach dem Senden kein
+    // leerer Kasten mit „…" steht. Hier — beim finalen Rendern — wird sie
+    // anhand des TATSÄCHLICH gerenderten Inhalts gezeigt. So kann keine
+    // Antwort unsichtbar bleiben, egal über welchen Weg sie kam (Stream,
+    // Fallback, Track C, Verlaufs-Nachladen). Bleibt sie leer, bleibt sie
+    // verborgen — der Fortschritt steht in der unteren #loading-Bubble.
+    const _blaseAussen = contentDiv.closest('.message') || contentDiv.parentElement;
+    if (_blaseAussen && blaseHatLesbarenText(contentDiv)) {
+        // Blase, Zeitstempel und aufgeschobene Datumspille gemeinsam zeigen —
+        // eine Live-Blase startet verborgen (siehe zeigeBlaseMitText).
+        zeigeBlaseMitText(_blaseAussen, null, null);
+    }
+    // Muss nach dem Setzen von innerHTML kommen, sonst wird es überschrieben.
+    if (abschluss) addSources(contentDiv, abschluss.sources);
+    // Ziel-Pille: zeigt unter Delegations-Antworten, wohin der Auftrag ging
+    // (PC-Hermes / Handy-Hermes / Auftragsbuch) — `ziel` tragen die
+    // SSE-done-Events bzw. die ChatResponse (Fallback-Weg).
+    if (abschluss && abschluss.ziel) addZielChip(contentDiv, abschluss.ziel);
+    if (abschluss) {
+        const cid = abschluss.conversation_id || '';
+        // Chat-Kennung NUR übernehmen, wenn diese Antwort wirklich zu dem
+        // Chat gehört, aus dem gesendet wurde. Vorher adoptierte ein spät
+        // eintreffender Stream (z. B. aus conv_code) seine Kennung blind —
+        // damit schaltete die Oberfläche den offenen Chat STILL um, nachdem
+        // man längst gewechselt hatte („auf einmal was ganz anderes").
+        const passtZumOffenenChat = (!state.conversationId
+            || state.conversationId === cid
+            || state.conversationId === _sendChatId);
+        if (cid && passtZumOffenenChat) {
+            state.conversationId = cid;
+            localStorage.setItem('conversation_id', cid);
+            setzeChatAnzeige(cid);
+        }
+        if (abschluss.memory_count !== undefined) updateFooterNote(abschluss.memory_count);
+        // Bild-Vorschau (flüchtig): Miniatur kurz anzeigen, dann verschwinden.
+        // NUR in die Blase des Chats, aus dem die Antwort kam — ein Bild
+        // gehört zu GENAU dieser Nachricht, nie zu einer anderen.
+        if (abschluss.bild_vorschau && (!cid || state.conversationId === cid)) {
+            zeigeBildVorschau(contentDiv, abschluss.bild_vorschau, abschluss.bild_pfad);
+        }
+        // Anzeige (Nachrichten-Zahl/letzte Aktivität) am Server nachziehen.
+        aktualisiereChatAnzeigeVomServer();
+    }
+    // Der Vorleser darf jetzt auch den letzten Rest ohne Satzzeichen holen.
+    if (vorleser) vorleser.neuerText();
+    if (untenGewesen) scrollToBottom(true);
+    // Überlauf-Wächter: kurz nach dem Abschluss und noch einmal später messen
+    // (Bilder/Quellen/Knöpfe ändern die Breite erst nach dem Einfügen).
+    setTimeout(() => ueberlaufPruefen(contentDiv, 'fertig'), 300);
+    setTimeout(() => ueberlaufPruefen(contentDiv, 'spaeter'), 2000);
+
+    // Automatischer Auftrag-Tracker: Enthält die Antwort eine Auftrag-ID?
+    // Er startet nur, wenn der /chat/stream NICHT schon selbst die Strecke
+    // bis zum Abschluss durchgereicht hat (sonst würden seine Zwischenschritte
+    // zusätzlich echoen, obwohl sie längst als Stream-Häppchen da waren).
+    const match = antwort.match(/Auftrags-ID:\s*`?([a-f0-9]{8})/i);
+    if (match && !_auftragStreckeDirekt) {
+        startAuftragTracking(match[1], contentDiv);
+    }
+    _auftragStreckeDirekt = false; // Flag für die nächste Nachricht zurücksetzen
+}
+
+/** Formatiert einen ISO-Zeitstempel ("2026-08-22T23:04:47+02:00")
+ * WhatsApp-artig: Datum + Uhrzeit mit Sekunden, z. B. "23.08.2026 · 23:04:47".
+ * Unbrauchbares (kein Datum) bleibt stehen. */
+function formatZeit(iso) {
+    try {
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return iso;
+        const datum = d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+        const zeit = d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        return `${datum} · ${zeit}`;
+    } catch (e) {
+        return iso;
+    }
+}
+
+/** Kalendartag der übergebenen Zeit, als lokaler Tages-Schlüssel (YYYY-MM-DD).
+ *  Wird genutzt, um zu erkennen, wann eine neue Datums-Pille nötig ist. */
+function datumSchluessel(iso) {
+    try {
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return null;
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const t = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${t}`;
+    } catch (e) {
+        return null;
+    }
+}
+
+/** WhatsApp-artige Datumspille: „Heute", „Gestern" oder „23.08.2026". */
+function formatDatumBanner(iso) {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    const heute = new Date();
+    const startHeute = new Date(heute.getFullYear(), heute.getMonth(), heute.getDate()).getTime();
+    const startTag = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    const tage = Math.round((startHeute - startTag) / 86400000);
+    if (tage === 0) return 'Heute';
+    if (tage === 1) return 'Gestern';
+    // Wochentag + Datum; Jahr nur, wenn die Nachricht nicht aus dem aktuellen
+    // Jahr stammt (WhatsApp-Stil: bei älteren Tagen/anderen Jahren wird das
+    // Jahr ergänzt, beim laufenden Jahr weggelassen).
+    const wochentag = d.toLocaleDateString('de-DE', { weekday: 'long' });
+    // Wochentag großschreiben (de-DE liefert klein: "samstag")
+    const wt = wochentag.charAt(0).toUpperCase() + wochentag.slice(1);
+    const tag = d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+    if (d.getFullYear() !== heute.getFullYear()) {
+        return `${wt}, ${tag} ${d.getFullYear()}`;
+    }
+    return `${wt}, ${tag}`;
+}
+
+/** Baut die zentrierte Datums-Pille als <div class="date-divider">. */
+function baueDatumBanner(iso) {
+    const pill = document.createElement('div');
+    pill.className = 'date-divider';
+    pill.textContent = formatDatumBanner(iso);
+    return pill;
+}
+
+/** Setzt den Merker für die Datums-Pillen zurück – immer dann, wenn die
+ *  Anzeige neu aufgebaut wird (neues Gespräch / geladener Verlauf). */
+function zuruecksetzenDatumBanner() {
+    _letzteBannerDatum = null;
+}
+
+/** Kalendertag, auf dem die zuletzt gezeichnete Datums-Pille steht. */
+let _letzteBannerDatum = null;
+
+/** Nur die Uhrzeit mit Sekunden („23:04:47") – fürs Label unter der Blase.
+ *  Das Datum steht in der Datums-Pille darüber. Unbrauchbares bleibt stehen. */
+function formatUhrzeit(iso) {
+    try {
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return iso;
+        return d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch (e) {
+        return iso;
+    }
+}
+
+/** Zerlegt eine rohe Hermes-Meldung ("[ISO] text") in reinen Text und die
+ *  Zeitangabe getrennt – fürs Zeitstempel-Label unter der Chat-Blase. So
+ *  bleibt jede Hermes-Meldung optisch getrennt (kein hässlicher ISO-String
+ *  vor dem Text). */
+function zerlegeHermesMeldung(m) {
+    const roh = (m || '').trim();
+    const isoMatch = roh.match(/^\[([^\]]+)\]\s*/);
+    return {
+        text: roh.replace(/^\[[^\]]+\]\s*/, ''),
+        zeitIso: (isoMatch && isoMatch[1]) || null,
+    };
+}
+
+/**
+ * Pollt alle 3 Sekunden den Status eines Coding-Auftrags und zeigt
+ * Live-Updates im Chat an – jede neue Meldung als eigene Chat-Blase.
+ */
+// ==== WhatsApp-artige Antwort-Zitat (↩ Antworten) ====
+let _antwortAuf = null; // { rolle, text, zeit, bildPfad }
+
+function setzeAntwortAuf(rolle, text, zeit, bildPfad) {
+    const t = (text || '').trim();
+    if (!t) return;
+    _antwortAuf = { rolle, text: t, zeit: zeit || '', bildPfad: bildPfad || '' };
+    const v = document.getElementById('antwort-vorschau');
+    if (!v) return;
+    v.innerHTML = '';
+    const inhalt = document.createElement('div'); inhalt.className = 'av-inhalt';
+    const rolleD = document.createElement('div'); rolleD.className = 'av-rolle';
+    rolleD.textContent = rolle === 'user' ? 'Du' : 'Agent';
+    const textD = document.createElement('div'); textD.className = 'av-text'; textD.textContent = t;
+    inhalt.appendChild(rolleD); inhalt.appendChild(textD);
+    if (bildPfad) {
+        const img = document.createElement('img'); img.className = 'av-bild'; img.alt = '';
+        fetch(`${API_BASE}/api/dateien/daten?pfad=${encodeURIComponent(bildPfad)}`)
+            .then(r => r.json()).then(d => { if (d && d.data_url) img.src = d.data_url; })
+            .catch(() => {});
+        v.appendChild(img);
+    }
+    const x = document.createElement('button'); x.className = 'av-x'; x.textContent = '✕';
+    x.title = 'Antwort entfernen'; x.type = 'button';
+    x.onclick = clearAntwortAuf;
+    v.appendChild(inhalt); v.appendChild(x);
+    v.classList.remove('hidden');
+    const inp = document.getElementById('message-input'); if (inp) inp.focus();
+}
+function clearAntwortAuf() {
+    _antwortAuf = null;
+    const v = document.getElementById('antwort-vorschau');
+    if (v) { v.classList.add('hidden'); v.innerHTML = ''; }
+}
+
+let _auftragTimer = null;
+// Kurz-ID des aktuell laufenden Hermes-Auftrags (für den Kommunikationskanal:
+// solange gesetzt, wird eine neue Chat-Nachricht als Kommentar an die Session
+// geschickt statt einen neuen Auftrag zu starten).
+let _laufenderAuftragKurz = null;
+// Ziel des laufenden Hermes-Auftrags (pc/handy/buch) — fürs Status-Badge.
+let _zielAktuell = '';
+// True, wenn die DIESE-Session-Antwort gerade als Stream ins Frontend geht
+// (Badge "Hermes denkt (Stream bereit)"). Wird beim Streambeginn gesetzt.
+let hermesStreamBereit = false;
+// True, wenn ausserhalb dieser Session gerade ein Hermes-Auftrag offen/laeuft
+// (vom /api/auftraege-Poller gesetzt). Lässt den Header-Badge rot „Hermes
+// arbeitet" zeigen, auch wenn die Aufgabe NICHT über dieses Frontend gestartet
+// wurde. Wunsch des Betreibers: oben soll sichtbar sein, wann Hermes tut.
+let _hermesArbeitetAussen = false;
+/** Header-Badge mit dem externen Hermes-Status synchronisieren. Wird vom
+ *  /api/auftraege-Poller gerufen, sobald ein offener/laufender Auftrag
+ *  erkannt bzw. keiner mehr da ist. */
+function _setzeHermesAussen(aktiv) {
+    if (_hermesArbeitetAussen === aktiv) return;
+    _hermesArbeitetAussen = aktiv;
+    if (typeof aktualisiereStatusAnzeige === 'function') aktualisiereStatusAnzeige();
+}
+// True, wenn der /chat/stream die Live-Strecke selbst bis zum Abschluss
+// geführt hat (done mit auftrag_strecke). Dann braucht der 3s-Poller nicht
+// zusätzlich zu laufen – er bleibt nur Rückfall, wenn der Stream wegbrichst.
+let _auftragStreckeDirekt = false;
+
+function startAuftragTracking(aidKurz, contentDiv) {
+    if (_auftragTimer) clearInterval(_auftragTimer);
+    let letzteAnzahl = 0;       // Wie viele Meldungen wir schon gesehen haben
+    let ersteBlase = contentDiv; // Die ursprüngliche "Auftrag erkannt"-Blase
+    // Kommunikationskanal: solange dieser Auftrag läuft, gehen neue
+    // Chat-Nachrichten als Kommentar an die Session (nicht als neuer Auftrag).
+    _laufenderAuftragKurz = aidKurz;
+    aktualisiereStatusAnzeige();
+    // Status-Wechsel merken: nur einmal pro Übergang anzeigen (kein Spam).
+    let letzterStatus = null;
+
+    _auftragTimer = setInterval(async () => {
+        try {
+            const res = await fetch(`${API_BASE}/api/auftraege/${aidKurz}/chat`);
+            if (!res.ok) return;
+            const data = await res.json();
+            const meldungen = data.meldungen || [];
+            const anzahl = data.meldungen_count || 0;
+
+            // Status-Wechsel sichtbar machen: "laeuft/fertig/fehler" → einmalige Blase
+            const status = data.status || '';
+            if (status !== letzterStatus) {
+                letzterStatus = status;
+                if (status === 'laeuft') {
+                    addMessage('⚙️ **Hermes arbeitet an dem Auftrag…**', 'assistant');
+                } else if (status === 'fehler') {
+                    addMessage('❌ **Hermes konnte den Auftrag nicht abschließen**', 'assistant');
+                }
+            }
+
+            // Neue Meldungen seit letztem Poll?
+            if (anzahl > letzteAnzahl) {
+                const neue = meldungen.slice(letzteAnzahl);
+                for (const meldung of neue) {
+                    // Jede neue Meldung als eigene Chat-Blase; die in der
+                    // Meldung steckende [ISO]-Zeit wandert ins Label.
+                    const { text: htext, zeitIso } = zerlegeHermesMeldung(meldung);
+                    addMessage(htext, 'assistant', zeitIso || null);
+                }
+                letzteAnzahl = anzahl;
+                scrollToBottom(true);
+            }
+
+            // Auftrag fertig/fehler → Zusammenfassung zeigen + stoppen
+            if (data.status === 'fertig' || data.status === 'fehler') {
+                let summary = '';
+                if (data.status === 'fertig') {
+                    summary = '✅ **Auftrag abgeschlossen!**';
+                } else {
+                    summary = '❌ **Auftrag fehlgeschlagen**';
+                }
+
+                if (data.ergebnis_details) {
+                    const d = data.ergebnis_details;
+                    if (d.commit) summary += `\n📤 **Commit:** \`${d.commit}\``;
+                    if (d.gepusht !== undefined) {
+                        summary += d.gepusht
+                            ? '\n✅ **Push:** Erfolgreich zu GitHub'
+                            : '\n⚠️ **Push:** Fehlgeschlagen – in Termux manuell pushen';
+                    }
+                    if (d.text_kurz) {
+                        const lines = d.text_kurz.split('\n').filter(l => l.includes('Nächste') || l.includes('git pull') || l.includes('neustart'));
+                        if (lines.length) summary += '\n\n' + lines.join('\n');
+                    }
+                }
+
+                // Standard-Hinweis falls nichts geparst wurde
+                if (!summary.includes('git')) {
+                    summary += '\n\n📋 **Nächste Schritte in Termux:**\n`cd ~/it-ot-agentic-engineering && git pull origin main`\nDanach Server neustarten.';
+                }
+
+                addMessage(summary, 'assistant');
+                scrollToBottom(true);
+                clearInterval(_auftragTimer);
+                _auftragTimer = null;
+                // Auftrag beendet → Kommunikationskanal wieder frei.
+                _laufenderAuftragKurz = null;
+                aktualisiereStatusAnzeige();
+            }
+        } catch (_) {
+            // Server kurz weg → ignorieren
+        }
+    }, 3000);
+}
+
+/** Rückfallweg auf den nicht-streamenden Endpunkt. */
+async function sendMessageFallback(text, contentDiv, entry, zustand, vorleser) {
+    const res = await fetch(`${API_BASE}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            message: text,
+            conversation_id: state.conversationId,
+            web_search: state.webSearch,
+            model: state.model,
+            no_retention: state.noRetention,
+            // WhatsApp-artiges Antwort-Zitat (falls gesetzt)
+            antwort_auf: _antwortAuf ? _antwortAuf.text : undefined,
+            // Auch im Fallback müssen Dateien mit – sonst fehlt das Bild
+            // beim zweiten Versuch, wenn der Streaming-Weg scheiterte.
+            files: state.pendingFiles.length > 0
+                ? state.pendingFiles
+                    .filter(f => f.type === 'image' || f.type === 'pdf')
+                    .map(f => ({
+                    id: f.id,
+                    filename: f.filename,
+                    type: f.type,
+                    url: f.url,
+                    mime: f.mime,
+                    data_url: f.data_url,
+                    text: f.text,
+                }))
+                : undefined,
+        }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    const data = await res.json();
+    zustand.text = data.reply;
+    zustand.fertig = true;
+    // Dateivorschau leeren – die Dateien wurden nun versendet
+    if (state.pendingFiles.length > 0) _raeumeDateiVorschau();
+    finishReply(contentDiv, entry, data.reply, data, vorleser);
+    return data;
+}
+
+
+// ============================== GESICHTER-QUIZ (Anlernspiel) ==================
+// Startet das spielerische Anlernen ueber die Lieblingsbilder: zeigt ein Bild,
+// der Nutzer benennt die Person, die Antwort festigt das Gesicht als Referenz.
+let _quizAktiv = false;
+let _quizGesehen = [];   // bereits bearbeitete Bildpfade (um durchzuschreiten)
+let _letzteQuizKarte = null;  // zuletzt erzeugte Quiz-Karte (fuer Ergebnis-Umschreiben)
+let _aktuelleQuizPerson = '';  // zugeordnete Person der aktuellen Runde (fuer Speichern)
+// Abort-Steuerung fuer die laufende Gesichts-Analyse der Sofort-Ladevorschau:
+// "🚫 Keine Person vorhanden" bricht das Uebertragen sofort ab + stoppt die Animation.
+let _analyseAbort = null;
+// Lauf-Token fuer die Quiz-Runden: jede naechsteQuizRunde() / Analyse-Runde
+// inkrementiert ihn. Nach JEDEM await wird geprueft, ob eine NEUERE Runde
+// gestartet wurde; wenn ja, verwirft sich die aeltere Runde selbst. Das
+// verhindert hart, dass zwei Quiz-Runden/-Sessions parallel laufen (Wunsch
+// der Betreiber 2026-09-14: "es soll verhindert werden, dass zwei Quizze aktiv
+// sind"). Abloeser sind alle Skip-Wege (skipSofort, quizUeberspringen,
+// markiereBildErledigt/setTimeout, "weiter"/"Naechstes Bild"), die am Ende
+// naechsteQuizRunde() aufrufen.
+let _rundeToken = 0;
+let _aktuellerQuizPfad = '';   // Bildpfad der aktuellen Runde (fuer Speichern)
+// Offene, noch nicht persistierte Gruppen-Zuordnungen (person je Gesicht). Beim
+// ✕-Beenden werden sie ins Backend geschrieben (Wunsch des Betreibers 2026-09-10).
+let _quizOffeneZuordnungen = [];  // [{bild_pfad, person, ist_neu, rolle, bbox}]
+// LOKALE Bestaetigungs-Markierung dieser Sitzung: "bildpfad|region" -> Person.
+// Sie ergaenzt die vom Backend gelieferten `bestaetigt`-Flags (Region je
+// Gesicht) und sorgt dafuer, dass bereits zugeordnete Gesichter NICHT erneut
+// gefragt werden (Fix 2026-09-15: "beim Speichern geht er die Personen nochmal
+// von vorne durch").
+let _quizBestaetigt = {};
+
+/** Schluessel einer Gesichts-Region aus der normalisierten bbox (1 %-Raster). */
+function bboxRegionSchluessel(norm) {
+    if (!norm || norm.length < 4) return '';
+    try {
+        return norm.slice(0, 4).map(v => (Math.round(Number(v) * 100) / 100).toFixed(2)).join(',');
+    } catch (_e) { return ''; }
+}
+
+function merkeBestaetigt(bildPfad, region, person) {
+    if (!bildPfad || !region || !person) return;
+    _quizBestaetigt[bildPfad + '|' + region] = person;
+}
+
+function istBestaetigtLokal(bildPfad, region) {
+    if (!bildPfad || !region) return '';
+    return _quizBestaetigt[bildPfad + '|' + region] || '';
+}
+// Automatischer "Weiter"-Timer der Quiz-Sitzung (setTimeout vor jeder naechsten
+// Runde). Er MUSS abbrechbar sein: sonst feuert er nach dem Beenden weiter und
+// schiebt 1,5 s spaeter doch wieder eine neue Quiz-Karte nach -> "das Quiz
+// laesst sich nicht beenden". Genau eine Instanz, immer die neueste.
+let _quizWeiterTimer = null;
+function _quizWeiterAbbrechen() {
+    if (_quizWeiterTimer) {
+        try { clearTimeout(_quizWeiterTimer); } catch (_) {}
+        _quizWeiterTimer = null;
+    }
+}
+function _quizWeiterPlanen(ms) {
+    _quizWeiterAbbrechen();
+    _quizWeiterTimer = setTimeout(() => {
+        _quizWeiterTimer = null;
+        // Nur innerhalb einer LAUFENDEN Sitzung weiterblaettern. Ist das Quiz
+        // inzwischen beendet (_quizAktiv false), darf hier nichts mehr
+        // aufklappen.
+        if (!_quizAktiv) return;
+        try { naechsteQuizRunde(); } catch (_) {}
+    }, ms);
+}
+
+// Zeichnet den gelben bbox-Rahmen um das Gesicht (Index `idx`) im Bild `img`
+// und gibt die Markierung zurueck (oder null).
+// Die Face-Engine liefert `bbox` als [x, y, w, h] in ORIGINAL-Pixeln -> die
+// %-Position wird gegen die NATIV-Groesse des Bildes gerechnet (nicht gegen
+// die gerenderte Breite, sonst verschiebt sich der Rahmen bei skalierten und
+// bei max-height:300px gestauchten Bildern).
+function markiereGesichtImBild(img, gesichter, idx) {
+    if (!img) return null;
+    const gs = gesichter || [];
+    const g = gs[idx] || {};
+    const b = g.bbox || [];
+    const iw = img.naturalWidth || img.width || 0;
+    const ih = img.naturalHeight || img.height || 0;
+    // NORMALISIERTE Ankerung (0..1) hat Vorrang: sie ist unabhaengig von
+    // Anzeigegroesse, Zoom und Drehung und verrutscht deshalb nie. Nur wenn
+    // keine hinterlegt ist, wird sie aus den nativen Pixeln gerechnet.
+    let norm = (g.bbox_norm && g.bbox_norm.length >= 4) ? g.bbox_norm.slice() : null;
+    if (!norm) {
+        if (b.length < 4 || !iw || !ih) return null;   // Bild noch nicht gerendert
+        norm = bboxNormVonPixeln(b, iw, ih);
+    }
+    if (!norm) return null;
+    const pa = img.parentNode;
+    if (!pa) return null;
+    // alte Markierung im selben Bildbereich entfernen (Gruppen-Durchlauf)
+    const alt = pa.querySelector('.quiz-marke');
+    if (alt) alt.remove();
+    if (pa.style) pa.style.position = 'relative';
+    // Kopf-mit-einschliessen, aber DEZENT (Befund der Betreiber 2026-09-15:
+    // "die Kästen sind immer viel zu groß"): oben 12 %, unten 6 %, seitlich 5 %
+    // — vorher waren es 28 % oben, was den Kasten riesig machte. Ankerung und
+    // Begrenzung laufen vollstaendig normalisiert (bboxAnzeigeRahmen).
+    const box = bboxAnzeigeRahmen(norm);
+    if (!box) return null;
+    const r = document.createElement('div');
+    r.className = 'quiz-marke';
+    r.style.cssText = 'position:absolute;border:2px solid #ff6;box-shadow:0 0 0 1px #d80;pointer-events:none;z-index:5;box-sizing:border-box';
+    r.style.left = (box[0] * 100) + '%';
+    r.style.top = (box[1] * 100) + '%';
+    r.style.width = (box[2] * 100) + '%';
+    r.style.height = (box[3] * 100) + '%';
+    pa.appendChild(r);
+    // Kasten ins Sichtfeld holen, damit er beim Sprung zum naechsten Gesicht
+    // sichtbar wird (nicht nur im verdeckten Randbereich eines grossen Bilds).
+    try {
+        let node = pa;
+        while (node && node !== document.body && node !== document.documentElement) {
+            const st = getComputedStyle(node).overflowY;
+            if (st === 'auto' || st === 'scroll') break;
+            node = node.parentNode;
+        }
+        if (node && node !== pa && node.scrollLeft !== undefined) {
+            const rect = r.getBoundingClientRect();
+            const wrap = node.getBoundingClientRect();
+            node.scrollLeft += (rect.left - wrap.left) - (wrap.width / 2);
+            node.scrollTop  += (rect.top  - wrap.top ) - (wrap.height / 2);
+        }
+    } catch (_) {}
+    return r;
+}
+
+// Schneidet das Gesicht (bbox; x,y,w,h in Original-Pixeln) aus `dataUrl` aus
+// und liefert eine vergroesserte Daten-URL (JPEG). REIN im Arbeitsspeicher des
+// Browsers (Canvas) — es wird NICHTS auf Platte geschrieben und nichts dauerhaft
+// gespeichert. Wunsch des Betreibers: keine Quizbilder auf dem Speicher sammeln.
+function erzeugeGesichtCrop(dataUrl, bbox, maxPx) {
+    return new Promise((resolve) => {
+        try {
+            const b = bbox || [];
+            if (b.length < 4 || !dataUrl) return resolve(null);
+            const img = new Image();
+            img.onload = () => {
+                let iw = img.naturalWidth || img.width || 0;
+                let ih = img.naturalHeight || img.height || 0;
+                if (!iw || !ih || iw <= 0 || ih <= 0) return resolve(null);
+                let x = Math.max(0, Math.floor(b[0]));
+                let y = Math.max(0, Math.floor(b[1]));
+                let w = Math.min(Math.max(0, Math.floor(b[2])), iw - x);
+                let h = Math.min(Math.max(0, Math.floor(b[3])), ih - y);
+                if (w < 4 || h < 4) return resolve(null);
+                // Prominenter Ausschnitt: auf maxPx hochskalieren
+                const tm = maxPx || 240;
+                const scale = tm / Math.max(w, h);
+                const c = document.createElement('canvas');
+                c.width = Math.max(4, Math.round(w * scale));
+                c.height = Math.max(4, Math.round(h * scale));
+                const ctx = c.getContext('2d');
+                ctx.fillStyle = '#111';
+                ctx.fillRect(0, 0, c.width, c.height);
+                ctx.drawImage(img, x, y, w, h, 0, 0, c.width, c.height);
+                resolve(c.toDataURL('image/jpeg', 0.9));
+            };
+            img.onerror = () => resolve(null);
+            img.src = dataUrl;
+        } catch (_) { resolve(null); }
+    });
+}
+
+// Fuegt der Quiz-Karte den grossen, transienten Gesichts-Ausschnitt hinzu.
+function zeigeGesichtCropIn(container, dataUrl, bbox, maxPx, pfad) {
+    const box = document.createElement('div');
+    box.style.cssText = 'text-align:center;margin:6px 0';
+    const lbl = document.createElement('div');
+    lbl.style.cssText = 'font-size:0.75rem;color:#ff6;margin-bottom:2px';
+    lbl.textContent = '🔍 Gesicht-Ausschnitt, den du beschriftest:';
+    const cimg = document.createElement('img');
+    cimg.alt = 'Gesicht';
+    cimg.style.cssText = 'max-width:100%;max-height:240px;border:1px solid #555;border-radius:10px;background:#000';
+    box.appendChild(lbl);
+    box.appendChild(cimg);
+    if (container) container.appendChild(box);
+    macheBildAntippbar(cimg, [], { bildPfad: pfad || '' });  // Tipp auf Ausschnitt -> Vollbild
+    erzeugeGesichtCrop(dataUrl, bbox, maxPx || 240).then(u => { if (u) cimg.src = u; });
+    return box;
+}
+
+// Bild-Vollbild (WhatsApp-nahe): Ein Tipp auf ein Quiz-/Chat-Bild oeffnet ein
+// dunkles Fullscreen-Overlay mit dem grossen Bild. Das Overlay faengt ALLE
+// Gesten selbst ab (touch-action:none, Pull-to-Refresh-Sperre) — der Browser
+// zoomt hier also nicht nativ (die Seite ist ohnehin user-scalable=no).
+// Zoomen rechnet der Code selbst (30.09.2026, Befund der Betreiber: Dokument-Foto
+// liess sich nicht vergroessern): zwei Finger = zoomen + verschieben, ein
+// Finger bei Zoom = verschieben, Doppeltipp = 2,5x an der Stelle bzw. zurueck,
+// Mausrad am PC. Geschlossen wird ueber das X oben rechts.
+let _quizVollbild = null;
+// RAM-Editor-Zustand: vom Nutzer im Vollbild korrigierte Gesichts-Boxen
+// (Wunsch des Betreibers 2026-09-09: Rahmen antippen/verschieben/löschen). Die
+// bbox-Werte (in Original-Pixeln) liest die Antwort-Logik (quizBeantworten /
+// antworten) beim Senden aus, damit das korrigierte Gesicht ans Backend
+// geht und die Erkennung sauberer wird. NUR im Arbeitsspeicher flüchtig.
+let _quizEditor = null;   // { muenzen_bools: [], bbox_live: [[x,y,w,h], ...] }
+
+// ---------------------------------------------------------------------------
+// RAHMEN-GEOMETRIE (Fix 2026-09-15, Befund der Betreiber: "Kästen zu groß" /
+// "verschieben sich beim Öffnen und Drehen"). Reine Funktionen — damit testbar.
+// Die Engine liefert [x,y,w,h] in NATIVEN Bildpixeln; fuer Anzeige/Zoom/Drehung
+// rechnen wir NORMALISIERT (0..1 relativ zur Bildbreite/-hoehe). Dadurch sitzt
+// der Rahmen immer am BILD, nicht am Bildschirm.
+// ---------------------------------------------------------------------------
+function bboxNormVonPixeln(bbox, iw, ih) {
+    if (!bbox || bbox.length < 4 || !iw || !ih) return null;
+    return [bbox[0] / iw, bbox[1] / ih, bbox[2] / iw, bbox[3] / ih];
+}
+function bboxPixelVonNorm(norm, iw, ih) {
+    if (!norm || norm.length < 4 || !iw || !ih) return null;
+    return [norm[0] * iw, norm[1] * ih, norm[2] * iw, norm[3] * ih];
+}
+/** Rahmen im Einheitsquadrat halten (0..1, Mindestgroesse 0,5 %). */
+function bboxNormClampen(norm) {
+    if (!norm || norm.length < 4) return null;
+    const x = Math.max(0, Math.min(norm[0], 1));
+    const y = Math.max(0, Math.min(norm[1], 1));
+    const w = Math.max(0.005, Math.min(norm[2], 1 - x));
+    const h = Math.max(0.005, Math.min(norm[3], 1 - y));
+    return [x, y, w, h];
+}
+/**
+ * Rahmen auf den Bildbereich begrenzen (nie über den Bildrand hinaus).
+ * Die GROESSE bleibt erhalten, nur die Position wird begrenzt — so wird aus
+ * einem weit ueber den Rand gezogenen Rahmen ein randbuendiger Rahmen statt
+ * eines 1-px-Streifens (Fix 2026-09-15: "Ziehen clampen").
+ * Ein Rahmen, der groesser als das Bild ist, wird auf das Bild geschrumpft.
+ */
+function bboxClampen(bbox, iw, ih) {
+    if (!bbox || bbox.length < 4 || !iw || !ih) return null;
+    const w = Math.max(1, Math.min(bbox[2], iw));
+    const h = Math.max(1, Math.min(bbox[3], ih));
+    const x = Math.max(0, Math.min(bbox[0], iw - w));
+    const y = Math.max(0, Math.min(bbox[1], ih - h));
+    return [x, y, w, h];
+}
+/** Dreht einen Rahmen um 90°-Schritte mit dem Bild (Koordinaten wandern mit). */
+function bboxRotieren(bbox, iw, ih, schritte) {
+    if (!bbox || bbox.length < 4) return null;
+    const n = ((schritte % 4) + 4) % 4;      // 0..3, im Uhrzeigersinn
+    let b = bbox.slice(), w = iw, h = ih;
+    for (let i = 0; i < n; i++) {
+        // (x,y) -> (H-(y+h), x), Breite/Hoehe tauschen
+        b = [h - (b[1] + b[3]), b[0], b[3], b[2]];
+        const t = w; w = h; h = t;
+    }
+    return b;
+}
+/** Normalisierter Rahmen, um 90°-Schritte gedreht (Seitenverhaeltnis wandert mit). */
+function bboxNormRotieren(norm, iw, ih, schritte) {
+    if (!norm || norm.length < 4 || !iw || !ih) return null;
+    const px = bboxPixelVonNorm(norm, iw, ih);
+    const n = ((schritte % 4) + 4) % 4;
+    const gedreht = bboxRotieren(px, iw, ih, n);
+    // bei ungeraden Schritten sind Breite/Hoehe vertauscht
+    const zw = (n % 2 === 1) ? ih : iw;
+    const zh = (n % 2 === 1) ? iw : ih;
+    return bboxNormClampen(bboxNormVonPixeln(gedreht, zw, zh));
+}
+/** Anzeigemasse des Bildes nach `dreh` Vierteldrehungen (B/H ggf. getauscht). */
+function anzeigeMasse(iw, ih, dreh) {
+    const n = ((dreh % 4) + 4) % 4;
+    return (n % 2 === 1) ? [ih, iw] : [iw, ih];
+}
+/** Verschiebt einen Rahmen (Pixelraum) und haelt ihn per bboxClampen im Bild. */
+function bboxVerschieben(bbox, dx, dy, iw, ih) {
+    if (!bbox || bbox.length < 4) return null;
+    return bboxClampen([bbox[0] + dx, bbox[1] + dy, bbox[2], bbox[3]], iw, ih);
+}
+/**
+ * Groessen-Ziehen an einem Griff ('tl','tr','bl','br','t','b','l','r') im
+ * Pixelraum; das Ergebnis wird geklemmt (Mindestgroesse 8 px, nie aus dem Bild).
+ */
+function bboxSkalieren(bbox, griff, dx, dy, iw, ih) {
+    if (!bbox || bbox.length < 4) return null;
+    const g = String(griff || '');
+    let x = bbox[0], y = bbox[1], w = bbox[2], h = bbox[3];
+    if (g.indexOf('l') !== -1) { x = bbox[0] + dx; w = bbox[2] - dx; }
+    if (g.indexOf('r') !== -1) { w = bbox[2] + dx; }
+    if (g.indexOf('t') !== -1) { y = bbox[1] + dy; h = bbox[3] - dy; }
+    if (g.indexOf('b') !== -1) { h = bbox[3] + dy; }
+    // Ueber den linken/oberen Rand gezogen: Groesse halten, Position begrenzen.
+    if (w < 8) { x = bbox[0] + bbox[2] - 8; w = 8; }
+    if (h < 8) { y = bbox[1] + bbox[3] - 8; h = 8; }
+    return bboxClampen([x, y, w, h], iw, ih);
+}
+/** Anzeige-Rahmen (etwas groesser als das Gesichtsfeld) aus der normierten bbox. */
+function bboxAnzeigeRahmen(norm, opt) {
+    if (!norm || norm.length < 4) return null;
+    const o = opt || {};
+    const seit = (o.seitlich != null) ? o.seitlich : 0.05;   // je Seite 5 %
+    const oben = (o.oben != null) ? o.oben : 0.12;           // 12 % (Haare/Kopf)
+    const unten = (o.unten != null) ? o.unten : 0.06;        // 6 % (Kinn)
+    return bboxNormClampen([
+        norm[0] - norm[2] * seit,
+        norm[1] - norm[3] * oben,
+        norm[2] * (1 + 2 * seit),
+        norm[3] * (1 + oben + unten),
+    ]);
+}
+/** Zieh-Delta aus dem gedrehten Anzeigeraum in den Originalraum umrechnen. */
+function bboxDeltaDrehen(dx, dy, dreh) {
+    const n = ((dreh % 4) + 4) % 4;
+    if (n === 1) return [dy, -dx];
+    if (n === 2) return [-dx, -dy];
+    if (n === 3) return [-dy, dx];
+    return [dx, dy];
+}
+/** Anteil der Rahmen-Fläche am Bild — Plausibilitäts-/Testhilfe. */
+function bboxFlaecheAnteil(bbox, iw, ih) {
+    if (!bbox || bbox.length < 4 || !iw || !ih) return 0;
+    return (bbox[2] * bbox[3]) / (iw * ih);
+}
+
+// Kurzbeschreibung der zulaessigen EXIF-Orientierungen (1..8) als
+// Vierteldrehungen im Uhrzeigersinn — die Anzeige-Drehung des Bildes.
+function bboxExifDrehSchritte(orientierung) {
+    const o = parseInt(orientierung, 10);
+    if (!o || o < 1 || o > 8) return 0;
+    if (o === 6) return 1;   // 90° im Uhrzeigersinn
+    if (o === 3) return 2;   // 180°
+    if (o === 8) return 3;   // 90° gegen den Uhrzeigersinn
+    return 0;                // 1/2/4/5/7: keine reine Vierteldrehung
+}
+
+// ---------------------------------------------------------------------------
+// VOLLBILD-ZOOM (30.09.2026). Zustand {s, tx, ty} = CSS
+// `translate(tx,ty) scale(s)` um die MITTE der bildBox. Bild, Rahmen und
+// Griffe liegen alle in der bildBox und zoomen deshalb gemeinsam. Reine
+// Funktionen — damit testbar.
+// ---------------------------------------------------------------------------
+/** Zoomstufe zwischen 1 (ganzes Bild) und `max` (Standard 6) halten. */
+function zoomBegrenzen(s, max) {
+    const m = max || 6;
+    if (typeof s !== 'number' || !isFinite(s) || s < 1) return 1;
+    return Math.min(s, m);
+}
+/**
+ * Neuer Zustand, bei dem der Bildpunkt unter dem Brennpunkt f0 (Fingermitte
+ * beim Gestenstart) nach f1 wandert und die Stufe s1 gilt — Zoomen und
+ * Verschieben in einer Rechnung. `mitte` = Bildschirm-Mitte der bildBox OHNE
+ * Verschiebung (die Skalierung um die Mitte verschiebt die Mitte nicht).
+ */
+function zoomUmPunkt(z0, mitte, f0, f1, s1) {
+    const s = zoomBegrenzen(s1);
+    const k = s / (z0.s || 1);
+    return {
+        s: s,
+        tx: f1[0] - mitte[0] - k * (f0[0] - mitte[0] - z0.tx),
+        ty: f1[1] - mitte[1] - k * (f0[1] - mitte[1] - z0.ty),
+    };
+}
+/**
+ * Verschiebung so begrenzen, dass das vergroesserte Bild nicht aus dem
+ * Anzeigebereich rutscht; bei Stufe 1 immer mittig. `box` = [Breite, Hoehe]
+ * der bildBox ungezoomt, `sicht` = [Breite, Hoehe] des Anzeigebereichs.
+ */
+function zoomVerschiebungBegrenzen(z, box, sicht) {
+    const s = zoomBegrenzen(z.s);
+    if (s === 1) return { s: 1, tx: 0, ty: 0 };
+    const rx = Math.max(0, (box[0] * s - sicht[0]) / 2);
+    const ry = Math.max(0, (box[1] * s - sicht[1]) / 2);
+    return {
+        s: s,
+        tx: Math.max(-rx, Math.min(z.tx || 0, rx)),
+        ty: Math.max(-ry, Math.min(z.ty || 0, ry)),
+    };
+}
+/** Zweiter kurzer Tipp an (fast) derselben Stelle innerhalb von 320 ms? */
+function istDoppeltipp(vorher, jetzt) {
+    if (!vorher || !jetzt) return false;
+    const dt = jetzt.t - vorher.t;
+    return dt >= 0 && dt < 320 && Math.hypot(jetzt.x - vorher.x, jetzt.y - vorher.y) < 30;
+}
+
+function zeigeBildVollbild(imgEl, gesichter, opts) {
+    if (!imgEl) return;
+    const optionen = opts || {};
+    const src = imgEl.src || (imgEl.getAttribute && imgEl.getAttribute('src')) || '';
+    if (!src) return;
+    if (_quizVollbild) { schliesseBildVollbild(); return; }
+    // ------------------------------------------------------------------
+    // Editor-Zustand (Fix 2026-09-15): die NORMALISIERTE bbox (0..1 relativ
+    // zum Bild) ist die EINZIGE Wahrheit. Pixel entstehen nur beim Zeichnen
+    // (aus der gerenderten Groesse) und beim Speichern (aus der NATIV-Groesse).
+    // `dreh` = Anzeige-Drehung in Vierteldrehungen (ueber bboxRotieren),
+    // `refKontext` = Nachbearbeitung EINER Katalog-Referenz.
+    // ------------------------------------------------------------------
+    if (!_quizEditor) {
+        _quizEditor = { bbox_norm_live: [], bbox_live: [], undo: [], personen: [],
+                        dreh: 0, refKontext: null, px_rest: [] };
+    }
+    if (!_quizEditor.undo) _quizEditor.undo = [];
+    if (!_quizEditor.personen) _quizEditor.personen = [];
+    if (!_quizEditor.bbox_norm_live) _quizEditor.bbox_norm_live = [];
+    if (typeof _quizEditor.dreh !== 'number') _quizEditor.dreh = 0;
+    if (!_quizEditor.px_rest) _quizEditor.px_rest = [];
+    if (optionen.refKontext) {
+        // Frischer Editor fuer die Referenz-Nachbearbeitung: genau DIESE
+        // Referenz, sonst nichts (keine Alt-Rahmen der Quizrunde).
+        _quizEditor = { bbox_norm_live: [], bbox_live: [], undo: [], personen: [],
+                        dreh: optionen.dreh || 0, refKontext: optionen.refKontext,
+                        px_rest: [], iw: 0, ih: 0 };
+    }
+    if (gesichter && gesichter.length) {
+        // Anderes Bild als beim letzten Öffnen? Dann NICHT die alten Rahmen
+        // weiterverwenden (sonst sitzen sie auf dem neuen Bild falsch) —
+        // Grundregel: Rahmen gehören zum Bild (Fix 2026-09-15).
+        const gleichesBild = (_quizEditor.src === src);
+        const vorNorm = gleichesBild ? (_quizEditor.bbox_norm_live || []) : [];
+        // Schritt E (18.10.2026): die Verschmelzung ist jetzt eine eigene,
+        // pruefbare Funktion. NEU ist nur, dass Rahmen HINTER der Serverliste
+        // (von Hand gezogen, ohne Server-Eintrag) beim erneuten Oeffnen
+        // DESSELBEN Bildes erhalten bleiben — vorher fiel alles ab
+        // `gesichter.length` weg (belegt in
+        // docs/changelog-2026-10-18-handrahmen-verwerfpfade.md).
+        const gemischt = rahmenListeVerschmelzen(gesichter, vorNorm);
+        _quizEditor.bbox_norm_live = gemischt.neu;
+        _quizEditor.px_rest = gemischt.rest;
+    } else if (_quizEditor.src && _quizEditor.src !== src) {
+        // Schritt E: ohne Server-Rahmen UND mit einem ANDEREN Bild als zuletzt
+        // duerfen keine alten Rahmen stehenbleiben (sie gehoeren zum alten Bild).
+        _quizEditor.bbox_norm_live = [];
+        _quizEditor.px_rest = [];
+    }
+    // Schritt E (18.10.2026): gemerkte "unbekannt"-Rahmen DIESES Bildes
+    // anhaengen — sie kommen aus dem lokalen Browserspeicher, nicht vom Server.
+    // Idempotent: dieselbe Region (auf 1 % gerundet) wird nicht doppelt gehaengt.
+    // NICHT in der Referenz-Nachbearbeitung: dort gilt "genau DIESE Referenz,
+    // sonst nichts" (siehe oben) — fremde Rahmen haetten dort nichts zu suchen.
+    try {
+        if (!_quizEditor.refKontext) {
+            const unbekanntPfad = (optionen.bildPfad
+                || (imgEl && imgEl.dataset ? imgEl.dataset.bildPfad : '') || '');
+            const gemerkt = unbekannteRahmenLaden(unbekanntPfad);
+            for (let j = 0; j < gemerkt.length; j++) {
+                const schl = bboxRegionSchluessel(gemerkt[j]);
+                let schonDa = false;
+                for (let k = 0; k < (_quizEditor.bbox_norm_live || []).length; k++) {
+                    const n = _quizEditor.bbox_norm_live[k];
+                    if (n && n.length >= 4 && bboxRegionSchluessel(n) === schl) { schonDa = true; break; }
+                }
+                if (schonDa) continue;
+                if (!Array.isArray(_quizEditor.bbox_norm_live)) _quizEditor.bbox_norm_live = [];
+                if (!Array.isArray(_quizEditor.px_rest)) _quizEditor.px_rest = [];
+                _quizEditor.bbox_norm_live.push(bboxNormClampen(gemerkt[j]));
+                _quizEditor.px_rest.push(null);
+                const ix = _quizEditor.bbox_norm_live.length - 1;
+                if (!Array.isArray(_quizEditor.personen)) _quizEditor.personen = [];
+                _quizEditor.personen[ix] = '';   // ausdruecklich "unbekannt"
+            }
+        }
+    } catch (_e) {}
+    _quizEditor.bildPfad = (optionen.bildPfad
+        || (imgEl && imgEl.dataset ? imgEl.dataset.bildPfad : '') || '');
+    // Schritt F (18.10.2026): die Gesichtsliste des offenen Bildes merken — die
+    // Personen-Leiste nennt daraus je Rahmen die bestaetigte Person. Ohne
+    // Server-Rahmen bleibt eine frueher gemerkte Liste stehen (die Rahmen
+    // bleiben ja auch stehen); sonst ist sie ausdruecklich leer.
+    if (gesichter && gesichter.length) _quizEditor.gesichter = gesichter;
+    else if (!Array.isArray(_quizEditor.gesichter)) _quizEditor.gesichter = [];
+    _quizEditor.src = src;
+    // Bild-Editor B4 (27.10.2026): mit gueltiger {fileid} arbeitet der Editor im Cloud-Weg — Rahmen,
+    // Namen und Gruppen-Gesicht kommen aus bild-gesichter. Ohne fileid bleibt alles beim Alten;
+    // der Rest vom letzten Bild wird bei jedem Oeffnen zurueckgesetzt.
+    _quizEditor.fileid = '';
+    _quizEditor.cloudSpeichert = false;
+    _quizEditor.cloudErkennt = false;
+    _quizEditor.cloudNeuAufbauen = null;
+    _quizEditor.vorschlaege = [];
+    _quizEditor.onClose = (optionen && typeof optionen.onClose === 'function') ? optionen.onClose : null;
+    if (!_quizEditor.refKontext && optionen.fileid != null && cloudFileidGueltig(optionen.fileid)) {
+        _quizEditor.fileid = String(optionen.fileid).trim();
+        bildEditorCloudZustand(_quizEditor, gesichter, optionen.markiere);
+    }
+    const ov = document.createElement('div');
+    _quizVollbild = ov;
+    // PULL-TO-REFRESH-SPERRE (Befund der Betreiber 2026-09-15: "beim Runterziehen
+    // laedt der Browser neu"): touch-action:none am Editor, overscroll-behavior
+    // contain/none am Container/Overlay UND preventDefault() in touchmove/
+    // pointermove. Damit kann keine Geste mehr den Browser ausloesen.
+    ov.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.93);z-index:99998;display:flex;align-items:center;justify-content:center;flex-direction:column;animation:fadeIn 0.2s ease;overscroll-behavior:none;touch-action:none';
+    // X-Button zum Schliessen (Tipp aufs Bild zoomt nicht, sondern verschiebt)
+    const x = document.createElement('div');
+    x.style.cssText = 'position:fixed;top:12px;right:16px;z-index:99999;width:38px;height:38px;border-radius:50%;background:rgba(0,0,0,.5);color:#fff;font-size:20px;display:flex;align-items:center;justify-content:center;cursor:pointer';
+    x.textContent = '✕';
+    x.addEventListener('click', schliesseBildVollbild);
+    // Wrapper fuer das Bild: das Bild liegt in einer position:relative-`bildBox`,
+    // damit die Overlay-Rahmen exakt am Bild haften (auch bei Hoch-/Querformat
+    // und Drehung — Wunsch des Betreibers: Kästen müssen immer zu den Personen passen).
+    const wrap = document.createElement('div');
+    // overflow:hidden (vorher auto): das gezoomte Bild wird per transform
+    // verschoben, nicht gescrollt.
+    wrap.style.cssText = 'display:flex;align-items:center;justify-content:center;overflow:hidden;width:100%;height:100%;touch-action:none;overscroll-behavior:contain;box-sizing:border-box;padding-top:40px;padding-bottom:120px;';
+    const bildBox = document.createElement('div');
+    bildBox.style.cssText = 'position:relative;display:inline-block;line-height:0;touch-action:none;transform-origin:50% 50%';
+    const big = document.createElement('img');
+    big.src = src;
+    big.alt = 'Vollbild';
+    // 100vw/100vh statt 100 %: die bildBox hat keine feste Hoehe, max-height:100%
+    // griff deshalb nie — hohe Bilder (Dokument-Fotos) ragten oben/unten heraus.
+    big.style.cssText = 'max-width:100vw;max-height:calc(100vh - 160px);object-fit:contain;touch-action:none;user-select:none;-webkit-user-drag:none';
+    bildBox.appendChild(big);
+    wrap.appendChild(bildBox);
+    ov.appendChild(x);
+    ov.appendChild(wrap);
+    // Kein Browser-Verhalten mehr innerhalb des Editors: jede Bewegung wird
+    // selbst verarbeitet (Rahmen ziehen/zoomen/drehen). Passive:false ist
+    // Pflicht, sonst ist preventDefault() wirkungslos.
+    const _keineBrowserGeste = (ev) => { try { ev.preventDefault(); } catch (_e) {} };
+    try {
+        ov.addEventListener('touchmove', _keineBrowserGeste, { passive: false });
+        ov.addEventListener('pointermove', _keineBrowserGeste, { passive: false });
+        ov.addEventListener('gesturestart', _keineBrowserGeste, { passive: false });
+        ov.addEventListener('contextmenu', _keineBrowserGeste);
+    } catch (_e) {}
+    // --- Zoom: zwei Finger / Doppeltipp / Mausrad (30.09.2026) ---
+    // `zoom` und `zeiger` liest auch der Rahmen-Editor weiter unten (Zieh-Weg
+    // durch zoom.s teilen, bei zwei Fingern keinen Rahmen verschieben).
+    const zoom = { s: 1, tx: 0, ty: 0 };
+    const zeiger = new Map();      // pointerId -> [x, y]
+    let geste = null;              // { z0, mitte, f0, d0 } — d0 = 0 heisst verschieben
+    let tippStart = null, letzterTipp = null;
+    function zoomAnwenden(z) {
+        const b = zoomVerschiebungBegrenzen(z, [bildBox.offsetWidth, bildBox.offsetHeight],
+                                            [wrap.clientWidth, wrap.clientHeight]);
+        zoom.s = b.s; zoom.tx = b.tx; zoom.ty = b.ty;
+        bildBox.style.transform = (b.s === 1) ? '' :
+            ('translate(' + b.tx + 'px,' + b.ty + 'px) scale(' + b.s + ')');
+    }
+    function boxMitte() {
+        const r = bildBox.getBoundingClientRect();
+        return [r.left + r.width / 2 - zoom.tx, r.top + r.height / 2 - zoom.ty];
+    }
+    const aufRahmen = (el) => !!(el && el.closest && el.closest('[data-frei],[data-griff],[data-vorschlag]'));
+    const fingerMitte = (p) => [(p[0][0] + p[1][0]) / 2, (p[0][1] + p[1][1]) / 2];
+    const fingerAbstand = (p) => Math.hypot(p[0][0] - p[1][0], p[0][1] - p[1][1]);
+    try {
+        wrap.addEventListener('pointerdown', (ev) => {
+            zeiger.set(ev.pointerId, [ev.clientX, ev.clientY]);
+            if (zeiger.size === 2) {
+                const p = Array.from(zeiger.values());
+                geste = { z0: { s: zoom.s, tx: zoom.tx, ty: zoom.ty }, mitte: boxMitte(),
+                          f0: fingerMitte(p), d0: fingerAbstand(p) || 1 };
+                tippStart = null;   // aus einer Zwei-Finger-Geste wird kein Tipp
+            } else if (zeiger.size === 1) {
+                tippStart = { t: Date.now(), x: ev.clientX, y: ev.clientY };
+                geste = (zoom.s > 1 && !aufRahmen(ev.target))
+                    ? { z0: { s: zoom.s, tx: zoom.tx, ty: zoom.ty }, mitte: boxMitte(),
+                        f0: [ev.clientX, ev.clientY], d0: 0 }
+                    : null;
+            }
+        });
+        wrap.addEventListener('pointermove', (ev) => {
+            if (!zeiger.has(ev.pointerId)) return;
+            zeiger.set(ev.pointerId, [ev.clientX, ev.clientY]);
+            if (!geste) return;
+            const p = Array.from(zeiger.values());
+            if (p.length >= 2 && geste.d0) {
+                zoomAnwenden(zoomUmPunkt(geste.z0, geste.mitte, geste.f0, fingerMitte(p),
+                                         geste.z0.s * fingerAbstand(p) / geste.d0));
+            } else if (p.length === 1 && !geste.d0) {
+                zoomAnwenden({ s: zoom.s, tx: geste.z0.tx + ev.clientX - geste.f0[0],
+                               ty: geste.z0.ty + ev.clientY - geste.f0[1] });
+            }
+        });
+        const zeigerWeg = (ev) => {
+            const warEiner = (zeiger.size === 1);
+            zeiger.delete(ev.pointerId);
+            if (!zeiger.size || (geste && geste.d0)) geste = null;
+            if (ev.type !== 'pointerup' || !warEiner || !tippStart || aufRahmen(ev.target)) return;
+            const tipp = { t: Date.now(), x: ev.clientX, y: ev.clientY };
+            const kurz = (tipp.t - tippStart.t < 300) &&
+                         Math.hypot(tipp.x - tippStart.x, tipp.y - tippStart.y) < 12;
+            tippStart = null;
+            if (!kurz) { letzterTipp = null; return; }
+            if (istDoppeltipp(letzterTipp, tipp)) {
+                letzterTipp = null;
+                const f = [tipp.x, tipp.y];
+                zoomAnwenden(zoom.s > 1.05 ? { s: 1, tx: 0, ty: 0 }
+                                           : zoomUmPunkt(zoom, boxMitte(), f, f, 2.5));
+            } else {
+                letzterTipp = tipp;
+            }
+        };
+        wrap.addEventListener('pointerup', zeigerWeg);
+        wrap.addEventListener('pointercancel', zeigerWeg);
+        wrap.addEventListener('wheel', (ev) => {
+            try { ev.preventDefault(); } catch (_e) {}
+            const f = [ev.clientX, ev.clientY];
+            zoomAnwenden(zoomUmPunkt(zoom, boxMitte(), f, f, zoom.s * Math.exp(-ev.deltaY * 0.0015)));
+        }, { passive: false });
+    } catch (_e) {}
+    // Statuszeile des Editors (ehrliche Rueckmeldung statt stiller Fehlschlag).
+    const status = document.createElement('div');
+    status.style.cssText = 'position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:99999;max-width:92%;text-align:center;padding:6px 12px;border-radius:14px;background:rgba(15,25,20,.94);border:1px solid #2e8b57;color:#9f9;font-size:0.8rem;display:none;white-space:pre-line';
+    function meldeEditor(text, ok) {
+        try {
+            status.textContent = text;
+            status.style.borderColor = ok === false ? '#f88' : '#2e8b57';
+            status.style.color = ok === false ? '#f88' : '#9f9';
+            status.style.display = text ? 'block' : 'none';
+        } catch (_e) {}
+    }
+    _quizEditor.melde = meldeEditor;
+    ov.appendChild(status);
+    // Referenz-Nachbearbeitung: VOR dem Öffnen klar benennen, wem der Rahmen
+    // gehört (Person bleibt dieselbe, es entsteht keine Dublette).
+    if (_quizEditor.refKontext && _quizEditor.refKontext.name) {
+        meldeEditor('🖼 Referenz von ' + _quizEditor.refKontext.name +
+                    ' — Rahmen verschieben/ziehen, dann 💾 Speichern.', true);
+    }
+    // "Nächstes Bild ➡️"-Steuerung im Vollbild (Vollbild-Durchlauf, 2026-09-10):
+    // erspart das Schliessen, um zur naechsten Quizrunde zu gelangen. Erscheint
+    // NUR waehrend einer aktiven Quiz-Sitzung (_quizAktiv) und NICHT bei der
+    // Referenz-Nachbearbeitung. Beim Klick wird eine evtl. noch offene Frage des
+    // aktuellen Bildes als 'uebersprungen' persistiert und die naechste Runde
+    // geladen; das neue Bild oeffnet sich danach direkt wieder als Vollbild.
+    if (_quizAktiv && _quizGesehen && _quizGesehen.length && !_quizEditor.refKontext && !_quizEditor.fileid) {
+        const weiterBtn = document.createElement('div');
+        weiterBtn.style.cssText = 'position:fixed;left:auto;right:auto;width:auto;bottom:18px;z-index:99999;text-align:center;padding:12px 26px;border-radius:30px;background:#1f3a2a;border:1px solid #2e8b57;color:#9f9;font-weight:700;font-size:0.95rem;cursor:pointer;box-shadow:0 3px 12px rgba(0,0,0,.6);left:50%;transform:translateX(-50%)';
+        weiterBtn.textContent = 'Nächstes Bild ➡️';
+        weiterBtn.addEventListener('click', (ev) => { ev.stopPropagation(); naechstesBildAusVollbild(); });
+        ov.appendChild(weiterBtn);
+    }
+    // Werkzeugleiste (unter dem Nächstes-Bild-Knopf): ↩ Undo, ⟳ Drehen,
+    // 💾 Speichern. Jede Aktion arbeitet auf der NORMALISIERTEN bbox.
+    const leiste = document.createElement('div');
+    // Schritt I (18.10.2026): die Werkzeugleiste darf UMBRECHEN (flex-wrap) und
+    // hoechstens 96 % der Fensterbreite belegen. Befund aus der Messung: mit den
+    // Knoepfen aus Schritt E/G/F/I war die Leiste bei 380 px Fenster 664 px breit
+    // (links −142) — die aeusseren Knoepfe waren nicht erreichbar (vor diesem
+    // Schritt schon 511 px / links −66). Bei breiten Fenstern ändert sich nichts
+    // (eine Zeile), auf dem Handy stehen die Knoepfe jetzt in mehreren Zeilen
+    // mittig im Bild.
+    leiste.style.cssText = 'position:fixed;bottom:12px;left:0;right:0;margin:0 auto;width:fit-content;z-index:99999;display:flex;flex-wrap:wrap;justify-content:center;row-gap:6px;max-width:96vw;gap:10px;align-items:center;background:rgba(15,25,20,.92);border:1px solid #2e8b57;border-radius:30px;padding:6px 12px;box-shadow:0 3px 12px rgba(0,0,0,.6)';
+    ov.appendChild(leiste);
+
+    // KI-Bildbeschreibung anzeigen (Wunsch des Betreibers 30.10.2026)
+    const descText = (optionen && optionen.beschreibung)
+        || (imgEl && imgEl.dataset && imgEl.dataset.beschreibung)
+        || '';
+    if ((descText && descText.trim()) || _quizEditor.fileid) {
+        const descBox = document.createElement('div');
+        descBox.className = 'vollbild-beschreibung';
+        descBox.style.cssText = 'position:fixed;top:54px;left:50%;transform:translateX(-50%);max-width:92vw;width:min(92vw,560px);background:rgba(15,25,20,0.92);color:#dcdcdc;font-size:0.82rem;line-height:1.35;padding:8px 12px;border-radius:12px;border:1px solid #2e8b57;backdrop-filter:blur(4px);pointer-events:auto;z-index:99998;box-shadow:0 3px 12px rgba(0,0,0,0.7);display:' + (descText && descText.trim() ? 'flex' : 'none') + ';flex-direction:column;gap:4px;';
+        const descBoxKopf = document.createElement('div');
+        descBoxKopf.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:0.75rem;color:#8f8;font-weight:700;';
+        const descBoxTitel = document.createElement('span');
+        descBoxTitel.textContent = '📝 Bildbeschreibung';
+        descBoxKopf.appendChild(descBoxTitel);
+        const descVorlesenBtn = document.createElement('button');
+        descVorlesenBtn.type = 'button';
+        descVorlesenBtn.className = 'vollbild-beschreibung-vorlesen-btn';
+        descVorlesenBtn.textContent = '🔊 Vorlesen';
+        descVorlesenBtn.title = 'Bildbeschreibung vorlesen';
+        descVorlesenBtn.style.cssText = 'background:#1a3d28;border:1px solid #2e8b57;color:#9f9;border-radius:14px;padding:2px 8px;font-size:0.75rem;cursor:pointer;display:inline-flex;align-items:center;gap:4px;';
+        descBoxKopf.appendChild(descVorlesenBtn);
+        descBox.appendChild(descBoxKopf);
+
+        const descBoxText = document.createElement('div');
+        descBoxText.className = 'vollbild-beschreibung-text';
+        descBoxText.style.cssText = 'max-height:85px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;text-align:left;color:#e0e0e0;padding-right:2px;';
+        descBoxText.textContent = descText.trim();
+        descBox.appendChild(descBoxText);
+
+        descVorlesenBtn.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            bildBeschreibungVorlesen(descBoxText.textContent);
+        });
+        ov.appendChild(descBox);
+        if (!descText && _quizEditor.fileid) {
+            const fid = _quizEditor.fileid;
+            let cached = '';
+            try {
+                if (window.zustand && window.zustand.bilderInfo && window.zustand.bilderInfo.bilder && window.zustand.bilderInfo.bilder[String(fid)]) {
+                    cached = window.zustand.bilderInfo.bilder[String(fid)].beschreibung || '';
+                }
+            } catch (_e) {}
+            if (cached && cached.trim()) {
+                descBoxText.textContent = cached.trim();
+                descBox.style.display = 'flex';
+                _quizEditor.beschreibung = cached.trim();
+            } else {
+                fetch('/api/erzaehlen/bild-beschreibung?fileid=' + encodeURIComponent(fid))
+                    .then(r => r.json())
+                    .then(d => {
+                        if (d && d.beschreibung && d.beschreibung.trim()) {
+                            descBoxText.textContent = d.beschreibung.trim();
+                            descBox.style.display = 'flex';
+                            _quizEditor.beschreibung = d.beschreibung.trim();
+                        }
+                    })
+                    .catch(() => {});
+            }
+        }
+    }
+    try {
+        if ((gesichter && gesichter.length) || _quizEditor.fileid) {
+            big.addEventListener('load', () => {
+                var iw = big.naturalWidth || 0, ih = big.naturalHeight || 0;
+                if (!iw || !ih) return;
+                _quizEditor.iw = iw;
+                _quizEditor.ih = ih;
+                // Pixel-Reste (Referenzen ohne bbox_norm) jetzt umrechnen — erst
+                // hier ist die NATIV-Groesse des ANGEZEIGTEN Bildes bekannt.
+                for (var k = 0; k < (_quizEditor.px_rest || []).length; k++) {
+                    var pr = _quizEditor.px_rest[k];
+                    if (pr && (!_quizEditor.bbox_norm_live[k])) {
+                        _quizEditor.bbox_norm_live[k] = bboxNormClampen(bboxNormVonPixeln(pr, iw, ih));
+                    }
+                }
+                _quizEditor.px_rest = [];
+                var sel = (_quizEditor.fileid && _quizEditor.startAuswahl >= 0) ? _quizEditor.startAuswahl : -1;
+                _quizEditor.sel = sel;
+                var rahmenEls = [];
+                var vorschlagEls = [];     // Bild-Editor B4: gestrichelte Vorschlaege ("Neu erkennen", Cloud-Weg)
+                var neuePersonZeigen = function () {};
+                // Schritt G (18.10.2026): das Ziel-Personen-Menue zeigt immer die
+                // Person des AUSGEWAEHLTEN Rahmens. Es wird erst beim Bau der
+                // Werkzeugleiste gesetzt; bis dahin ist der Aufruf wirkungslos.
+                var personWahlMalen = function () {};
+                // Schritt F (18.10.2026): die Personen-Leiste des Detailbilds.
+                // Sie wird — wie das Ziel-Personen-Menue — erst beim Bau der
+                // Werkzeugleiste gesetzt; bis dahin ist der Aufruf wirkungslos.
+                var personenLeisteMalen = function () {};
+                // Schritt E (18.10.2026): ein Rahmen-Element entsteht jetzt an
+                // EINER Stelle — beim Oeffnen fuer ALLE Rahmen (auch die von Hand
+                // gezogenen HINTER der Serverliste) und beim Zeichnen fuer den
+                // neuen Rahmen. Rahmen ohne Person tragen die Marke "unbekannt".
+                function rahmenElement(i) {
+                    var re = document.createElement('div');
+                    re.setAttribute('data-frei', String(i));
+                    re.style.cssText = 'position:absolute;border:2px solid #ff6;z-index:7;box-sizing:border-box;cursor:pointer;touch-action:none';
+                    var marke = document.createElement('div');
+                    // Ausserhalb ueber der rechten oberen Ecke (10.10.2026): innen
+                    // verdeckte der Knopf kleine Gesichter - auch vergroessert, weil
+                    // er im gezoomten Bereich mitwaechst.
+                    marke.className = 'vollbild-rahmen-marke';
+                    marke.style.cssText = 'position:absolute;bottom:100%;right:-2px;margin-bottom:4px;width:22px;height:22px;border-radius:50%;background:#d33;color:#fff;font-size:12px;display:flex;align-items:center;justify-content:center;cursor:pointer';
+                    marke.textContent = '✕';
+                    // Schritt E: Namens-Marke eines Rahmens (nur bei "unbekannt" sichtbar).
+                    var namensMarke = document.createElement('div');
+                    namensMarke.className = 'vollbild-rahmen-name';
+                    namensMarke.style.cssText = 'position:absolute;top:100%;left:-2px;margin-top:3px;padding:1px 6px;border-radius:8px;background:#3a2a1f;border:1px solid #8a6a3a;color:#fd9;font-size:11px;white-space:nowrap;display:none';
+                    namensMarke.textContent = 'unbekannt';
+                    (function(ix){
+                        marke.addEventListener('click', function(ev){
+                            ev.stopPropagation();
+                            snapshotVorAenderung();   // Undo vor dem Löschen
+                            // Schritt E: ein UNBEKANNTER Rahmen wird auch aus dem
+                            // lokalen Speicher genommen — sonst kaeme er beim
+                            // naechsten Oeffnen dieses Bildes wieder.
+                            try {
+                                var alt = (_quizEditor.bbox_norm_live || [])[ix];
+                                if (alt && alt.length >= 4 && rahmenUnbekannt((_quizEditor.personen || [])[ix])) {
+                                    unbekannteRahmenVergessen(_quizEditor.bildPfad, alt);
+                                }
+                            } catch (_e) {}
+                            _quizEditor.bbox_norm_live[ix] = null;
+                            resync();
+                            if (sel === ix) { sel = -1; zeigeAuswahlGriffe(); }  // Auswahl freigeben
+                        });
+                    })(i);
+                    re.appendChild(marke);
+                    re.appendChild(namensMarke);
+                    bildBox.appendChild(re);
+                    rahmenEls.push(re);
+                    return re;
+                }
+                for (var i = 0; i < ((_quizEditor.bbox_norm_live || []).length); i++) {
+                    rahmenElement(i);
+                }
+                // bildBox wird exakt auf die GERICHTETE Bildgroesse des `big`-Bilds
+                // gelegt (getBoundingClientRect); die Rahmen werden aus der
+                // NORMALISIERTEN bbox in genau diesen Pixelraum gerechnet. So
+                // bleiben sie bei Skalierung, Ausrichtung und Drehung am Gesicht.
+                var letzteBigW = 0, letzteBigH = 0;
+                var griffe = [];
+                var ausschnittBox = null;
+                function resync() {
+                    try {
+                        // Bildschirmmass enthaelt den Vollbild-Zoom — die Rahmen
+                        // liegen aber IN der gezoomten bildBox, also ungezoomt rechnen.
+                        var rb = big.getBoundingClientRect();
+                        if (rb && rb.width > 0 && rb.height > 0) {
+                            letzteBigW = rb.width / zoom.s; letzteBigH = rb.height / zoom.s;
+                        }
+                    } catch (_e) {}
+                    if (letzteBigW <= 0 || letzteBigH <= 0) return;
+                    bildBox.style.width = letzteBigW + 'px';
+                    bildBox.style.height = letzteBigH + 'px';
+                    // Anzeigemasse (bei Drehung um 90°/270° vertauscht) + Skala
+                    var dreh = ((_quizEditor.dreh % 4) + 4) % 4;
+                    var masse = anzeigeMasse(iw, ih, dreh);
+                    var skw = letzteBigW / (masse[0] || 1);
+                    var skh = letzteBigH / (masse[1] || 1);
+                    for (var i = 0; i < rahmenEls.length; i++) {
+                        var el = rahmenEls[i];
+                        var norm = _quizEditor.bbox_norm_live[i];
+                        if (!norm || norm.length < 4) { el.style.display = 'none'; continue; }
+                        // Die Rahmen drehen MIT dem Bild (bboxNormRotieren).
+                        var pxAnz = bboxPixelVonNorm(bboxNormRotieren(norm, iw, ih, dreh), masse[0], masse[1]);
+                        el.style.display = 'block';
+                        el.style.left = (pxAnz[0] * skw) + 'px';
+                        el.style.top = (pxAnz[1] * skh) + 'px';
+                        el.style.width = (pxAnz[2] * skw) + 'px';
+                        el.style.height = (pxAnz[3] * skh) + 'px';
+                        el.style.borderColor = (i === sel) ? '#4f4' : '#ff6';
+                        // Schritt E: Rahmen ohne Person sind gestrichelt und
+                        // tragen die Marke "unbekannt" (nicht als Gesicht erfunden).
+                        var rohPerson = (_quizEditor.personen || [])[i];
+                        var eigenName = (rohPerson == null) ? '' : String(rohPerson).trim();
+                        var unb = rahmenUnbekannt(rohPerson);
+                        el.style.borderStyle = unb ? 'dashed' : 'solid';
+                        var nm = null;
+                        try { nm = el.querySelector('.vollbild-rahmen-name'); } catch (_e) {}
+                        if (nm) {
+                            // Schritt G: ein Rahmen mit EIGENER Person traegt deren
+                            // Namen sichtbar — sonst waere nicht zu erkennen,
+                            // welcher Rahmen welche Person bekommt.
+                            nm.style.display = (unb || eigenName) ? 'block' : 'none';
+                            if (unb) nm.textContent = rahmenPersonText(rohPerson);
+                            else if (eigenName) nm.textContent = eigenName;
+                        }
+                    }
+                    // Bild-Editor B4: Vorschlaege liegen im selben Bildraum und drehen mit.
+                    for (var vi = 0; vi < vorschlagEls.length; vi++) {
+                        var vNorm = ((_quizEditor.vorschlaege || [])[vi] || {}).bbox_norm;
+                        var vEl = vorschlagEls[vi];
+                        if (!vNorm || vNorm.length < 4) { vEl.style.display = 'none'; continue; }
+                        var vPx = bboxPixelVonNorm(bboxNormRotieren(vNorm, iw, ih, dreh), masse[0], masse[1]);
+                        vEl.style.display = 'block';
+                        vEl.style.left = (vPx[0] * skw) + 'px';
+                        vEl.style.top = (vPx[1] * skh) + 'px';
+                        vEl.style.width = (vPx[2] * skw) + 'px';
+                        vEl.style.height = (vPx[3] * skh) + 'px';
+                    }
+                    editorSyncLegacy();
+                }
+                // Kompatibilitaet: die Antwort-Logik liest weiterhin
+                // `_quizEditor.bbox_live` (absolute Pixel im Anzeigeraum).
+                function editorSyncLegacy() {
+                    try {
+                        _quizEditor.bbox_live = (_quizEditor.bbox_norm_live || []).map(function (n) {
+                            return (n && n.length >= 4) ? bboxPixelVonNorm(n, iw, ih) : null;
+                        });
+                    } catch (_e) {}
+                }
+                // Griffe (Ecken + Seiten) fuer den AUSGEWÄHLTEN Rahmen:
+                // 16 px — gross genug fuer den Finger, nicht "viel zu gross".
+                function baueGriffe(reIdx) {
+                    for (var g of griffe) { try { g.el.remove(); } catch(_e){} }
+                    griffe = [];
+                    if (reIdx < 0) return;
+                    var norm = _quizEditor.bbox_norm_live[reIdx];
+                    if (!norm || norm.length < 4) return;
+                    var dreh = ((_quizEditor.dreh % 4) + 4) % 4;
+                    var masse = anzeigeMasse(iw, ih, dreh);
+                    var skw = letzteBigW / (masse[0] || 1), skh = letzteBigH / (masse[1] || 1);
+                    var pxAnz = bboxPixelVonNorm(bboxNormRotieren(norm, iw, ih, dreh), masse[0], masse[1]);
+                    var pos = [
+                        ['tl', 0, 0], ['tr', 1, 0], ['bl', 0, 1], ['br', 1, 1],
+                        ['t', 0.5, 0], ['b', 0.5, 1], ['l', 0, 0.5], ['r', 1, 0.5]
+                    ];
+                    for (var p of pos) {
+                        var g = document.createElement('div');
+                        var gx = pxAnz[0] * skw + (p[2] === 0 ? 0 : (p[2] === 1 ? pxAnz[2]*skw : pxAnz[2]*skw/2));
+                        var gy = pxAnz[1] * skh + (p[1] === 0 ? 0 : (p[1] === 1 ? pxAnz[3]*skh : pxAnz[3]*skh/2));
+                        g.style.cssText = 'position:absolute;width:16px;height:16px;z-index:9;background:rgba(255,255,255,.85);border:1.5px solid #fff;border-radius:50%;box-sizing:border-box;cursor:nwse-resize;transform:translate(-50%,-50%);touch-action:none';
+                        g.style.left = gx + 'px';
+                        g.style.top = gy + 'px';
+                        g.dataset.griff = p[0];
+                        bildBox.appendChild(g);
+                        griffe.push({ el: g, name: p[0] });
+                    }
+                }
+                // zeigt Griffe beim Auswählen / versteckt bei keiner Auswahl
+                function zeigeAuswahlGriffe() { baueGriffe(sel); ausschnittAnzeigen(); personWahlMalen(); personenLeisteMalen(); }
+                // Ausschnitt-Vorschau des ausgewählten Rahmens (aus der
+                // NORMALISIERTEN bbox gerechnet — zoom-/drehungsunabhaengig).
+                function ausschnittAnzeigen() {
+                    try {
+                        if (!ausschnittBox) {
+                            ausschnittBox = document.createElement('div');
+                            ausschnittBox.style.cssText = 'position:fixed;top:14px;left:16px;z-index:99999;width:120px;height:120px;border-radius:10px;border:2px solid #2e8b57;overflow:hidden;background:#000;box-shadow:0 3px 12px rgba(0,0,0,.6)';
+                            var ausSzNe = document.createElement('img');
+                            ausSzNe.style.cssText = 'position:absolute;image-rendering:auto;will-change:transform';
+                            ausschnittBox.appendChild(ausSzNe);
+                            ov.appendChild(ausschnittBox);
+                        }
+                        var ausSz = ausschnittBox.querySelector('img');
+                        if (sel < 0) { ausschnittBox.style.display = 'none'; return; }
+                        var norm = _quizEditor.bbox_norm_live[sel];
+                        if (!norm || norm.length < 4 || norm[2] <= 0 || norm[3] <= 0) { ausschnittBox.style.display = 'none'; return; }
+                        var pxs = bboxPixelVonNorm(norm, iw, ih);
+                        ausschnittBox.style.display = 'block';
+                        ausSz.src = big.src;
+                        var ska = Math.max(120 / (pxs[2] || 1), 120 / (pxs[3] || 1));
+                        ausSz.style.width = (iw * ska) + 'px';
+                        ausSz.style.height = (ih * ska) + 'px';
+                        ausSz.style.left = (-(pxs[0] * ska)) + 'px';
+                        ausSz.style.top = (-(pxs[1] * ska)) + 'px';
+                    } catch (_e) {}
+                }
+
+                // --- Undo (Wunsch des Betreibers 2026-09-10) ---
+                // Snapshot des aktuellen (normalisierten) bbox-Zustands.
+                function snapshotVorAenderung() {
+                    try {
+                        _quizEditor.undo.push(JSON.stringify(_quizEditor.bbox_norm_live));
+                        if (_quizEditor.undo.length > 30) _quizEditor.undo.shift();
+                    } catch (_e) {}
+                }
+                function undoLetzte() {
+                    if (!_quizEditor || !_quizEditor.undo || !_quizEditor.undo.length) return;
+                    var vorher = JSON.parse(_quizEditor.undo.pop());
+                    _quizEditor.bbox_norm_live = vorher;
+                    resync();
+                    zeigeAuswahlGriffe();
+                }
+                function griffUmrechnen(name, dreh) {
+                    // Griff-Namen drehen mit dem Bild (sonst zieht 'l' nach dem
+                    // Drehen in die falsche Richtung).
+                    var n = ((dreh % 4) + 4) % 4;
+                    if (n === 0) return name;
+                    var karte = {
+                        1: { tl: 'tr', tr: 'br', br: 'bl', bl: 'tl', t: 'r', r: 'b', b: 'l', l: 't' },
+                        2: { tl: 'br', tr: 'bl', br: 'tl', bl: 'tr', t: 'b', r: 'l', b: 't', l: 'r' },
+                        3: { tl: 'bl', tr: 'tl', br: 'tr', bl: 'br', t: 'l', r: 't', b: 'r', l: 'b' },
+                    };
+                    return (karte[n] && karte[n][name]) || name;
+                }
+                // Auswahl + Verschieben (am Rahmenkoerper) + Groesse (an Griffen)
+                // Schritt E: das Anhaengen des Zieh-Verhaltens ist eine eigene
+                // Funktion, damit ein SPAETER gezeichneter Rahmen genauso
+                // verschiebbar ist wie die beim Oeffnen gebauten.
+                function rahmenZiehbar(reEl, idx) {
+                    reEl.addEventListener('pointerdown', function(ev){
+                        sel = idx; _quizEditor.sel = sel; resync(); zeigeAuswahlGriffe();
+                        snapshotVorAenderung();   // Undo-Snapshot vor Verschieben
+                        var startX = ev.clientX, startY = ev.clientY;
+                        var startNorm = (_quizEditor.bbox_norm_live[idx] || []).slice();
+                        if (startNorm.length < 4) return;
+                        try { reEl.setPointerCapture && reEl.setPointerCapture(ev.pointerId); } catch (_e) {}
+                        var dreh = ((_quizEditor.dreh % 4) + 4) % 4;
+                        var masse = anzeigeMasse(iw, ih, dreh);
+                        var skw = letzteBigW / (masse[0] || 1), skh = letzteBigH / (masse[1] || 1);
+                        var bewegen = function(mev){
+                            try { mev.preventDefault(); } catch (_e) {}
+                            if (zeiger.size > 1) return;   // zwei Finger = zoomen, nicht ziehen
+                            var dxAnz = (mev.clientX - startX) / ((skw || 1) * zoom.s);
+                            var dyAnz = (mev.clientY - startY) / ((skh || 1) * zoom.s);
+                            // Zieh-Delta aus dem gedrehten Anzeigeraum zurueck
+                            var dOrg = bboxDeltaDrehen(dxAnz, dyAnz, dreh);
+                            var px = bboxPixelVonNorm(startNorm, iw, ih);
+                            // bboxVerschieben klemmt per bboxClampen -> der
+                            // Rahmen bleibt immer vollstaendig im Bild.
+                            var neu = bboxVerschieben(px, dOrg[0], dOrg[1], iw, ih);
+                            _quizEditor.bbox_norm_live[idx] = bboxNormClampen(bboxNormVonPixeln(neu, iw, ih));
+                            resync(); zeigeAuswahlGriffe();
+                        };
+                        var loslassen = function(){
+                            try { reEl.releasePointerCapture && reEl.releasePointerCapture(ev.pointerId); } catch(_e){}
+                            wrap.removeEventListener('pointermove', bewegen);
+                            wrap.removeEventListener('pointerup', loslassen);
+                            wrap.removeEventListener('pointercancel', loslassen);
+                            wrap.removeEventListener('lostpointercapture', loslassen);
+                        };
+                        wrap.addEventListener('pointermove', bewegen);
+                        wrap.addEventListener('pointerup', loslassen);
+                        wrap.addEventListener('pointercancel', loslassen);
+                        wrap.addEventListener('lostpointercapture', loslassen);
+                    });
+                }
+                for (var i2 = 0; i2 < rahmenEls.length; i2++) {
+                    rahmenZiehbar(rahmenEls[i2], i2);
+                }
+                // Bild-Editor B4 (27.10.2026): Vorschlaege der Neu-Erkennung malen/uebernehmen und die
+                // Rahmen nach dem Neuladen (nach 💾) neu aufbauen. Nur im Cloud-Weg benutzt.
+                function cloudVorschlaegeMalen() {
+                    vorschlagEls.forEach(function (x) { try { x.remove(); } catch (_e) {} });
+                    vorschlagEls = [];
+                    (_quizEditor.vorschlaege || []).forEach(function (v, vi) {
+                        var vel = cloudVorschlagElement(v, function () { cloudVorschlagUebernehmen(vi); });
+                        bildBox.appendChild(vel);
+                        vorschlagEls.push(vel);
+                    });
+                    resync();
+                }
+                function cloudVorschlagUebernehmen(vi) {
+                    snapshotVorAenderung();   // Undo vor dem Uebernehmen
+                    var neu = bildEditorCloudVorschlagUebernehmen(_quizEditor, vi);
+                    if (neu < 0) return;
+                    if (!rahmenEls[neu]) { rahmenZiehbar(rahmenElement(neu), neu); }
+                    sel = neu;
+                    cloudVorschlaegeMalen();
+                    zeigeAuswahlGriffe();
+                    meldeEditor('Vorschlag übernommen als Rahmen ' + (neu + 1) + ' — Person im Menü wählen, dann 💾 Speichern.', true);
+                }
+                function cloudNeuAufbauen() {
+                    rahmenEls.forEach(function (x) { try { x.remove(); } catch (_e) {} });
+                    rahmenEls.length = 0;
+                    for (var ci = 0; ci < (_quizEditor.bbox_norm_live || []).length; ci++) {
+                        rahmenZiehbar(rahmenElement(ci), ci);
+                    }
+                    var startSel = (_quizEditor.startAuswahl >= 0 && _quizEditor.startAuswahl < (_quizEditor.bbox_norm_live || []).length)
+                        ? _quizEditor.startAuswahl : -1;
+                    sel = (sel >= 0 && sel < (_quizEditor.bbox_norm_live || []).length) ? sel : startSel;
+                    cloudVorschlaegeMalen();
+                    zeigeAuswahlGriffe();
+                }
+                _quizEditor.cloudNeuAufbauen = cloudNeuAufbauen;
+                // Schritt E (18.10.2026): Rahmen von Hand aufziehen (Auftragspunkt
+                // 2b). Nur OHNE Anzeige-Drehung — sonst sitzt der gezeichnete
+                // Rahmen schief, und ein falsch sitzender Rahmen waere schlimmer
+                // als keiner. Der neue Rahmen hat KEINE Person ("unbekannt") und
+                // schreibt deshalb nichts an den Server; zugeordnet wird er
+                // spaeter ueber das Ziel-Personen-Menue (Schritt G).
+                function rahmenZeichnenStarten() {
+                    var dreh = ((_quizEditor.dreh % 4) + 4) % 4;
+                    if (dreh !== 0) {
+                        meldeEditor('Zum Zeichnen erst die Anzeige-Drehung mit ⟳ zuruecksetzen (sonst sitzt der Rahmen schief).', false);
+                        return false;
+                    }
+                    if (!letzteBigW || !letzteBigH) {
+                        meldeEditor('Bild noch nicht bereit — kurz warten, dann erneut „＋ Rahmen".', false);
+                        return false;
+                    }
+                    var zeichenFeld = document.createElement('div');
+                    zeichenFeld.className = 'vollbild-zeichenfeld';
+                    zeichenFeld.style.cssText = 'position:absolute;inset:0;z-index:8;background:rgba(255,255,0,0.05);cursor:crosshair;touch-action:none';
+                    var kaestchen = document.createElement('div');
+                    kaestchen.style.cssText = 'position:absolute;border:2px dashed #ff6;background:rgba(255,255,0,0.10);pointer-events:none;box-sizing:border-box';
+                    zeichenFeld.appendChild(kaestchen);
+                    bildBox.appendChild(zeichenFeld);
+                    var zeichnet = false, sx = 0, sy = 0;
+                    var ort = function (cx, cy) {
+                        var r = bildBox.getBoundingClientRect();
+                        return { x: cx - r.left, y: cy - r.top };
+                    };
+                    var spanne = function (a, b) { return [Math.min(a, b), Math.abs(a - b)]; };
+                    zeichenFeld.addEventListener('pointerdown', function (ev) {
+                        var p = ort(ev.clientX, ev.clientY);
+                        zeichnet = true; sx = p.x; sy = p.y;
+                        kaestchen.style.left = sx + 'px'; kaestchen.style.top = sy + 'px';
+                        kaestchen.style.width = '0px'; kaestchen.style.height = '0px';
+                        try { ev.preventDefault(); } catch (_e) {}
+                        try { ev.stopPropagation(); } catch (_e) {}
+                    });
+                    zeichenFeld.addEventListener('pointermove', function (ev) {
+                        if (!zeichnet) return;
+                        var p = ort(ev.clientX, ev.clientY);
+                        var xw = spanne(sx, p.x), yh = spanne(sy, p.y);
+                        kaestchen.style.left = xw[0] + 'px'; kaestchen.style.top = yh[0] + 'px';
+                        kaestchen.style.width = xw[1] + 'px'; kaestchen.style.height = yh[1] + 'px';
+                    });
+                    var fertigMit = function () {
+                        if (!zeichnet) return;
+                        zeichnet = false;
+                        var x = parseFloat(kaestchen.style.left) || 0, y = parseFloat(kaestchen.style.top) || 0;
+                        var w = parseFloat(kaestchen.style.width) || 0, h = parseFloat(kaestchen.style.height) || 0;
+                        try { zeichenFeld.remove(); } catch (_e) {}
+                        if (w < 8 || h < 8) {
+                            meldeEditor('Rahmen zu klein — mit dem Finger ein groesseres Rechteck um die Person ziehen.', false);
+                            return;
+                        }
+                        rahmenAusZeichenfeld(x, y, w, h);
+                    };
+                    zeichenFeld.addEventListener('pointerup', fertigMit);
+                    zeichenFeld.addEventListener('pointercancel', fertigMit);
+                    meldeEditor('👆 Rahmen aufziehen: mit dem Finger ein Rechteck um die Person ziehen.', true);
+                    return true;
+                }
+                // Uebernimmt das gezeichnete Rechteck (Anzeige-Pixel) als Rahmen
+                // OHNE Person in den Editor — inklusive Anzeige, Auswahl und
+                // lokalem Merken. Rueckgabe: Index des neuen Rahmens.
+                function rahmenAusZeichenfeld(x, y, w, h) {
+                    var bw = letzteBigW || 0, bh = letzteBigH || 0;
+                    if (!bw || !bh) return -1;
+                    var norm = [x / bw, y / bh, w / bw, h / bh];
+                    var idx = rahmenUnbekanntAnhaengen(_quizEditor, _quizEditor.bildPfad, norm);
+                    if (idx < 0) { meldeEditor('Rahmen konnte nicht angelegt werden.', false); return -1; }
+                    rahmenElement(idx);
+                    rahmenZiehbar(rahmenEls[idx], idx);
+                    sel = idx; _quizEditor.sel = sel;
+                    resync(); zeigeAuswahlGriffe();
+                    var anzahl = rahmenIndizes(_quizEditor).length;
+                    if (_quizEditor.fileid) {
+                        meldeEditor('Rahmen ' + (idx + 1) + ' gezogen — 💾 Speichern legt ihn als neues Gesicht an; die Person wählst du im Menü (' +
+                                    anzahl + ' Rahmen auf dem Bild).', true);
+                        return idx;
+                    }
+                    meldeEditor('Rahmen ' + (idx + 1) + ' gezogen — als „unbekannt" angezeigt und fuer dieses Bild gemerkt (' +
+                                anzahl + ' Rahmen auf dem Bild). Die Zuordnung kommt mit dem Ziel-Personen-Menue; gespeichert wird ' +
+                                'ein unbekannter Rahmen nicht.', true);
+                    return idx;
+                }
+                // Schritt I (18.10.2026): "Erkennung fuer dieses EINE Bild neu
+                // starten" (Auftragspunkt 3, auch uebersehene Gesichter finden).
+                // Der Server kann das schon (`POST /api/gesichter/quiz/analysiere`
+                // laeuft ueber `face_service.embeddings_fuer_pfad`, ganzes Bild) —
+                // es fehlte der Knopf und die verschmelzende Regel.
+                // Ehrlich: Ist die Engine nicht gelaufen (`engine_verfuegbar:false`),
+                // aendert der Aufruf NICHTS und sagt das auch — 0 Gesichter waeren
+                // sonst als "keine Gesichter" missverstanden worden.
+                // Rueckgabe: Zahl der Neufunde, -1 = nichts geaendert.
+                // Bild-Editor B4: im Cloud-Weg ruft "Neu erkennen" bild-erkennen; Neufunde erscheinen
+                // gestrichelt als Vorschlag, bis sie angetippt werden. Rueckgabe: Zahl der Vorschlaege.
+                async function erkenneBildCloudNeu() {
+                    var fid = _quizEditor.fileid;
+                    if (_quizEditor.cloudErkennt) { meldeEditor('🔍 Die Erkennung läuft noch …', true); return -1; }
+                    _quizEditor.cloudErkennt = true;
+                    meldeEditor('🔍 Erkennung läuft … (bis zu 45 Sekunden)', true);
+                    var antwort = null;
+                    try { antwort = await cloudErkennenAbrufen(fid); } finally { _quizEditor.cloudErkennt = false; }
+                    if (_quizEditor.fileid !== fid) return -1;     // inzwischen ein anderes Bild
+                    var m = bildEditorCloudErkennung(_quizEditor, antwort);
+                    cloudVorschlaegeMalen();
+                    meldeEditor(m.text, m.ok);
+                    return m.neu;
+                }
+                async function erkenneDiesesBildNeu() {
+                    if (_quizEditor.fileid) { return erkenneBildCloudNeu(); }
+                    var pfad = _quizEditor.bildPfad || '';
+                    if (!pfad) { meldeEditor('🔍 Ohne Bildpfad laesst sich die Erkennung nicht neu starten.', false); return -1; }
+                    var vorher = rahmenIndizes(_quizEditor).length;
+                    var antwort = null;
+                    try {
+                        var ar = await fetch(API_BASE + '/api/gesichter/quiz/analysiere', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ bild_pfad: pfad }),
+                        });
+                        antwort = await ar.json();
+                    } catch (_e) {
+                        meldeEditor('🔍 Erkennung nicht erreichbar — die ' + vorher + ' Rahmen bleiben unveraendert.', false);
+                        return -1;
+                    }
+                    if (!antwort || antwort.engine_verfuegbar === false) {
+                        meldeEditor('🔍 Die Gesichts-Engine hat nicht geantwortet — die ' + vorher +
+                                    ' Rahmen bleiben unveraendert (keine Aussage ueber Gesichter).', false);
+                        return -1;
+                    }
+                    snapshotVorAenderung();
+                    var gemischt = rahmenNeuErkennen(antwort.gesichter || [],
+                        _quizEditor.bbox_norm_live || [], _quizEditor.personen || []);
+                    _quizEditor.bbox_norm_live = gemischt.bbox_norm_live;
+                    _quizEditor.personen = gemischt.personen;
+                    // Groessen-Reste (px) gehoeren zu einer ANDEREN Liste — nach dem
+                    // Zusammenfuehren waeren sie falsch zugeordnet.
+                    _quizEditor.px_rest = [];
+                    if (antwort.gesichter && antwort.gesichter.length) _quizEditor.gesichter = antwort.gesichter;
+                    for (var k = rahmenEls.length; k < _quizEditor.bbox_norm_live.length; k++) {
+                        rahmenZiehbar(rahmenElement(k), k);
+                    }
+                    resync(); zeigeAuswahlGriffe();
+                    var nachher = rahmenIndizes(_quizEditor).length;
+                    if (!gemischt.neu) {
+                        meldeEditor('🔍 Erkennung neu gelaufen: ' + (antwort.anzahl_gesichter || 0) +
+                                    ' Gesicht(er) gefunden — alle ' + vorher + ' Rahmen bleiben unveraendert.', true);
+                    } else {
+                        meldeEditor('🔍 Erkennung neu gelaufen: ' + gemischt.neu + ' neue(s) Gesicht(er) dazu (' +
+                                    nachher + ' Rahmen jetzt) — die ' + vorher + ' vorhandenen bleiben unveraendert. ' +
+                                    'Die Neufunde stehen als „unbekannt"; die Person setzt das Menue.', true);
+                    }
+                    return gemischt.neu;
+                }
+                // Griff-Drag: Groesse ziehen (bboxSkalieren klemmt am Bildrand)
+                bildBox.addEventListener('pointerdown', (ev) => {
+                    var g = ev.target;
+                    if (!g || !g.dataset || !g.dataset.griff || sel < 0) return;
+                    ev.stopPropagation();
+                    snapshotVorAenderung();   // Undo-Snapshot vor Größen-Ziehen
+                    var griffName = g.dataset.griff;
+                    var sx = ev.clientX, sy = ev.clientY;
+                    var startNorm = (_quizEditor.bbox_norm_live[sel] || []).slice();
+                    if (startNorm.length < 4) return;
+                    var dreh = ((_quizEditor.dreh % 4) + 4) % 4;
+                    var masse = anzeigeMasse(iw, ih, dreh);
+                    var skw = letzteBigW / (masse[0] || 1), skh = letzteBigH / (masse[1] || 1);
+                    var bewegenGr = (mev) => {
+                        try { mev.preventDefault(); } catch (_e) {}
+                        if (zeiger.size > 1) return;   // zwei Finger = zoomen, nicht ziehen
+                        var dxAnz = (mev.clientX - sx) / ((skw || 1) * zoom.s);
+                        var dyAnz = (mev.clientY - sy) / ((skh || 1) * zoom.s);
+                        var dOrg = bboxDeltaDrehen(dxAnz, dyAnz, dreh);
+                        var px = bboxPixelVonNorm(startNorm, iw, ih);
+                        var neu = bboxSkalieren(px, griffUmrechnen(griffName, dreh),
+                                                dOrg[0], dOrg[1], iw, ih);
+                        _quizEditor.bbox_norm_live[sel] = bboxNormClampen(bboxNormVonPixeln(neu, iw, ih));
+                        resync(); zeigeAuswahlGriffe();
+                    };
+                    var losGr = () => {
+                        wrap.removeEventListener('pointermove', bewegenGr);
+                        wrap.removeEventListener('pointerup', losGr);
+                        wrap.removeEventListener('pointercancel', losGr);
+                    };
+                    wrap.addEventListener('pointermove', bewegenGr);
+                    wrap.addEventListener('pointerup', losGr);
+                    wrap.addEventListener('pointercancel', losGr);
+                }, true);
+                resync();
+                // Bei Formatwechsel (Hoch/Quer/Drehung) die Kästen neu an das
+                // gerenderte Bild koppeln (Wunsch des Betreibers: Kästen müssen stimmen).
+                const _neuLayouten = () => { try { resync(); zeigeAuswahlGriffe(); } catch (_e) {} };
+                window.addEventListener('resize', _neuLayouten);
+                window.addEventListener('orientationchange', _neuLayouten);
+                setTimeout(_neuLayouten, 250);
+
+                // --- Werkzeugleiste: ↩ Zurück + ⟳ Drehen + 💾 Speichern ---
+                const zurueckBtn = document.createElement('div');
+                zurueckBtn.textContent = '↩';
+                zurueckBtn.title = 'Letzte Aktion rückgängig machen';
+                zurueckBtn.style.cssText = 'width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#2a2a2a;color:#eee;font-size:1rem;cursor:pointer;border:1px solid #555';
+                zurueckBtn.addEventListener('click', (ev) => { ev.stopPropagation(); undoLetzte(); });
+                leiste.appendChild(zurueckBtn);
+                // Drehen: die ANZEIGE des Bildes um 90° (die Rahmen wandern ueber
+                // bboxRotieren mit). Beim Speichern wird die Drehung mit der
+                // RUECKrichtung wieder herausgerechnet.
+                const drehBtn = document.createElement('div');
+                drehBtn.textContent = '⟳';
+                drehBtn.title = 'Bild um 90° drehen (Rahmen drehen mit)';
+                drehBtn.style.cssText = 'width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#2a2a2a;color:#eee;font-size:1.1rem;cursor:pointer;border:1px solid #555';
+                drehBtn.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    snapshotVorAenderung();
+                    _quizEditor.dreh = (((_quizEditor.dreh || 0) + 1) % 4);
+                    try { big.style.transform = _quizEditor.dreh ? ('rotate(' + (_quizEditor.dreh * 90) + 'deg)') : ''; } catch (_e) {}
+                    resync(); zeigeAuswahlGriffe();
+                    meldeEditor('⟳ Anzeige gedreht (' + (_quizEditor.dreh * 90) + '°) — Rahmen sitzen weiter auf den Gesichtern.', true);
+                });
+                leiste.appendChild(drehBtn);
+                // Schritt E (18.10.2026): "＋ Rahmen" — einen Rahmen von Hand
+                // aufziehen, wenn die Erkennung nichts (oder zu wenig) findet.
+                // Nicht in der Referenz-Nachbearbeitung: dort gehoert der Rahmen
+                // zu EINER bekannten Referenz, nicht zu einer neuen Person.
+                if (!_quizEditor.refKontext) {
+                    const rahmenBtn = document.createElement('div');
+                    rahmenBtn.textContent = '＋ Rahmen';
+                    rahmenBtn.title = 'Rahmen von Hand aufziehen (startet als „unbekannt")';
+                    rahmenBtn.style.cssText = 'padding:10px 14px;border-radius:22px;background:#2a2a2a;color:#fd9;font-weight:700;font-size:0.85rem;cursor:pointer;border:1px dashed #8a6a3a;white-space:nowrap';
+                    rahmenBtn.addEventListener('click', (ev) => {
+                        ev.stopPropagation();
+                        rahmenZeichnenStarten();
+                    });
+                    leiste.appendChild(rahmenBtn);
+                }
+                // Schritt I (18.10.2026): "🔍 Neu erkennen" — die Erkennung fuer
+                // GENAU dieses Bild noch einmal laufen lassen (Brille, Profil,
+                // schlechtes Licht: YuNet uebersieht manchmal ein Gesicht).
+                // Nicht in der Referenz-Nachbearbeitung: dort gehoert der Rahmen
+                // zu EINER bekannten Referenz, nicht zu einem neuen Gesicht.
+                if (!_quizEditor.refKontext) {
+                    const erkennBtn = document.createElement('div');
+                    erkennBtn.className = 'vollbild-neu-erkennen';
+                    erkennBtn.textContent = '🔍 Neu erkennen';
+                    erkennBtn.title = 'Erkennung fuer dieses Bild neu laufen lassen (vorhandene Rahmen bleiben unveraendert)';
+                    erkennBtn.style.cssText = 'padding:10px 14px;border-radius:22px;background:#2a2a2a;color:#9fd;font-weight:700;font-size:0.85rem;cursor:pointer;border:1px solid #4a8a7a;white-space:nowrap';
+                    erkennBtn.addEventListener('click', (ev) => {
+                        ev.stopPropagation();
+                        erkenneDiesesBildNeu();
+                    });
+                    leiste.appendChild(erkennBtn);
+                }
+                // Bildbeschreibung: zuerst LESEN, dann bearbeiten oder neu beschreiben lassen (G2, 02.11.2026)
+                if (!_quizEditor.refKontext) {
+                    const beschrBtn = document.createElement('div');
+                    beschrBtn.className = 'vollbild-beschreibung-btn';
+                    beschrBtn.textContent = '📝 Beschreibung';
+                    beschrBtn.title = 'Bildbeschreibung anzeigen, bearbeiten oder neu beschreiben lassen';
+                    beschrBtn.style.cssText = 'padding:10px 14px;border-radius:22px;background:#2a2a2a;color:#d9f;font-weight:700;font-size:0.85rem;cursor:pointer;border:1px solid #7a4a8a;white-space:nowrap';
+                    const beschrKasten = baueBeschreibungKasten({
+                        document: document,
+                        fetch: (u, o) => fetch(u, o),
+                        fileid: () => _quizEditor.fileid,
+                        bekannterText: () => _quizEditor.beschreibung || '',
+                        vorlesen: bildBeschreibungVorlesen,
+                        melde: meldeEditor,
+                        beiText: (txt) => {
+                            _quizEditor.beschreibung = txt;
+                            const db = ov.querySelector('.vollbild-beschreibung');
+                            const dbTxt = db && (db.querySelector('.vollbild-beschreibung-text') || db);
+                            if (dbTxt) dbTxt.textContent = txt;
+                        },
+                        beiOffen: (offen) => {
+                            const db = ov.querySelector('.vollbild-beschreibung');
+                            if (!db) return;
+                            if (offen) { db.style.display = 'none'; return; }
+                            const dbTxt = db.querySelector('.vollbild-beschreibung-text') || db;
+                            db.style.display = (dbTxt && dbTxt.textContent.trim()) ? 'flex' : 'none';
+                        },
+                    });
+                    ov.appendChild(beschrKasten.kasten);
+                    beschrBtn.addEventListener('click', (ev) => {
+                        ev.stopPropagation();
+                        beschrKasten.oeffnen();
+                    });
+                    leiste.appendChild(beschrBtn);
+                }
+                // Alle Rahmen entfernen (Wunsch des Betreibers 01.11.2026: alle falschen/unbekannten Gesichter verwerfen)
+                if (!_quizEditor.refKontext) {
+                    const alleEntfernenBtn = document.createElement('div');
+                    alleEntfernenBtn.className = 'vollbild-alle-entfernen';
+                    alleEntfernenBtn.textContent = '🗑️ Alle entfernen';
+                    alleEntfernenBtn.title = 'Alle Rahmen auf diesem Bild zum Entfernen markieren (💾 Speichern löscht sie dauerhaft aus dem Bild und allen Gruppen)';
+                    alleEntfernenBtn.style.cssText = 'padding:10px 14px;border-radius:22px;background:#2a2020;color:#f99;font-weight:700;font-size:0.85rem;cursor:pointer;border:1px solid #8a4a4a;white-space:nowrap';
+                    alleEntfernenBtn.addEventListener('click', (ev) => {
+                        ev.stopPropagation();
+                        const live = _quizEditor.bbox_norm_live || [];
+                        let hatRahmen = false;
+                        for (let i = 0; i < live.length; i++) {
+                            if (live[i] && live[i].length >= 4) { hatRahmen = true; break; }
+                        }
+                        if (!hatRahmen) {
+                            meldeEditor('Es gibt keine Rahmen zum Entfernen.', false);
+                            return;
+                        }
+                        snapshotVorAenderung();
+                        for (let i = 0; i < live.length; i++) {
+                            _quizEditor.bbox_norm_live[i] = null;
+                        }
+                        _quizEditor.sel = -1;
+                        sel = -1;
+                        resync();
+                        personWahlMalen();
+                        if (typeof personenLeisteMalen === 'function') personenLeisteMalen();
+                        meldeEditor('🗑️ Alle Rahmen zum Entfernen markiert — tippe auf 💾 Speichern, um sie dauerhaft aus dem Bild und allen Gruppen zu löschen.', true);
+                    });
+                    leiste.appendChild(alleEntfernenBtn);
+                }
+                // Schritt G (18.10.2026): Ziel-Personen-Menue JE RAHMEN
+                // (Auftragspunkt 2, "Auswahlliste statt nur 'ist nicht <Name>'"
+                // und die Zuordnung fuer von Hand gezogene Rahmen aus Schritt E).
+                // Gilt nicht in der Referenz-Nachbearbeitung: dort gehoert der
+                // Rahmen zu EINER bekannten Referenz.
+                if (!_quizEditor.refKontext) {
+                    const personWahl = document.createElement('select');
+                    personWahl.className = 'vollbild-person-wahl';
+                    personWahl.title = 'Person fuer den AUSGEWAEHLTEN Rahmen setzen (gilt nur fuer diesen Rahmen)';
+                    personWahl.style.cssText = 'display:none;padding:8px 10px;border-radius:20px;background:#2a2a2a;color:#eee;border:1px solid #555;font-size:0.82rem;max-width:44vw;cursor:pointer;';
+                    personWahlMalen = function () {
+                        try {
+                            // Bild-Editor B4: im Cloud-Weg gilt nur der eigene Eintrag des Rahmens (keine
+                            // globale Quiz-Zielperson) und die Namen kommen aus dem Gruppen-Quiz.
+                            var wahl = _quizEditor.fileid
+                                ? String(((_quizEditor.personen || [])[sel]) == null ? '' : _quizEditor.personen[sel]).trim()
+                                : rahmenPersonWahl(_quizEditor, sel);
+                            var namen = rahmenPersonMenueListe(
+                                _quizEditor.fileid ? cloudPersonenNamen(_quizEditor, sel) : quizKatalogNamen(), wahl);
+                            personWahl.textContent = '';
+                            var leer = document.createElement('option');
+                            leer.value = '';
+                            leer.textContent = '👤 Person für diesen Rahmen …';
+                            personWahl.appendChild(leer);
+                            for (var n = 0; n < namen.length; n++) {
+                                var op = document.createElement('option');
+                                op.value = namen[n];
+                                op.textContent = namen[n];
+                                personWahl.appendChild(op);
+                            }
+                            if (_quizEditor.fileid) {
+                                var opNeu = document.createElement('option');
+                                opNeu.value = '__neue_person__';
+                                opNeu.textContent = cloudNeuePersonOptionText();
+                                personWahl.appendChild(opNeu);
+                            }
+                            personWahl.value = wahl;
+                            personWahl.disabled = (sel < 0);
+                            if (typeof personSucheBtn !== 'undefined' && personSucheBtn) {
+                                if (sel < 0) {
+                                    personSucheBtn.textContent = '👤 Rahmen wählen …';
+                                    personSucheBtn.disabled = true;
+                                    personSucheBtn.style.opacity = '0.5';
+                                } else {
+                                    personSucheBtn.disabled = false;
+                                    personSucheBtn.style.opacity = '1';
+                                    personSucheBtn.textContent = wahl ? ('👤 ' + wahl + ' ▾') : '👤 Person suchen … ▾';
+                                    personSucheBtn.style.background = wahl ? '#1a3d28' : '#18281f';
+                                }
+                            }
+                        } catch (_e) {}
+                    };
+                    personWahl.addEventListener('change', function (ev) {
+                        ev.stopPropagation();
+                        if (_quizEditor.fileid && personWahl.value === '__neue_person__') {
+                            neuePersonZeigen(true);
+                            personWahlMalen();
+                            return;
+                        }
+                        var wert = rahmenPersonSetzen(_quizEditor, sel, personWahl.value);
+                        var leerHinweis = wert ? '' : cloudLeereNamenWahl(_quizEditor, sel);
+                        if (leerHinweis) {
+                            meldeEditor(leerHinweis, false);
+                        } else if (wert) {
+                            meldeEditor('👤 Rahmen ' + (sel + 1) + ' → ' + wert +
+                                        ' (nur dieser Rahmen; 💾 Speichern uebernimmt ihn).', true);
+                        } else {
+                            meldeEditor('Rahmen ' + (sel + 1) + ' bleibt „unbekannt" — beim Speichern wird er nicht zugeordnet.', false);
+                        }
+                        resync(); personWahlMalen();
+                    });
+                    leiste.appendChild(personWahl);
+                    const personSucheBtn = document.createElement('button');
+                    personSucheBtn.type = 'button';
+                    personSucheBtn.className = 'vollbild-person-suche-btn';
+                    personSucheBtn.title = 'Person suchen oder aus KI-Vorschlägen wählen';
+                    personSucheBtn.style.cssText = 'padding:8px 12px;border-radius:20px;background:#18281f;color:#6f6;border:1px solid #2e8b57;font-size:0.82rem;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:6px;max-width:44vw;';
+                    personSucheBtn.textContent = '👤 Person suchen …';
+                    leiste.appendChild(personSucheBtn);
+
+                    const personSucheModal = document.createElement('div');
+                    personSucheModal.className = 'vollbild-person-suche-modal';
+                    personSucheModal.style.cssText = 'position:fixed;bottom:145px;left:50%;transform:translateX(-50%);width:92vw;max-width:380px;background:#121815;border:2px solid #2e8b57;border-radius:18px;padding:12px;box-shadow:0 8px 32px rgba(0,0,0,0.85);z-index:100001;display:none;flex-direction:column;gap:8px;color:#eee;box-sizing:border-box;max-height:60vh;';
+                    ov.appendChild(personSucheModal);
+
+                    function bauePersonSucheInhalt() {
+                        personSucheModal.textContent = '';
+                        const kopfZeile = document.createElement('div');
+                        kopfZeile.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:4px';
+                        const kopfTitel = document.createElement('span');
+                        kopfTitel.style.cssText = 'font-weight:700;font-size:0.9rem;color:#8f8';
+                        kopfTitel.textContent = sel >= 0 ? ('👤 Person für Rahmen ' + (sel + 1) + ' zuordnen') : '👤 Person zuordnen';
+                        kopfZeile.appendChild(kopfTitel);
+                        const schliessenBtn = document.createElement('button');
+                        schliessenBtn.type = 'button';
+                        schliessenBtn.textContent = '✕';
+                        schliessenBtn.style.cssText = 'background:none;border:none;color:#aaa;font-size:1.1rem;cursor:pointer;padding:2px 6px';
+                        schliessenBtn.addEventListener('click', (ev) => { ev.stopPropagation(); personSucheModal.style.display = 'none'; });
+                        kopfZeile.appendChild(schliessenBtn);
+                        personSucheModal.appendChild(kopfZeile);
+
+                        const suchFeld = document.createElement('input');
+                        suchFeld.type = 'text';
+                        suchFeld.className = 'vollbild-person-suche-input';
+                        suchFeld.placeholder = '🔍 Name tippen (z. B. Seb, Leo...)...';
+                        suchFeld.style.cssText = 'width:100%;box-sizing:border-box;padding:8px 10px;border-radius:8px;background:#1a2420;border:1px solid #3a6b4a;color:#fff;font-size:0.95rem;outline:none;';
+                        personSucheModal.appendChild(suchFeld);
+
+                        const inhaltScroll = document.createElement('div');
+                        inhaltScroll.style.cssText = 'overflow-y:auto;max-height:45vh;display:flex;flex-direction:column;gap:6px;padding-right:2px;';
+                        personSucheModal.appendChild(inhaltScroll);
+
+                        const wahlAktuell = _quizEditor.fileid
+                            ? String(((_quizEditor.personen || [])[sel]) == null ? '' : _quizEditor.personen[sel]).trim()
+                            : rahmenPersonWahl(_quizEditor, sel);
+                        const alleNamen = rahmenPersonMenueListe(
+                            _quizEditor.fileid ? cloudPersonenNamen(_quizEditor, sel) : quizKatalogNamen(), wahlAktuell);
+
+                        function setzeName(n) {
+                            if (sel < 0) return;
+                            const hinweis = _quizEditor.fileid ? cloudNameHinweis(_quizEditor, n) : '';
+                            const wert = rahmenPersonSetzen(_quizEditor, sel, n);
+                            const leerHinweis = wert ? '' : cloudLeereNamenWahl(_quizEditor, sel);
+                            personWahl.value = leerHinweis ? _quizEditor.personen[sel] : n;
+                            personSucheModal.style.display = 'none';
+                            if (leerHinweis) {
+                                meldeEditor(leerHinweis, false);
+                            } else if (wert) {
+                                meldeEditor('👤 Rahmen ' + (sel + 1) + ' → ' + wert + (hinweis ? ' (' + hinweis + ')' : '') +
+                                            ' — 💾 Speichern übernimmt ihn.', true);
+                            } else {
+                                meldeEditor('Rahmen ' + (sel + 1) + ' bleibt „unbekannt".', false);
+                            }
+                            resync();
+                            personWahlMalen();
+                            zeigeAuswahlGriffe();
+                        }
+
+                        // KI-Vorschlaege fuer diesen Rahmen ganz oben (Vektor-Aehnlichkeit)
+                        const vorschlaege = (_quizEditor.namensvorschlaege && _quizEditor.namensvorschlaege[sel]) || [];
+                        if (vorschlaege.length) {
+                            const vKopf = document.createElement('div');
+                            vKopf.style.cssText = 'font-size:0.75rem;color:#8a8;font-weight:700;margin-top:4px';
+                            vKopf.textContent = '⭐ KI-VORSCHLAG (ÄHNLICHSTES GESICHT):';
+                            inhaltScroll.appendChild(vKopf);
+                            vorschlaege.forEach((vName) => {
+                                const b = document.createElement('button');
+                                b.type = 'button';
+                                b.className = 'vollbild-suche-ki-opt';
+                                b.style.cssText = 'text-align:left;padding:7px 10px;background:#1a3824;border:1px solid #44aa66;border-radius:10px;color:#9f9;font-weight:700;font-size:0.88rem;cursor:pointer';
+                                b.textContent = '⭐ ' + vName;
+                                b.addEventListener('click', (ev) => { ev.stopPropagation(); setzeName(vName); });
+                                inhaltScroll.appendChild(b);
+                            });
+                        }
+
+                        // Personenliste rendern
+                        const listeWrap = document.createElement('div');
+                        listeWrap.style.cssText = 'display:flex;flex-direction:column;gap:3px;margin-top:4px;';
+                        inhaltScroll.appendChild(listeWrap);
+
+                        function listeMalen(filter) {
+                            listeWrap.textContent = '';
+                            const q = (filter || '').toLowerCase().trim();
+                            let trefferZahl = 0;
+                            alleNamen.forEach((n) => {
+                                if (q && !n.toLowerCase().includes(q)) return;
+                                trefferZahl++;
+                                const opt = document.createElement('div');
+                                opt.className = 'vollbild-suche-zeile';
+                                opt.style.cssText = 'padding:7px 10px;cursor:pointer;border-radius:8px;font-size:0.88rem;background:#16201a;border:1px solid #233529;color:#eee';
+                                if (n === wahlAktuell) {
+                                    opt.style.borderColor = '#44aa66';
+                                    opt.style.background = '#1f3526';
+                                    opt.style.fontWeight = '700';
+                                    opt.textContent = '✓ ' + n;
+                                } else {
+                                    opt.textContent = n;
+                                }
+                                opt.addEventListener('click', (ev) => { ev.stopPropagation(); setzeName(n); });
+                                listeWrap.appendChild(opt);
+                            });
+                            if (q && _quizEditor.fileid && !alleNamen.some((n) => n.toLowerCase() === q)) {
+                                const neuOpt = document.createElement('div');
+                                neuOpt.className = 'vollbild-suche-neu-opt';
+                                neuOpt.style.cssText = 'padding:8px 10px;cursor:pointer;border-radius:8px;font-size:0.88rem;background:#281e14;border:1px solid #8a5a2a;color:#fc8;font-weight:700;margin-top:4px';
+                                neuOpt.textContent = '➕ „' + filter.trim() + '“ als neue Person anlegen (nur am Handy)';
+                                neuOpt.addEventListener('click', (ev) => { ev.stopPropagation(); setzeName(filter.trim()); });
+                                listeWrap.appendChild(neuOpt);
+                            } else if (!trefferZahl) {
+                                const leer = document.createElement('div');
+                                leer.style.cssText = 'color:#888;font-size:0.8rem;padding:6px 4px';
+                                leer.textContent = 'Keine Person gefunden.';
+                                listeWrap.appendChild(leer);
+                            }
+                        }
+
+                        listeMalen('');
+                        suchFeld.addEventListener('input', () => { listeMalen(suchFeld.value); });
+                        setTimeout(() => { try { suchFeld.focus(); } catch (_e) {} }, 60);
+                    }
+
+                    personSucheBtn.addEventListener('click', (ev) => {
+                        ev.stopPropagation();
+                        if (sel < 0) {
+                            meldeEditor('Erst einen Rahmen antippen, dann eine Person zuordnen.', false);
+                            return;
+                        }
+                        if (personSucheModal.style.display === 'flex') {
+                            personSucheModal.style.display = 'none';
+                        } else {
+                            personSucheModal.style.display = 'flex';
+                            bauePersonSucheInhalt();
+                        }
+                    });
+
+                    personWahlMalen();
+                    // Bild-Editor B4: "Neue Person …" — Namenseingabe in der umbrechenden Werkzeugleiste.
+                    if (_quizEditor.fileid) {
+                        const neuePersonFeld = document.createElement('input');
+                        neuePersonFeld.className = 'vollbild-neue-person';
+                        neuePersonFeld.type = 'text';
+                        neuePersonFeld.maxLength = 60;
+                        neuePersonFeld.placeholder = 'Name der neuen Person (nur am Handy)';
+                        neuePersonFeld.style.cssText = 'display:none;padding:8px 12px;border-radius:20px;background:#1b1b1b;color:#eee;border:1px solid #8a6a3a;font-size:0.85rem;max-width:56vw;min-width:0;box-sizing:border-box';
+                        const neuePersonOk = document.createElement('div');
+                        neuePersonOk.className = 'vollbild-neue-person-ok';
+                        neuePersonOk.textContent = 'OK';
+                        neuePersonOk.style.cssText = 'display:none;padding:8px 16px;border-radius:20px;background:#1f3a2a;border:1px solid #2e8b57;color:#9f9;font-weight:700;font-size:0.85rem;cursor:pointer;max-width:30vw';
+                        neuePersonZeigen = function (an) {
+                            neuePersonFeld.style.display = an ? 'inline-block' : 'none';
+                            neuePersonOk.style.display = an ? 'inline-block' : 'none';
+                            if (an) { try { neuePersonFeld.focus(); } catch (_e) {} }
+                        };
+                        const neuePersonUebernehmen = function () {
+                            const name = String(neuePersonFeld.value || '').trim();
+                            if (!name) { meldeEditor('Bitte einen Namen eingeben.', false); return; }
+                            if (sel < 0) { meldeEditor('Erst einen Rahmen antippen, dann den Namen setzen.', false); return; }
+                            const hinweis = cloudNameHinweis(_quizEditor, name);
+                            rahmenPersonSetzen(_quizEditor, sel, name);
+                            neuePersonFeld.value = '';
+                            neuePersonZeigen(false);
+                            meldeEditor('👤 Rahmen ' + (sel + 1) + ' → ' + name + (hinweis ? ' (' + hinweis + ')' : '') +
+                                        ' — 💾 Speichern übernimmt ihn.', true);
+                            resync(); zeigeAuswahlGriffe();
+                        };
+                        neuePersonOk.addEventListener('click', function (ev) { ev.stopPropagation(); neuePersonUebernehmen(); });
+                        neuePersonFeld.addEventListener('keydown', function (ev) {
+                            ev.stopPropagation();
+                            if (ev.key === 'Enter') { try { ev.preventDefault(); } catch (_e) {} neuePersonUebernehmen(); }
+                        });
+                        leiste.appendChild(neuePersonFeld);
+                        leiste.appendChild(neuePersonOk);
+                        ladeCloudPersonenNamen().then(function () { try { personWahlMalen(); } catch (_e) {} });
+                    }
+                    // Der Katalog kommt aus dem Netz: trifft er spaeter ein, wird
+                    // die Liste nachgefuellt — nie still leer (Ladefehler nennt
+                    // quizKatalogFehlerText() im Suchfeld des Quiz).
+                    ladeQuizKatalogNamen().then(function () { try { personWahlMalen(); } catch (_e) {} });
+                }
+                // Schritt F (18.10.2026): die PERSONEN-LEISTE — "unten die
+                // Personen durchklicken, der zugehoerige Rahmen wird im Bild
+                // gezeigt" (Auftragspunkt 5). Sie haengt als absolut gesetztes
+                // Kind AN der Werkzeugleiste (`bottom:100%`), damit sie in jeder
+                // Fensterhoehe genau darueber liegt — eine feste Pixelhoehe war
+                // falsch: die Werkzeugleiste ist 69 px hoch, die Leiste sass
+                // damit 19 px IN ihr (im echten Browser gemessen, 18.10.2026).
+                // Sie stoert die Knopfreihe nicht (ausserhalb des Flusses), darf
+                // umbrechen und bleibt ohne bekannte Person ganz weg.
+                if (!_quizEditor.refKontext) {
+                    const personenLeiste = document.createElement('div');
+                    personenLeiste.className = 'vollbild-personen-leiste';
+                    personenLeiste.style.cssText = 'position:absolute;bottom:100%;left:50%;transform:translateX(-50%);margin-bottom:8px;z-index:99999;display:none;gap:8px;align-items:center;background:rgba(15,25,20,.92);border:1px solid #2e8b57;border-radius:24px;padding:5px 10px;box-shadow:0 3px 12px rgba(0,0,0,.6);max-width:92vw;flex-wrap:wrap;justify-content:center';
+                    personenLeisteMalen = function () {
+                        try {
+                            const eintraege = rahmenPersonenLeiste(_quizEditor,
+                                _quizEditor.gesichter || [], _quizEditor.bildPfad || '');
+                            personenLeiste.textContent = '';
+                            if (!eintraege.length) { personenLeiste.style.display = 'none'; return; }
+                            const marke = document.createElement('span');
+                            marke.textContent = '👤';
+                            marke.style.cssText = 'font-size:0.8rem;opacity:.8';
+                            personenLeiste.appendChild(marke);
+                            for (let n = 0; n < eintraege.length; n++) {
+                                const eintrag = eintraege[n];
+                                const aktiv = (eintrag.idx === sel);
+                                const b = document.createElement('button');
+                                b.type = 'button';
+                                b.className = 'vollbild-personen-knopf';
+                                b.dataset.rahmen = String(eintrag.idx);
+                                b.textContent = eintrag.person;
+                                b.setAttribute('aria-pressed', aktiv ? 'true' : 'false');
+                                b.style.cssText = 'padding:6px 12px;border-radius:18px;font-size:0.82rem;font-weight:700;cursor:pointer;white-space:nowrap;'
+                                    + (aktiv ? 'background:#2a5338;border:1px solid #4f4;color:#9f9'
+                                             : 'background:#2a2a2a;border:1px solid #555;color:#eee');
+                                b.addEventListener('click', function (ev) {
+                                    ev.stopPropagation();
+                                    const idx = rahmenWahlAusLeiste(_quizEditor,
+                                        _quizEditor.gesichter || [], _quizEditor.bildPfad || '', eintrag.person);
+                                    if (idx < 0) return;
+                                    sel = idx; resync(); zeigeAuswahlGriffe();
+                                });
+                                personenLeiste.appendChild(b);
+                            }
+                            personenLeiste.style.display = 'flex';
+                        } catch (_e) {}
+                    };
+                    leiste.appendChild(personenLeiste);
+                    personenLeisteMalen();
+                }
+                if (_quizEditor.dreh) { try { big.style.transform = 'rotate(' + (_quizEditor.dreh * 90) + 'deg)'; } catch (_e) {} }
+                // Schritt A2 (16.10.2026): KEIN Speichern ohne Ziel. Der Knopf
+                // entsteht nur, wenn Person UND Bildzeile zum offenen Editor
+                // passen (oder eine Referenz nachbearbeitet wird); fehlt das
+                // Ziel, steht hier ein ehrlicher Hinweis statt eines Knopfes,
+                // der nichts bewirken kann.
+                const speicherZiel = editorSpeicherZiel(_quizEditor, sel);
+                if (speicherZiel.ok) {
+                    const speichernBtn = document.createElement('div');
+                    speichernBtn.textContent = '💾 Speichern';
+                    speichernBtn.title = 'Rahmen übernehmen';
+                    speichernBtn.style.cssText = 'padding:10px 20px;border-radius:22px;background:#1f3a2a;border:1px solid #2e8b57;color:#9f9;font-weight:700;font-size:0.9rem;cursor:pointer';
+                    speichernBtn.addEventListener('click', (ev) => {
+                        ev.stopPropagation();
+                        // Bild-Editor B4: im Cloud-Weg schickt EIN 💾 alle Aenderungen gesammelt.
+                        if (speicherZiel.weg === 'cloud') { speichereBildCloud(speichernBtn); return; }
+                        speichereEditorRahmen(sel, iw, ih, speichernBtn);
+                    });
+                    leiste.appendChild(speichernBtn);
+                    // Schritt C (Mehrfachbearbeitung, 18.10.2026): liegen MEHRERE
+                    // Rahmen auf dem Bild, gibt es daneben "alle speichern" —
+                    // nacheinander, je Rahmen eine eigene Meldung. Bei einem
+                    // einzigen Rahmen ist der Knopf ueberfluessig (derselbe Weg).
+                    const rahmenZahl = (speicherZiel.weg === 'cloud') ? 0 : rahmenIndizes(_quizEditor).length;
+                    if (rahmenZahl >= 2) {
+                        const alleBtn = document.createElement('div');
+                        alleBtn.textContent = '💾 alle ' + rahmenZahl;
+                        alleBtn.title = 'Alle ' + rahmenZahl + ' Rahmen nacheinander speichern';
+                        alleBtn.style.cssText = 'padding:10px 16px;border-radius:22px;background:#1f2a3a;border:1px solid #4a7cc7;color:#bcd9ff;font-weight:700;font-size:0.88rem;cursor:pointer';
+                        alleBtn.addEventListener('click', (ev) => {
+                            ev.stopPropagation();
+                            speichereAlleRahmen(iw, ih, alleBtn);
+                        });
+                        leiste.appendChild(alleBtn);
+                    }
+                } else {
+                    const speicherHinweis = document.createElement('div');
+                    speicherHinweis.textContent = '💾 ' + speicherZiel.grund;
+                    speicherHinweis.style.cssText = 'padding:8px 14px;border-radius:20px;background:#241d1d;border:1px dashed #8a6a6a;color:#dbb;font-size:0.78rem;max-width:62vw';
+                    leiste.appendChild(speicherHinweis);
+                }
+                // Bild-Editor B4: das Gruppen-Gesicht beim Oeffnen markiert halten; ohne erkannte Gesichter
+                // sagen, was geht.
+                if (_quizEditor.fileid) {
+                    if (sel >= 0) { zeigeAuswahlGriffe(); }
+                    else if (!rahmenIndizes(_quizEditor).length) {
+                        meldeEditor('Auf diesem Bild ist kein Gesicht gespeichert — mit „＋ Rahmen" eins aufziehen oder „🔍 Neu erkennen".', true);
+                    }
+                }
+            });
+        }
+    } catch (_) {}
+    document.body.appendChild(ov);
+}
+
+// Übernimmt die Rahmen aus dem Vollbild-Editor — DREI Faelle, deterministisch
+// (Fix 2026-09-15):
+//  (a) REFERENZ-NACHBEARBEITUNG (Katalog -> Referenz -> Bild -> "in der
+//      Referenz anpassen"): POST /api/gesichter/referenzen/{name}/{ref_id}/bbox.
+//      Die Person bleibt dieselbe (stabile ref_id), ALLE anderen Referenzen
+//      bleiben erhalten (keine Dublette); danach wird die Referenz-Ansicht neu
+//      geladen -> Rahmen + Miniatur sind aktualisiert.
+//  (b) QUIZ-RUNDE: die korrigierte bbox geht als Antwort ans Backend, die
+//      Region wird als "bestaetigt" markiert. Damit fuehrt Speichern NICHT
+//      erneut durch alle Gesichter (Befund der Betreiber).
+//  (c) Ohne Person/Kontext: ehrlicher Hinweis — der Rahmen bleibt erhalten
+//      (nichts geht verloren, es wird nur nichts gespeichert).
+//
+// Schritt A2 (16.10.2026): "kein Speichern ohne Ziel" (Befund Fehler 2 —
+// Rahmen verschieben, speichern, Position ist nicht im Datenbestand).
+// Grund fuer den Riegel: die beiden Zielwerte _aktuelleQuizPerson /
+// _aktuellerQuizPfad gehoeren zu EINER Quizrunde. Bleibt einer davon stehen,
+// waehrend ein anderes Bild offen ist, landete der Rahmen am falschen Bild.
+// Darum muss das Ziel zum OFFENEN Editor passen (Bildzeile wie im Editor).
+function pfadKennung(p) {
+    // Vergleichsform eines Bildpfades: ohne Leerzeichen, ohne ?v=…/Anhang.
+    return String(p == null ? '' : p).trim().split('#')[0].split('?')[0];
+}
+
+function dateiAnzeigeName(p) {
+    const k = pfadKennung(p);
+    const teile = k.split('/');
+    return teile[teile.length - 1] || k;
+}
+
+// ---------------------------------------------------------------------------
+// Schritt G (18.10.2026): Zielperson JE RAHMEN. Bis hierher galt im ganzen
+// Bild EINE globale Zielperson (_aktuelleQuizPerson) — auf einem Foto mit
+// mehreren Personen liess sich damit nur eine zuordnen. Ab jetzt kann jeder
+// Rahmen seine eigene Person tragen (_quizEditor.personen[idx], Menue in der
+// Werkzeugleiste). Rueckwaertsvertraeglich: ist fuer den Rahmen NICHTS gesetzt,
+// gilt weiter die globale Zielperson.
+// ---------------------------------------------------------------------------
+
+/** Person, die fuer DIESEN Rahmen gilt: der eigene Eintrag, sonst die globale
+ *  Zielperson. `''` heisst ausdruecklich "unbekannt" (Schritt E) und faellt
+ *  NICHT auf die globale Person zurueck — dieser Fall wird im Speicherweg
+ *  ohnehin abgelehnt. */
+function rahmenPersonWahl(e, idx) {
+    const ed = e || _quizEditor || {};
+    const liste = ed.personen || [];
+    const i = (typeof idx === 'number' && idx >= 0) ? idx : 0;
+    const eigen = (liste[i] == null) ? '' : String(liste[i]).trim();
+    if (eigen) return eigen;
+    return String(_aktuelleQuizPerson || '').trim();
+}
+
+/** Setzt die Person fuer EINEN Rahmen. Rueckgabe: der uebernommene Wert
+ *  ('' = nichts gesetzt, z. B. weil es den Rahmen nicht gibt). Aendert die
+ *  globale Zielperson NICHT. */
+function rahmenPersonSetzen(e, idx, person) {
+    const ed = e || _quizEditor || {};
+    const i = (typeof idx === 'number' && idx >= 0) ? idx : -1;
+    const r = (ed.bbox_norm_live || [])[i];
+    if (!(i >= 0 && r && r.length >= 4)) return '';
+    if (!Array.isArray(ed.personen)) ed.personen = [];
+    const wert = String(person == null ? '' : person).trim();
+    ed.personen[i] = wert;
+    return wert;
+}
+
+/** Eintraege des Ziel-Personen-Menues: der aktuell gesetzte Wert zuerst, dann
+ *  der Katalog — jeder Name genau einmal, keine Leerzeilen. */
+function rahmenPersonMenueListe(katalogNamen, aktuell) {
+    const raus = [];
+    const dazu = (n) => {
+        const s = String(n == null ? '' : n).trim();
+        if (s && raus.indexOf(s) === -1) raus.push(s);
+    };
+    dazu(aktuell);
+    (katalogNamen || []).forEach(dazu);
+    return raus;
+}
+
+// Passt das gespeicherte Ziel (Person + Bildzeile) zu DIESEM Editor?
+// Schritt G: `idx` nennt den Rahmen — ohne Angabe gilt Rahmen 0 (und damit
+// wie bisher die globale Zielperson, wenn kein eigener Eintrag existiert).
+function editorSpeicherZiel(e, idx) {
+    const ed = e || _quizEditor || {};
+    const ctx = ed.refKontext || null;
+    if (ctx && ctx.name && ctx.ref_id) {
+        return { ok: true, weg: 'referenz', person: ctx.name, pfad: '', grund: '' };
+    }
+    // Bild-Editor B4 (27.10.2026): mit fileid speichert der Editor ueber die Bild-Routen des
+    // Gruppen-Quiz (bild-rahmen). Bewusst inline (kein weiterer Funktionsaufruf).
+    if (ed.fileid) {
+        const fid = String(ed.fileid).trim();
+        if (/^[0-9]{1,20}$/.test(fid)) {
+            return { ok: true, weg: 'cloud', fileid: fid, person: '', pfad: '', grund: '' };
+        }
+        return { ok: false, weg: 'cloud', fileid: fid, person: '', pfad: '',
+                 grund: 'Kein Speicherziel: ungueltige Bildkennung.' };
+    }
+    const person = rahmenPersonWahl(ed, idx);
+    const pfad = pfadKennung(_aktuellerQuizPfad);
+    const bild = pfadKennung(ed.bildPfad);
+    if (person && pfad && bild && pfad === bild) {
+        return { ok: true, weg: 'quiz', person: person, pfad: pfad, grund: '' };
+    }
+    let grund;
+    if (!bild) {
+        grund = 'Kein Speicherziel: dieses Bild gehoert zu keiner offenen Quizrunde.';
+    } else if (!person) {
+        grund = 'Kein Speicherziel: noch keine Person fuer dieses Bild gewaehlt.';
+    } else if (!pfad) {
+        grund = 'Kein Speicherziel: zu diesem Bild liegt kein Bildpfad vor.';
+    } else {
+        grund = 'Kein Speicherziel: die gewaehlte Person gehoert zu einem anderen Bild (' +
+                dateiAnzeigeName(pfad) + ').';
+    }
+    return { ok: false, weg: 'quiz', person: person, pfad: pfad, bild: bild, grund: grund };
+}
+
+// Schritt C (Mehrfachbearbeitung, 18.10.2026): welche Rahmen sind speicherbar?
+// Gezaehlt wird nur, was wirklich einen vollstaendigen Rahmen traegt — leere
+// Plaetze in `bbox_norm_live` (Luecken aus der Erkennung) sind keine Rahmen.
+function rahmenIndizes(e) {
+    const ed = e || _quizEditor || {};
+    const liste = ed.bbox_norm_live || [];
+    const raus = [];
+    for (let i = 0; i < liste.length; i++) {
+        const n = liste[i];
+        if (n && n.length >= 4) raus.push(i);
+    }
+    return raus;
+}
+
+// ── Bild-Editor B4 (27.10.2026): Editor Cloud-Weg ───────────────────────────
+// Mit `zeigeBildVollbild(img, gesichter, {fileid, markiere})` speichert der Editor
+// nicht ueber Handy-Quiz oder Katalog-Referenz, sondern ueber die Bild-Routen des
+// Gruppen-Quiz (fileid = Kennung in der pCloud):
+//   GET  /api/gruppen/bild-gesichter?fileid=   die Gesichter des Bildes (Quelle der Wahrheit)
+//   POST /api/gruppen/bild-rahmen              ALLE Aenderungen gesammelt (hoechstens 30)
+//   POST /api/gruppen/bild-erkennen            Erkennung neu laufen lassen (speichert nichts)
+// Zustand je Rahmen (gleicher Index wie `bbox_norm_live`): `gids[i]` (Kennung des Servers,
+// '' = neues Gesicht), `basis[i]` ({bbox_norm, name} wie vom Server geladen, null = neu),
+// `personen[i]` (aktueller Name, '' = ohne). Aus dem Unterschied zur Basis entsteht der
+// Sendebody; unveraenderte Gesichter werden nicht geschickt. Ohne fileid wird nichts
+// davon benutzt — Quiz-Weg und Referenz-Weg bleiben, wie sie waren. Alle Werte, die in
+// die Oberflaeche kommen (Namen, Meldungen), gehen nur per textContent hinein.
+
+/** Gueltige Bildkennung: nur Ziffern (die Routen verlangen sie so). */
+function cloudFileidGueltig(fileid) {
+    if (fileid == null || typeof fileid === 'boolean') return false;
+    return /^[0-9]{1,20}$/.test(String(fileid).trim());
+}
+
+/** Rahmen so, wie ihn der Server annimmt: im Bild, mindestens 1 % breit/hoch, 6 Stellen. */
+function cloudBboxFuerServer(norm) {
+    if (!Array.isArray(norm) || norm.length < 4) return null;
+    const w = norm.slice(0, 4).map(Number);
+    if (!w.every(function (v) { return isFinite(v); })) return null;
+    const r6 = function (v) { return Math.round(v * 1e6) / 1e6; };
+    const rest = function (p) { return Math.floor((1 - p) * 1e6) / 1e6; };
+    const x = r6(Math.max(0, Math.min(w[0], 0.98)));
+    const y = r6(Math.max(0, Math.min(w[1], 0.98)));
+    const b = Math.min(r6(Math.max(0.01, w[2])), rest(x));
+    const h = Math.min(r6(Math.max(0.01, w[3])), rest(y));
+    return [x, y, b, h];
+}
+
+/** Index des Gesichts, das beim Oeffnen markiert sein soll (gid zuerst, sonst beste Deckung >= 0,5). */
+function cloudStartAuswahl(gesichter, markiere) {
+    if (!markiere || !Array.isArray(gesichter)) return -1;
+    if (markiere.gid != null && markiere.gid !== '') {
+        for (let i = 0; i < gesichter.length; i++) {
+            if (gesichter[i] && String(gesichter[i].gid) === String(markiere.gid)) return i;
+        }
+    }
+    let beste = 0.5, treffer = -1;
+    if (Array.isArray(markiere.bbox_norm)) {
+        for (let i = 0; i < gesichter.length; i++) {
+            const mass = bboxUeberdeckung(markiere.bbox_norm, gesichter[i] && gesichter[i].bbox_norm);
+            if (mass >= beste) { beste = mass; treffer = i; }
+        }
+    }
+    return treffer;
+}
+
+/** Baut den Editorzustand aus der Gesichtsliste des Servers (ersetzt alles Bisherige).
+ *  Gesichter ohne brauchbaren Rahmen werden uebersprungen. Rueckgabe: Zahl der Rahmen. */
+function bildEditorCloudZustand(e, gesichter, markiere) {
+    const liste = Array.isArray(gesichter) ? gesichter : [];
+    const rahmen = [], personen = [], gids = [], basis = [], faces = [];
+    for (let i = 0; i < liste.length; i++) {
+        const g = liste[i];
+        if (!g || !Array.isArray(g.bbox_norm) || g.bbox_norm.length < 4) continue;
+        const roh = g.bbox_norm.slice(0, 4).map(Number);
+        if (!roh.every(function (v) { return isFinite(v); })) continue;
+        const n = bboxNormClampen(roh);
+        const name = (g.name == null) ? '' : String(g.name).trim();
+        rahmen.push(n);
+        personen.push(name);
+        gids.push(g.gid == null ? '' : String(g.gid));
+        basis.push({ bbox_norm: n.slice(), name: name });
+        faces.push(g);
+    }
+    e.bbox_norm_live = rahmen;
+    e.personen = personen;
+    e.gids = gids;
+    e.basis = basis;
+    e.gesichter = faces;
+    e.px_rest = [];
+    e.undo = [];
+    e.vorschlaege = [];
+    e.namensvorschlaege = [];
+    e.startAuswahl = cloudStartAuswahl(faces, markiere);
+    return rahmen.length;
+}
+
+/** Was hat sich gegenueber der Basis geaendert? -> {aenderungen, zuViele, max}.
+ *  verschoben -> {gid, bbox_norm}; geloescht -> {gid, entfernen:true}; neuer Name -> {gid, name};
+ *  neuer Rahmen -> {neu:true, bbox_norm, name?}. Unveraenderte Gesichter fehlen. */
+function bildEditorCloudAenderungen(e) {
+    const ed = e || {};
+    const live = ed.bbox_norm_live || [];
+    const aend = [];
+    for (let i = 0; i < live.length; i++) {
+        const b = (ed.basis || [])[i];
+        const cur = live[i];
+        const gueltig = !!(cur && cur.length >= 4);
+        const roh = (ed.personen || [])[i];
+        const name = (roh == null) ? '' : String(roh).trim();
+        if (b) {
+            const gid = String((ed.gids || [])[i] || '');
+            if (!gid) continue;
+            if (!gueltig) { aend.push({ gid: gid, entfernen: true }); continue; }
+            const a = { gid: gid };
+            const jetzt = cloudBboxFuerServer(cur);
+            const vorher = cloudBboxFuerServer(b.bbox_norm);
+            let gleichRahmen = !!(jetzt && vorher);
+            for (let k = 0; gleichRahmen && k < 4; k++) {
+                if (Math.abs(jetzt[k] - vorher[k]) > 0.00001) gleichRahmen = false;
+            }
+            if (jetzt && !gleichRahmen) a.bbox_norm = jetzt;
+            if (name && name !== b.name) a.name = name;
+            if (a.bbox_norm || a.name) aend.push(a);
+        } else if (gueltig) {
+            const rahmen = cloudBboxFuerServer(cur);
+            if (!rahmen) continue;
+            const a = { neu: true, bbox_norm: rahmen };
+            if (name) a.name = name;
+            aend.push(a);
+        }
+    }
+    return { aenderungen: aend, zuViele: aend.length > 30, max: 30 };
+}
+
+/** Meldung aus der Server-Antwort von bild-rahmen. `neuLaden` = es wurde (teilweise) geschrieben. */
+function bildEditorCloudMeldung(antwort, anzahl) {
+    if (!antwort || typeof antwort !== 'object') {
+        return { ok: false, neuLaden: false, text: '⚠️ Keine verständliche Antwort vom Server — nichts bestätigt.' };
+    }
+    const fehler = (typeof antwort.fehler === 'string') ? antwort.fehler.trim() : '';
+    if (antwort.ok === true) {
+        if (antwort.geschrieben === false) {
+            return { ok: true, neuLaden: true, text: '✓ Der Server hatte schon genau diesen Stand — nichts zu ändern.' };
+        }
+        const n = Number(anzahl) || 0;
+        return { ok: true, neuLaden: true, text: '✓ ' + n + (n === 1 ? ' Änderung' : ' Änderungen') + ' gespeichert' };
+    }
+    if (antwort.teilweise === true) {
+        return { ok: false, neuLaden: true, text: '⚠️ ' + (fehler || 'Nur ein Teil wurde gespeichert.') };
+    }
+    return { ok: false, neuLaden: antwort.geschrieben === true,
+             text: '⚠️ Nicht gespeichert: ' + (fehler || 'unbekannter Fehler.') };
+}
+
+/** Die Gesichter eines Bildes vom Server holen. Wirft nie. */
+async function cloudGesichterLaden(fileid) {
+    try {
+        const r = await fetch(API_BASE + '/api/gruppen/bild-gesichter?fileid=' + encodeURIComponent(String(fileid)));
+        const d = await r.json();
+        if (d && typeof d === 'object') return d;
+    } catch (_e) {}
+    return { ok: false, fehler: 'Die Gesichter dieses Bildes sind nicht ladbar.' };
+}
+
+/** 💾 im Cloud-Weg: alle Aenderungen in EINEM bild-rahmen-Aufruf, Meldung aus der Antwort,
+ *  danach die Gesichter neu laden (neue gids uebernehmen). Wirft nie. */
+async function speichereBildCloud(btn) {
+    const e = _quizEditor || {};
+    const melde = (typeof e.melde === 'function') ? e.melde : function () {};
+    const zurueck = function (text) { try { if (btn) btn.textContent = text; } catch (_x) {} };
+    const ziel = editorSpeicherZiel(e, 0);
+    if (!ziel.ok || ziel.weg !== 'cloud') {
+        melde('⚠️ ' + (ziel.grund || 'Kein Speicherziel für dieses Bild.'), false);
+        return { ok: false, gesendet: 0, grund: ziel.grund || 'kein Cloud-Ziel' };
+    }
+    if (e.cloudSpeichert) {
+        melde('Speichern läuft noch …', true);
+        return { ok: false, gesendet: 0, grund: 'laeuft' };
+    }
+    const npFeld = (typeof document !== 'undefined' && typeof document.querySelector === 'function') ? document.querySelector('.vollbild-neue-person') : null;
+    const curSel = (typeof e.sel === 'number' && e.sel >= 0) ? e.sel : (e.startAuswahl >= 0 ? e.startAuswahl : 0);
+    if (npFeld && npFeld.value && npFeld.value.trim() && (e.bbox_norm_live || []).length > 0) {
+        const val = npFeld.value.trim();
+        const targetIdx = (curSel >= 0 && curSel < (e.bbox_norm_live || []).length) ? curSel : 0;
+        rahmenPersonSetzen(e, targetIdx, val);
+        npFeld.value = '';
+        const npOk = (typeof document !== 'undefined' && typeof document.querySelector === 'function') ? document.querySelector('.vollbild-neue-person-ok') : null;
+        if (npOk) npOk.style.display = 'none';
+        npFeld.style.display = 'none';
+    }
+    const plan = bildEditorCloudAenderungen(e);
+    if (plan.zuViele) {
+        melde('⚠️ Zu viele Änderungen auf einmal (' + plan.aenderungen.length + ', höchstens ' + plan.max +
+              ') — mit ↩ einen Teil zurücknehmen, speichern, dann weitermachen.', false);
+        return { ok: false, gesendet: 0, grund: 'zu viele Aenderungen' };
+    }
+    if (!plan.aenderungen.length) {
+        melde('Keine Änderungen zu speichern.', true);
+        return { ok: true, gesendet: 0 };
+    }
+    e.cloudSpeichert = true;
+    zurueck('… speichere');
+    let antwort = null;
+    try {
+        const r = await fetch(API_BASE + '/api/gruppen/bild-rahmen', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fileid: ziel.fileid, aenderungen: plan.aenderungen }),
+        });
+        antwort = await r.json();
+    } catch (_err) {
+        antwort = { ok: false, geschrieben: false, fehler: 'Keine Verbindung zum Agenten — nichts gespeichert, die Änderungen bleiben im Editor.' };
+    }
+    const m = bildEditorCloudMeldung(antwort, plan.aenderungen.length);
+    let text = m.text;
+    if (m.neuLaden && e.fileid === ziel.fileid) {
+        _cloudPersonenNamen = null;
+        let neu = await cloudGesichterLaden(ziel.fileid);
+        if ((!neu || neu.ok !== true) && antwort && Array.isArray(antwort.gesichter) && antwort.gesichter.length) {
+            neu = { ok: true, gesichter: antwort.gesichter };
+        }
+        if (neu && neu.ok === true && Array.isArray(neu.gesichter)) {
+            bildEditorCloudZustand(e, neu.gesichter, null);
+            try { if (typeof e.cloudNeuAufbauen === 'function') e.cloudNeuAufbauen(); } catch (_x) {}
+        } else {
+            text += ' (Die Anzeige konnte nicht neu geladen werden.)';
+        }
+    }
+    e.cloudSpeichert = false;
+    melde(text, m.ok);
+    zurueck(m.ok ? '✓ gespeichert' : '⚠️ Fehler');
+    setTimeout(function () { zurueck('💾 Speichern'); }, m.ok ? 1800 : 2400);
+    if (m.ok && typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+        try {
+            window.dispatchEvent(new CustomEvent('bild-rahmen-gespeichert', {
+                detail: { fileid: ziel.fileid, antwort: antwort, aenderungen: plan.aenderungen }
+            }));
+        } catch (_evErr) {}
+    }
+    return { ok: m.ok, gesendet: plan.aenderungen.length };
+}
+
+/** Erkennung fuer EIN Bild ueber bild-erkennen. Liefert immer ein Objekt (bei Fehler {ok:false, fehler}). */
+async function cloudErkennenAbrufen(fileid) {
+    try {
+        const r = await fetch(API_BASE + '/api/gruppen/bild-erkennen', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fileid: String(fileid) }),
+        });
+        let d = null;
+        try { d = await r.json(); } catch (_x) {}
+        if (d && typeof d === 'object') {
+            if (d.ok !== true && !d.fehler) d.fehler = 'Die Erkennung ist fehlgeschlagen (HTTP ' + r.status + ').';
+            return d;
+        }
+        return { ok: false, fehler: 'Die Erkennung hat nicht lesbar geantwortet (HTTP ' + r.status + ').' };
+    } catch (_e) {
+        return { ok: false, fehler: 'Die Erkennung ist nicht erreichbar.' };
+    }
+}
+
+/** Antwort von bild-erkennen -> Vorschlaege in `e.vorschlaege` (nur neue Gesichter ohne vorhandenen
+ *  Rahmen darunter). Aendert Rahmen, Personen und Basis NICHT. -> {ok, text, neu, bekannt}. */
+function bildEditorCloudErkennung(e, antwort) {
+    e.vorschlaege = [];
+    const zahl = rahmenIndizes(e).length;
+    if (!antwort || antwort.ok !== true) {
+        const grund = (antwort && typeof antwort.fehler === 'string' && antwort.fehler) ? antwort.fehler : 'Die Erkennung ist fehlgeschlagen.';
+        return { ok: false, neu: 0, bekannt: 0,
+                 text: '🔍 ' + grund + ' — die ' + zahl + ' Rahmen bleiben unverändert.' };
+    }
+    const gefunden = Array.isArray(antwort.gesichter) ? antwort.gesichter : [];
+    let bekannt = 0, brauchbar = 0;
+    for (let i = 0; i < gefunden.length; i++) {
+        const g = gefunden[i];
+        if (!g || !Array.isArray(g.bbox_norm) || g.bbox_norm.length < 4) continue;
+        const n = g.bbox_norm.slice(0, 4).map(Number);
+        if (!n.every(function (v) { return isFinite(v); })) continue;
+        brauchbar++;
+        const namen = [];
+        (Array.isArray(g.vorschlaege) ? g.vorschlaege : []).forEach(function (v) {
+            const nm = String((v && v.name) || '').trim();
+            if (nm && namen.indexOf(nm) === -1 && namen.length < 3) namen.push(nm);
+        });
+        let passenderIndex = -1;
+        const live = e.bbox_norm_live || [];
+        for (let k = 0; k < live.length; k++) {
+            if (live[k] && live[k].length >= 4 && bboxUeberdeckung(live[k], n) >= 0.5) {
+                passenderIndex = k;
+                break;
+            }
+        }
+        if (passenderIndex >= 0) {
+            bekannt++;
+            if (!Array.isArray(e.namensvorschlaege)) e.namensvorschlaege = [];
+            if (namen.length) {
+                e.namensvorschlaege[passenderIndex] = namen;
+            }
+            continue;
+        }
+        if (g.status === 'bekannt') { bekannt++; continue; }
+        if (g.status !== 'neu') continue;
+        e.vorschlaege.push({ bbox_norm: bboxNormClampen(n), namen: namen });
+    }
+    const neu = e.vorschlaege.length;
+    if (!neu) {
+        return { ok: true, neu: 0, bekannt: bekannt,
+                 text: '🔍 Erkennung neu gelaufen: ' + brauchbar + ' Gesicht(er) gefunden, keine neuen — alle ' + zahl + ' Rahmen bleiben unverändert.' };
+    }
+    return { ok: true, neu: neu, bekannt: bekannt,
+             text: '🔍 Erkennung neu gelaufen: ' + brauchbar + ' Gesicht(er) gefunden, ' + bekannt + ' schon vorhanden, ' +
+                   neu + ' neu — gestrichelt als Vorschlag gezeigt, antippen übernimmt sie. Bis dahin ändert sich nichts.' };
+}
+
+/** Vorschlag antippen = als neuer Rahmen (ohne Person, ohne gid) anhaengen. -> Index oder -1. */
+function bildEditorCloudVorschlagUebernehmen(e, idx) {
+    const v = (e.vorschlaege || [])[idx];
+    if (!v || !Array.isArray(v.bbox_norm)) return -1;
+    e.vorschlaege.splice(idx, 1);
+    if (!Array.isArray(e.bbox_norm_live)) e.bbox_norm_live = [];
+    const neu = e.bbox_norm_live.length;
+    e.bbox_norm_live.push(v.bbox_norm.slice());
+    if (!Array.isArray(e.personen)) e.personen = [];
+    if (!Array.isArray(e.gids)) e.gids = [];
+    if (!Array.isArray(e.basis)) e.basis = [];
+    if (!Array.isArray(e.namensvorschlaege)) e.namensvorschlaege = [];
+    e.personen[neu] = '';
+    e.gids[neu] = '';
+    e.basis[neu] = null;
+    e.namensvorschlaege[neu] = (v.namen || []).slice();
+    return neu;
+}
+
+/** Gestricheltes Vorschlags-Element ("Neu erkennen"); die Lage setzt resync(). Nur textContent. */
+function cloudVorschlagElement(vorschlag, beiTipp) {
+    const el = document.createElement('div');
+    el.className = 'vollbild-vorschlag';
+    el.setAttribute('data-vorschlag', '1');
+    el.style.cssText = 'position:absolute;border:2px dashed #7df;background:rgba(80,200,255,.12);z-index:7;box-sizing:border-box;cursor:pointer;touch-action:none;display:none';
+    const namen = (vorschlag && vorschlag.namen) || [];
+    const marke = document.createElement('div');
+    marke.className = 'vollbild-vorschlag-name';
+    marke.style.cssText = 'position:absolute;top:100%;left:-2px;margin-top:3px;padding:1px 6px;border-radius:8px;background:#12303a;border:1px solid #4aa;color:#bef;font-size:11px;white-space:nowrap';
+    marke.textContent = namen.length ? ('Vorschlag: ' + namen[0] + '?') : 'Vorschlag';
+    el.appendChild(marke);
+    el.addEventListener('click', function (ev) {
+        try { if (ev && ev.stopPropagation) ev.stopPropagation(); } catch (_x) {}
+        if (typeof beiTipp === 'function') beiTipp();
+    });
+    return el;
+}
+
+let _cloudPersonenNamen = null;   // benannte Personen (GET /api/gruppen/personen), kurz zwischengespeichert
+let _cloudPersonenZeit = 0;
+
+/** Benannte Personen laden (5 Minuten Zwischenspeicher). Wirft nie; bei Fehler bleibt der letzte Stand. */
+async function ladeCloudPersonenNamen(erzwingen) {
+    const jetzt = Date.now();
+    if (!erzwingen && _cloudPersonenNamen && (jetzt - _cloudPersonenZeit) < 300000) {
+        return _cloudPersonenNamen.slice();
+    }
+    try {
+        const res = await fetch(API_BASE + '/api/gruppen/personen');
+        const d = await res.json();
+        if (d && d.ok !== false && Array.isArray(d.personen)) {
+            const namen = [];
+            d.personen.forEach(function (p) {
+                const n = String((p && p.name) || '').trim();
+                if (n && namen.indexOf(n) === -1) namen.push(n);
+            });
+            _cloudPersonenNamen = namen;
+            _cloudPersonenZeit = jetzt;
+            return namen.slice();
+        }
+    } catch (_e) {}
+    return (_cloudPersonenNamen || []).slice();
+}
+
+/** Namen fuer das Personenmenue: Vorschlaege fuer diesen Rahmen zuerst, dann die Namen auf dem
+ *  Bild und die benannten Personen (sortiert, jeder Name einmal). */
+function cloudPersonenNamen(e, idx) {
+    const raus = [];
+    const gesehen = {};
+    const dazu = function (n) {
+        const s = String(n == null ? '' : n).trim();
+        const k = s.toLowerCase();
+        if (s && !gesehen[k]) { gesehen[k] = true; raus.push(s); }
+    };
+    ((e && e.namensvorschlaege && e.namensvorschlaege[idx]) || []).forEach(dazu);
+    const rest = [];
+    const sammeln = function (n) {
+        const s = String(n == null ? '' : n).trim();
+        const k = s.toLowerCase();
+        if (s && !gesehen[k]) { gesehen[k] = true; rest.push(s); }
+    };
+    ((e && e.gesichter) || []).forEach(function (g) { sammeln(g && g.name); });
+    (_cloudPersonenNamen || []).forEach(sammeln);
+    rest.sort(function (a, b) { return a.localeCompare(b, 'de'); });
+    return raus.concat(rest);
+}
+
+/** Text der Menue-Option fuer eine neue Person. */
+function cloudNeuePersonOptionText() {
+    // Plus-Zeichen als Escape: der Wächter der Quiz-Suche zählt das Wort samt Zeichen im Quelltext.
+    return '➕ Neue Person … (nur am Handy)';
+}
+
+/** Hinweis zu einem neu eingegebenen Namen: unbekannter Name = nur am Handy, bekannter = ''. */
+function cloudNameHinweis(e, name) {
+    const s = String(name == null ? '' : name).trim().toLowerCase();
+    if (!s) return '';
+    const bekannt = cloudPersonenNamen(e, -1).some(function (n) { return n.toLowerCase() === s; });
+    return bekannt ? '' : 'neue Person — wird nur am Handy gespeichert, nicht für die Gruppierung am PC';
+}
+/** Cloud-Weg: eine LEERE Personenwahl kann einen Namen vom Server nicht entfernen (bild-rahmen kennt kein
+ *  Namen-Loeschen; ein Gruppenname gehoert der Gruppierung). Dann bleibt der Server-Name im Editor stehen und
+ *  der Rueckgabetext sagt das ehrlich (Hermes B4-R1 Befund 1). Sonst '' und nichts geaendert. */
+function cloudLeereNamenWahl(e, idx) {
+    const ed = e || {};
+    if (!ed.fileid || typeof idx !== 'number' || idx < 0) return '';
+    const jetzt = String(((ed.personen || [])[idx]) == null ? '' : ed.personen[idx]).trim();
+    const b = (ed.basis || [])[idx];
+    const alt = (b && b.name) ? String(b.name).trim() : '';
+    if (jetzt || !alt) return '';
+    if (!Array.isArray(ed.personen)) ed.personen = [];
+    ed.personen[idx] = alt;
+    return 'Rahmen ' + (idx + 1) + ' bleibt „' + alt + '“ — einen Namen kann man hier nicht entfernen. '
+        + 'Falsches Gesicht? Rahmen mit ✕ löschen, oder einen anderen Namen wählen.';
+}
+// ── Ende Bild-Editor B4 ─────────────────────────────────────────────────────
+
+// ---------------------------------------------------------------------------
+// Schritt E (18.10.2026): Rahmen von Hand aufziehen — der Rahmen startet als
+// "unbekannt" und wird NICHT als Referenz geschrieben (kein Vektor, keine
+// Person). Belegt ist der Verwerf-Pfad in
+// docs/changelog-2026-10-18-handrahmen-verwerfpfade.md:
+//  * `baueBildEditor` baute die Rahmenliste frueher AUSSCHLIESSLICH ueber die
+//    Serverliste (`gesichter`) auf — ein Rahmen ohne Server-Eintrag fiel beim
+//    naechsten Oeffnen weg. Genau das verhindert `rahmenListeVerschmelzen`.
+//  * `_fortschritt_roh_speichern` (Backend) haelt Bestaetigungen nur fuer die
+//    letzten 500 Bilder — ein unbekannter Rahmen haengt deshalb NICHT am
+//    Server-Fortschritt, sondern am lokalen Browserspeicher (ehrliche Grenze:
+//    ein geleerter Browserspeicher nimmt ihn mit).
+// ---------------------------------------------------------------------------
+
+/** Anzeigetext der Person eines Rahmens: ohne Person heisst er "unbekannt". */
+function rahmenPersonText(person) {
+    const p = String(person == null ? '' : person).trim();
+    return p || 'unbekannt';
+}
+
+/** Ausdruecklich als unbekannt markiert? (`undefined` = keine Aussage.) */
+function rahmenUnbekannt(person) {
+    return person === '';
+}
+
+// ---------------------------------------------------------------------------
+// Schritt F (18.10.2026): Personen-Leiste des Detailbilds (Auftragspunkt 5).
+// Der Auftrag verlangt, dass man "unten die Personen durchklicken" kann und
+// der zugehoerige Rahmen im Bild hervorgehoben wird. Die Leiste nennt JE
+// RAHMEN die bekannte Person: zuerst der eigene Eintrag (Schritt G), sonst die
+// fuer diese Region bestaetigten Namen (`gesichter[idx].bestaetigt`, wie in der
+// Quiz-Suche). Ein Rahmen, der ausdruecklich "unbekannt" ist ('' aus Schritt E),
+// bekommt bewusst KEINEN Eintrag — hier wird nichts erfunden. Die globale
+// Zielperson zaehlt NICHT: sie gilt fuer das ganze Bild und wuerde jedem Rahmen
+// denselben Namen anhaengen.
+// Rueckgabe: [{ idx, person }] in Rahmen-Reihenfolge, jede Person einmal
+// (der erste Rahmen gewinnt — ein Klick kann nur EINEN Rahmen zeigen).
+// ---------------------------------------------------------------------------
+function rahmenPersonenLeiste(e, gesichter, pfad) {
+    const ed = e || _quizEditor || {};
+    const raus = [];
+    const gesehen = {};
+    rahmenIndizes(ed).forEach(function (i) {
+        const eigen = (ed.personen || [])[i];
+        let person = (eigen == null) ? '' : String(eigen).trim();
+        if (!person && !rahmenUnbekannt(eigen)) {
+            const namen = quizNamenFuerRegion(gesichter || [], i, pfad);
+            person = namen.length ? String(namen[0]).trim() : '';
+        }
+        const schluessel = person.toLowerCase();
+        if (!person || gesehen[schluessel]) return;
+        gesehen[schluessel] = true;
+        raus.push({ idx: i, person: person });
+    });
+    return raus;
+}
+
+/** Schritt F: Rahmen-Index zu einer angeklickten Person aus der Leiste.
+ *  Rueckgabe: Index (>= 0) oder -1 (Person steht nicht in der Leiste — dann
+ *  wird nichts ausgewaehlt, statt den falschen Rahmen zu zeigen). */
+function rahmenWahlAusLeiste(e, gesichter, pfad, person) {
+    const ziel = String(person == null ? '' : person).trim().toLowerCase();
+    if (!ziel) return -1;
+    const leiste = rahmenPersonenLeiste(e, gesichter, pfad);
+    for (let i = 0; i < leiste.length; i++) {
+        if (leiste[i].person.toLowerCase() === ziel) return leiste[i].idx;
+    }
+    return -1;
+}
+
+/** Lokaler Speicher der "unbekannt"-Rahmen: {pfadKennung: [[x,y,w,h], ...]}. */
+function unbekannteRahmenLaden(pfad) {
+    try {
+        const k = pfadKennung(pfad);
+        if (!k) return [];
+        const roh = JSON.parse(localStorage.getItem('quiz_rahmen_unbekannt') || '{}');
+        const liste = (roh && roh[k]) || [];
+        if (!Array.isArray(liste)) return [];
+        return liste.filter((n) => Array.isArray(n) && n.length >= 4).map((n) => n.slice(0, 4));
+    } catch (_e) { return []; }
+}
+
+function unbekannteRahmenSchreiben(pfad, liste) {
+    try {
+        const k = pfadKennung(pfad);
+        if (!k) return false;
+        const roh = JSON.parse(localStorage.getItem('quiz_rahmen_unbekannt') || '{}');
+        const daten = (roh && typeof roh === 'object') ? roh : {};
+        if (liste && liste.length) daten[k] = liste; else delete daten[k];
+        localStorage.setItem('quiz_rahmen_unbekannt', JSON.stringify(daten));
+        return true;
+    } catch (_e) { return false; }
+}
+
+/** Merkt EINEN unbekannten Rahmen (idempotent: dieselbe Region nur einmal). */
+function unbekannteRahmenMerken(pfad, norm) {
+    if (!Array.isArray(norm) || norm.length < 4) return false;
+    const liste = unbekannteRahmenLaden(pfad);
+    const schl = bboxRegionSchluessel(norm);
+    if (!liste.some((n) => bboxRegionSchluessel(n) === schl)) liste.push(norm.slice(0, 4));
+    return unbekannteRahmenSchreiben(pfad, liste);
+}
+
+/** Nimmt einen unbekannten Rahmen wieder zurueck (Loeschen im Editor). */
+function unbekannteRahmenVergessen(pfad, norm) {
+    if (!Array.isArray(norm) || norm.length < 4) return false;
+    const schl = bboxRegionSchluessel(norm);
+    const liste = unbekannteRahmenLaden(pfad).filter((n) => bboxRegionSchluessel(n) !== schl);
+    return unbekannteRahmenSchreiben(pfad, liste);
+}
+
+/**
+ * Verschmilzt die Server-Rahmen mit dem bisherigen Live-Stand des Editors.
+ * Regeln unveraendert wie vorher (geloescht bleibt geloescht, Live-Aenderung
+ * gewinnt, Rahmen ohne `bbox_norm` kommen als Pixel-Rest zurueck) — NEU: die
+ * Rahmen HINTER der Serverliste (von Hand gezogen) ueberleben das erneute
+ * Oeffnen DESSELBEN Bildes. Der Aufrufer uebergibt `vorNorm = []`, sobald ein
+ * anderes Bild offen ist — dann faellt nichts faelschlich mit.
+ */
+function rahmenListeVerschmelzen(gesichter, vorNorm) {
+    const ges = Array.isArray(gesichter) ? gesichter : [];
+    const vor = Array.isArray(vorNorm) ? vorNorm : [];
+    const neu = [], rest = [];
+    for (let i = 0; i < ges.length; i++) {
+        if (i < vor.length && vor[i] === null) { neu.push(null); rest.push(null); continue; }  // geloescht bleibt geloescht
+        if (i < vor.length && Array.isArray(vor[i]) && vor[i].length >= 4) { neu.push(vor[i]); rest.push(null); continue; }  // live-Aenderung
+        const g = ges[i] || {};
+        const n = (g.bbox_norm && g.bbox_norm.length >= 4) ? bboxNormClampen(g.bbox_norm) : null;
+        neu.push(n);
+        rest.push((!n && g.bbox && g.bbox.length >= 4) ? g.bbox.slice() : null);
+    }
+    for (let i = ges.length; i < vor.length; i++) {
+        neu.push(vor[i] === undefined ? null : vor[i]);
+        rest.push(null);
+    }
+    return { neu: neu, rest: rest };
+}
+
+// ---------------------------------------------------------------------------
+// Schritt I (18.10.2026): "Erkennung fuer dieses EINE Bild neu starten".
+// Die frische Erkennung darf vorhandene Korrekturen NICHT ueberschreiben.
+// Deshalb wird ueber die UEBERDECKUNG der Rahmen zusammen gefuehrt, nicht ueber
+// die Listenposition: `rahmenListeVerschmelzen` nimmt `vor[i]` nach Position —
+// liefert die Engine die Gesichter in vertauschter Reihenfolge, wanderte die
+// Person damit auf einen fremden Rahmen (Befund 3 der Plan-Pruefung, Fassung 9
+// und 10 des Rahmeneditor-Plans). Hier gilt: gleiche Region = gleiches Gesicht
+// = Rahmen und Person bleiben WERTGLEICH; alles, was die Engine zusaetzlich
+// findet, kommt als neuer Rahmen OHNE Person ("unbekannt") dazu. Es wird nie
+// geloescht und nie etwas erfunden.
+// ---------------------------------------------------------------------------
+
+/** Schnittflaeche geteilt durch Vereinigungsflaeche zweier normalisierter
+ *  Rahmen ([x, y, w, h], 0..1). 0 bei fehlenden oder unbrauchbaren Werten. */
+function bboxUeberdeckung(a, b) {
+    if (!a || !b || a.length < 4 || b.length < 4) return 0;
+    const ax1 = Number(a[0]), ay1 = Number(a[1]);
+    const ax2 = ax1 + Number(a[2]), ay2 = ay1 + Number(a[3]);
+    const bx1 = Number(b[0]), by1 = Number(b[1]);
+    const bx2 = bx1 + Number(b[2]), by2 = by1 + Number(b[3]);
+    const zahlen = [ax1, ay1, ax2, ay2, bx1, by1, bx2, by2];
+    for (let i = 0; i < zahlen.length; i++) {
+        if (!isFinite(zahlen[i])) return 0;
+    }
+    const sx = Math.min(ax2, bx2) - Math.max(ax1, bx1);
+    const sy = Math.min(ay2, by2) - Math.max(ay1, by1);
+    if (sx <= 0 || sy <= 0) return 0;
+    const schnitt = sx * sy;
+    const vereinigung = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - schnitt;
+    if (vereinigung <= 0) return 0;
+    return schnitt / vereinigung;
+}
+
+/**
+ * Fuehrt eine frische Erkennung mit den Rahmen im Editor zusammen.
+ *
+ * `gesichter`   = Antwort von `POST /api/gesichter/quiz/analysiere` (je Gesicht
+ *                 `bbox_norm`, optional `bbox`).
+ * `altNorm`     = `_quizEditor.bbox_norm_live` (die Wahrheit im Editor).
+ * `altPersonen` = `_quizEditor.personen` ('' = ausdruecklich "unbekannt").
+ *
+ * Rueckgabe `{ bbox_norm_live, personen, behalten, neu }`:
+ *  * vorhandene Rahmen bleiben an ihrem Platz und WERTGLEICH (Koordinaten und
+ *    Person) — auch bei vertauschter Erkennungsreihenfolge,
+ *  * `behalten` = Zahl der vorhandenen Rahmen, die die Engine bestaetigt hat,
+ *  * `neu` = Zahl der zusaetzlich gefundenen Gesichter (ohne Person angehaengt).
+ * Eine leere oder unbrauchbare Erkennung aendert NICHTS (kein Rahmen faellt weg).
+ */
+function rahmenNeuErkennen(gesichter, altNorm, altPersonen, minUeberdeckung) {
+    const ges = Array.isArray(gesichter) ? gesichter : [];
+    const alt = Array.isArray(altNorm) ? altNorm : [];
+    const per = Array.isArray(altPersonen) ? altPersonen : [];
+    const schwelle = (typeof minUeberdeckung === 'number') ? minUeberdeckung : 0.5;
+    const neu = alt.slice();
+    const personen = per.slice();
+    const belegt = [];
+    for (let i = 0; i < neu.length; i++) belegt.push(false);
+    let behalten = 0, neue = 0;
+    for (let g = 0; g < ges.length; g++) {
+        const eintrag = ges[g] || {};
+        const roh = (eintrag.bbox_norm && eintrag.bbox_norm.length >= 4)
+            ? bboxNormClampen(eintrag.bbox_norm) : null;
+        if (!roh) continue;   // ohne Rahmen keine Aussage (kein Erfinden)
+        let treffer = -1, beste = 0;
+        for (let i = 0; i < neu.length; i++) {
+            if (belegt[i] || !neu[i] || neu[i].length < 4) continue;
+            // Gleiche 1-%-Region ist dasselbe Gesicht, egal wie weit die
+            // Koordinaten inzwischen verschoben wurden.
+            const gleicheRegion = (bboxRegionSchluessel(roh) === bboxRegionSchluessel(neu[i]));
+            const mass = gleicheRegion ? 1 : bboxUeberdeckung(roh, neu[i]);
+            if (mass > beste) { beste = mass; treffer = i; }
+        }
+        if (treffer >= 0 && beste >= schwelle) {
+            belegt[treffer] = true;
+            behalten++;
+            continue;         // Rahmen UND Person bleiben, wie sie waren
+        }
+        neu.push(roh);
+        personen.push('');    // Neufund = ausdruecklich "unbekannt"
+        belegt.push(true);
+        neue++;
+    }
+    return { bbox_norm_live: neu, personen: personen, behalten: behalten, neu: neue };
+}
+
+/**
+ * Haengt einen von Hand gezogenen Rahmen OHNE Person an den Editor an und merkt
+ * ihn lokal. Rueckgabe: Index des neuen Rahmens (-1 = nichts angehaengt).
+ * Bewusst NICHT hier: ein Server-Schreibvorgang — ohne Person gibt es keine
+ * Referenz (und keinen Vektor), also auch keinen Schreibweg.
+ */
+function rahmenUnbekanntAnhaengen(e, pfad, norm) {
+    const ed = e || _quizEditor;
+    if (!ed || !Array.isArray(norm) || norm.length < 4) return -1;
+    const sauber = bboxNormClampen(norm);
+    if (!sauber) return -1;
+    if (!Array.isArray(ed.bbox_norm_live)) ed.bbox_norm_live = [];
+    if (!Array.isArray(ed.personen)) ed.personen = [];
+    ed.bbox_norm_live.push(sauber);
+    const idx = ed.bbox_norm_live.length - 1;
+    ed.personen[idx] = '';                      // ausdruecklich "unbekannt"
+    unbekannteRahmenMerken(pfad || ed.bildPfad || '', sauber);
+    return idx;
+}
+
+// Schritt C: nacheinander JE RAHMEN ein Ergebnis. Gibt selbst nichts auf, wenn
+// ein Rahmen scheitert — der naechste laeuft weiter, und KEIN Rahmen verliert
+// seine Markierung (die Rahmen werden hier nie aus dem Editor entfernt; die
+// Person-Markierung setzt der Einzelweg VOR dem Senden).
+async function speichereAlleRahmen(iw, ih, btn) {
+    const e = _quizEditor || {};
+    const melde = (typeof e.melde === 'function') ? e.melde : function () {};
+    const zurueck = (text) => { try { if (btn) btn.textContent = text; } catch (_x) {} };
+    const indizes = rahmenIndizes(e);
+    if (!indizes.length) {
+        melde('⚠️ Kein Rahmen vorhanden — erst einen Kasten aufziehen oder antippen.', false);
+        return { gesamt: 0, gut: 0, ergebnisse: [] };
+    }
+    zurueck('… 0/' + indizes.length);
+    const ergebnisse = [];
+    for (const i of indizes) {
+        // Der Einzelweg meldet waehrend der Mehrfachbearbeitung NICHT selbst —
+        // sein Text wird eingesammelt und in EINER Meldung je Rahmen ausgegeben
+        // (sonst waere jeder Rahmen zweimal zu lesen).
+        const gesammelt = [];
+        let r;
+        try {
+            r = await speichereEditorRahmen(i, iw, ih, null, (t) => gesammelt.push(String(t == null ? '' : t)));
+        } catch (err) {
+            r = { ok: false, idx: i, fehler: (err && err.message) || 'unbekannter Fehler' };
+        }
+        if (!r || typeof r !== 'object') r = { ok: false, idx: i, fehler: 'kein Ergebnis' };
+        const nr = r.idx == null ? i : r.idx;
+        const gut = r.ok === true;
+        const det = gesammelt.filter(Boolean).join(' ');
+        ergebnisse.push({ idx: nr, ok: gut, fehler: r.fehler || '', grund: r.grund || '',
+                          meldung: det });
+        // JE RAHMEN genau eine Meldung (Nummer 1-basiert, wie in der Oberflaeche).
+        melde('Rahmen ' + (nr + 1) + ' von ' + indizes.length + ': ' +
+              (gut ? 'gespeichert' + (det ? ' — ' + det : '')
+                   : 'NICHT gespeichert — ' + (det || r.fehler || r.grund || 'ohne Ergebnis')), gut);
+        zurueck('… ' + ergebnisse.length + '/' + indizes.length);
+    }
+    const gut = ergebnisse.filter((x) => x.ok).length;
+    melde(gut + ' von ' + indizes.length + ' Rahmen gespeichert' +
+          (gut === indizes.length ? '.' : ' — die Einzelmeldungen stehen oben.'), gut === indizes.length);
+    zurueck('💾 Speichern');
+    return { gesamt: indizes.length, gut: gut, ergebnisse: ergebnisse };
+}
+
+function speichereEditorRahmen(sel, iw, ih, btn, stillSammeln) {
+    const e = _quizEditor || {};
+    const meldeDirekt = (typeof e.melde === 'function') ? e.melde : function () {};
+    // Schritt C: waehrend der Mehrfachbearbeitung sammelt der Aufrufer den Text
+    // ein (eine Meldung je Rahmen statt zwei).
+    const melde = (typeof stillSammeln === 'function') ? stillSammeln : meldeDirekt;
+    const zurueck = (text) => { try { if (btn) btn.textContent = text; } catch (_x) {} };
+    const idx = (typeof sel === 'number' && sel >= 0) ? sel : 0;
+    const normRoh = (e.bbox_norm_live || [])[idx];
+    const norm = (normRoh && normRoh.length >= 4) ? bboxNormClampen(normRoh) : null;
+    if (!norm || !iw || !ih) {
+        melde('⚠️ Kein Rahmen ausgewählt — erst einen Kasten antippen.', false);
+        return Promise.resolve({ ok: false, idx: idx, grund: 'kein Rahmen ausgewaehlt' });
+    }
+    // Schritt E (18.10.2026): ein Rahmen OHNE Person ("unbekannt") wird NICHT
+    // gespeichert — sonst landete er bei der GLOBALEN Zielperson des Bildes und
+    // waere eine falsche Zuordnung. Zugeordnet wird er ueber Schritt G.
+    // Bewusst als EIN Vergleich im Weg selbst (kein Aufruf einer weiteren
+    // Funktion): die Testhaernisse schneiden nur die aufgerufenen Funktionen
+    // heraus, ein zusaetzlicher Aufruf wuerde sie ohne Grund brechen.
+    if (((e.personen || [])[idx]) === '') {
+        melde('⚠️ Rahmen ' + (idx + 1) + ': unbekannt — keine Person zugeordnet, deshalb nichts gespeichert.', false);
+        return Promise.resolve({ ok: false, idx: idx, grund: 'unbekannt',
+                                 fehler: 'Rahmen ohne Person (unbekannt)' });
+    }
+    // ABSOLUTE Pixel im ANGEZEIGTEN Bildraum (was das Backend fuer den
+    // Gesichts-Ausschnitt braucht) + normalisierte Ankerung (Anzeige/Drehung).
+    const px = bboxPixelVonNorm(norm, iw, ih);
+    const ctx = e.refKontext || null;
+    const refKontext = (ctx && ctx.name && ctx.ref_id) ? ctx : null;
+    // Schritt A2: das Ziel wird NICHT mehr ungeprueft aus den globalen Werten
+    // genommen — es muss zum offenen Bild passen (sonst kein Sendeversuch).
+    // Schritt G: die Person kommt aus DIESEM Rahmen (eigener Eintrag, sonst die
+    // globale Zielperson) — `idx` wird deshalb mitgegeben.
+    const ziel = editorSpeicherZiel(e, idx);
+    const person = ziel.ok ? ziel.person : '';
+    const pPfad = ziel.ok ? ziel.pfad : '';
+
+    if (refKontext) {
+        zurueck('… speichere');
+        return fetch(`${API_BASE}/api/gesichter/referenzen/${encodeURIComponent(refKontext.name)}/${encodeURIComponent(refKontext.ref_id)}/bbox`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bbox: px, bbox_norm: norm, embedding_erneuern: true }),
+        }).then(r => r.json()).then(d => {
+            if (d && d.ok) {
+                // Schritt A (16.10.2026): der Server meldet seit Commit 5f6ee7e ehrlich,
+                // OB die gespeicherte Referenz wirklich einen neuen Vektor traegt
+                // (vektor_erneuert) und WARUM nicht (vektor_grund). Die Anzeige behauptet
+                // deshalb nur dann eine neue Referenz, wenn das zutrifft.
+                if (d.vektor_erneuert) {
+                    zurueck('✓ gespeichert');
+                    melde('✓ Rahmen in der Referenz von ' + refKontext.name +
+                          ' aktualisiert (neuer Vektor gespeichert, andere Referenzen bleiben).', true);
+                } else {
+                    zurueck('⚠️ Vektor unverändert');
+                    melde('⚠️ Rahmen gemerkt, aber der Vektor blieb der alte: ' +
+                          (d.vektor_grund || 'kein neuer Vektor gespeichert'), false);
+                }
+                setTimeout(() => zurueck('💾 Speichern'), 1800);
+                try { if (typeof refKontext.onGespeichert === 'function') refKontext.onGespeichert(); } catch (_x) {}
+                // Schritt C: ehrliches Ergebnis auch hier — der Rahmen ist GEMERKT,
+                // aber ohne neuen Vektor ist das kein voller Erfolg (ok = false).
+                return { ok: d.vektor_erneuert === true, idx: idx, weg: 'referenz',
+                         grund: d.vektor_erneuert ? '' : (d.vektor_grund || 'Vektor blieb der alte') };
+            }
+            zurueck('⚠️ Fehler');
+            melde('⚠️ ' + ((d && d.fehler) || 'Referenz konnte nicht gespeichert werden'), false);
+            setTimeout(() => zurueck('💾 Speichern'), 2200);
+            return { ok: false, idx: idx, weg: 'referenz',
+                     fehler: (d && d.fehler) || 'Referenz konnte nicht gespeichert werden' };
+        }).catch(err => {
+            zurueck('⚠️ Fehler');
+            melde('⚠️ Referenz speichern fehlgeschlagen: ' + (err && err.message), false);
+            setTimeout(() => zurueck('💾 Speichern'), 2200);
+            return { ok: false, idx: idx, weg: 'referenz',
+                     fehler: (err && err.message) || 'Referenz speichern fehlgeschlagen' };
+        });
+    }
+
+    if (person && pPfad) {
+        // REGION + PERSON deterministisch merken: dieselbe Kombination wird
+        // nicht erneut eingelernt oder erneut gefragt.
+        const region = bboxRegionSchluessel(norm);
+        merkeBestaetigt(pPfad, region, person);
+        try { if (!e.personen) e.personen = []; e.personen[idx] = person; } catch (_x) {}
+        zurueck('… speichere');
+        return quizBeantwortenSilent(pPfad, person, false, '', '', '', px).then(d => {
+            if (d && d.ok) {
+                zurueck('✓ gespeichert');
+                const extra = d.uebersprungen ? ' (war bereits bestätigt)' : '';
+                // Schritt A3 (16.10.2026): dieser Weg (quiz/antwort OHNE manuell_bbox →
+                // beantworte_runde) meldet jetzt selbst, OB eine Referenz entstand
+                // (referenz_geschrieben) und WOZU die gespeicherten Koordinaten gehören
+                // (rahmen_gespeichert: 'gesendet' = Nutzer-Rahmen, 'erkannt' = Detektor).
+                // Eine Referenz wird nur beim GESENDETEN Rahmen behauptet.
+                if (d.referenz_geschrieben && d.rahmen_gespeichert === 'gesendet') {
+                    melde('✓ ' + person + ' übernommen' + extra +
+                          ' — der verschobene Rahmen liegt als Referenz im Datenbestand.', true);
+                } else if (d.referenz_geschrieben) {
+                    melde('✓ ' + person + ' übernommen' + extra +
+                          ' — Referenz mit dem ERKANNTEN Rahmen (' +
+                          (d.grund || 'gesendeter Rahmen nicht einbettbar') + ').', true);
+                } else {
+                    melde('✓ ' + person + ' übernommen' + extra +
+                          ' — KEINE neue Referenz: ' +
+                          (d.grund || 'kein neuer Vektor gespeichert'), false);
+                }
+                setTimeout(() => zurueck('💾 Speichern'), 1800);
+                // Einzelgesicht: die Runde ist damit abgeschlossen (kein erneutes
+                // Aufrollen der bereits bestätigten Zuordnung).
+                if ((e.bbox_norm_live || []).filter(b => b && b.length >= 4).length === 1 && _letzteQuizKarte) {
+                    try { macheQuizFertig(_letzteQuizKarte, person, true, (_quizVollbild && _quizVollbild.querySelector('img')) ? _quizVollbild.querySelector('img').src : ''); } catch (_x) {}
+                }
+                // Schritt C: Ergebnis JE RAHMEN — ob eine Referenz entstand, ist
+                // Teil des Ergebnisses (der Rahmen ist auch ohne Referenz als
+                // bestaetigt gemerkt, deshalb bleibt ok hier true).
+                return { ok: true, idx: idx, weg: 'quiz', person: person,
+                         referenz: d.referenz_geschrieben === true,
+                         grund: d.grund || '' };
+            }
+            zurueck('⚠️ Fehler');
+            melde('⚠️ ' + ((d && d.fehler) || 'Speichern fehlgeschlagen'), false);
+            setTimeout(() => zurueck('💾 Speichern'), 2200);
+            return { ok: false, idx: idx, weg: 'quiz',
+                     fehler: (d && d.fehler) || 'Speichern fehlgeschlagen' };
+        }).catch(err => {
+            // Schritt C: ein gerissener Netzweg darf die Mehrfachbearbeitung NICHT
+            // abreissen lassen — er wird zum Ergebnis DIESES Rahmens.
+            zurueck('⚠️ Fehler');
+            melde('⚠️ Speichern fehlgeschlagen: ' + ((err && err.message) || 'unbekannter Fehler'), false);
+            setTimeout(() => zurueck('💾 Speichern'), 2200);
+            return { ok: false, idx: idx, weg: 'quiz',
+                     fehler: (err && err.message) || 'Speichern fehlgeschlagen' };
+        });
+    }
+
+    // Ohne passendes Ziel wird NICHTS gesendet (Schritt A2, Fehler 2) — der
+    // Rahmen bleibt erhalten, die Meldung nennt den ehrlichen Grund.
+    zurueck('⚠️ kein Ziel');
+    melde('⚠️ Nicht gespeichert. ' + (ziel.grund || 'Kein Speicherziel fuer dieses Bild.') +
+          ' Erst „Ja, das ist …" oder eine Person wählen — dann speichert 💾 den Rahmen.', false);
+    setTimeout(() => zurueck('💾 Speichern'), 2400);
+    return Promise.resolve({ ok: false, idx: idx, weg: 'quiz',
+                             grund: ziel.grund || 'Kein Speicherziel fuer dieses Bild.' });
+}
+
+function schliesseBildVollbild() {
+    if (_quizEditor && typeof _quizEditor.onClose === 'function') {
+        try { _quizEditor.onClose(); } catch (_e) {}
+    }
+    if (_quizVollbild) {
+        try { _quizVollbild.remove(); } catch (e) {}
+        _quizVollbild = null;
+    }
+    // Schritt A2 (16.10.2026, Auflage 2): die Zielwerte leben nur fuer das Bild,
+    // zu dem sie gehoeren. Gehoeren sie zu einem ANDEREN Bild als dem eben
+    // geschlossenen Editor, werden sie hier verworfen — sonst bliebe der Riegel
+    // umgehbar. (Bei demselben Bild bleiben sie stehen: sonst muesste der Nutzer
+    // die Person erneut bestaetigen, nur weil er den Editor einmal geschlossen hat.)
+    const zuBild = pfadKennung((_quizEditor && _quizEditor.bildPfad) || '');
+    if (!zuBild || zuBild !== pfadKennung(_aktuellerQuizPfad)) {
+        _aktuelleQuizPerson = '';
+        _aktuellerQuizPfad = '';
+    }
+}
+
+// Findet in einer Quiz-Karte das HAUPT-Quizbild (Vollbild-Quelle). Die Karte
+// enthaelt bei einem Einzelgesicht auch den kleinen 'Gesicht-Ausschnitt'
+// (erzeugeGesichtCrop), daher waehlen wir das groesste Bild nach NATIV-Flaechen-
+// grosse — der Crop hat kleinere natuerliche Masse, das Hauptbild ist groesser.
+function findeHauptQuizBild(karte) {
+    if (!karte) return null;
+    try {
+        const imgs = Array.from(karte.querySelectorAll('img'));
+        if (!imgs.length) return null;
+        let best = imgs[0], bestFl = -1;
+        for (const im of imgs) {
+            const w = im.naturalWidth || im.width || 0;
+            const h = im.naturalHeight || im.height || 0;
+            const fl = (w && h) ? (w * h) : 0;
+            if (fl > bestFl) { bestFl = fl; best = im; }
+        }
+        return best;
+    } catch (_e) { return null; }
+}
+
+// Vom Vollbild aus zur naechsten Quizrunde (Vollbild-Durchlauf, 2026-09-10):
+// beendet die aktuelle Runde und laedt die naechste, ohne das Vollbild zu
+// verlassen. Eine noch offene Ja/Nein-Frage des aktuellen Bildes wird beim
+// Durchklicken als 'uebersprungen' persistiert (POST /api/gesichter/quiz/antwort
+// mit ueberspringen:true), damit sie nicht blind verloren geht. Danach wird das
+// neue Bild direkt wieder als Vollbild geoeffnet (idealer Durchlauf). Funktioniert
+// fuer Einzelbild (anzahl_gesichter 0/1) und Gruppenbild (>=2, starteGruppenQuiz)
+// gleichermassen, da die Analyse je Runde einheitlich ueber naechsteQuizRunde laeuft.
+async function naechstesBildAusVollbild() {
+    // (a) evtl. offene Frage des aktuellen Bildes als 'uebersprungen' sichern.
+    //     Der aktuelle Bildpfad ist der zuletzt von naechsteQuizRunde erfasste.
+    const aktuellerPfad = (_quizGesehen && _quizGesehen.length)
+        ? _quizGesehen[_quizGesehen.length - 1] : null;
+    if (aktuellerPfad) {
+        try {
+            fetch(`${API_BASE}/api/gesichter/quiz/antwort`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ bild_pfad: aktuellerPfad, person: '', ist_neu: false, rolle: '', ueberspringen: true }),
+            }).catch(() => {});
+        } catch (_e) {}
+    }
+    // Vollbild schliessen; die naechste Runde wird gleich wieder geoeffnet.
+    schliesseBildVollbild();
+    // (b) naechste Runde laden; sobald das neue Bild gerendert ist, es wieder
+    //     als Vollbild anzeigen (Callback von naechsteQuizRunde).
+    naechsteQuizRunde((imgNeu, gesichterNeu) => {
+        if (imgNeu && imgNeu.src) {
+            // Schritt A2: die neue Runde bringt einen neuen Bildpfad mit — nur
+            // damit darf in diesem Editor gespeichert werden.
+            const neuerPfad = (_quizGesehen && _quizGesehen.length)
+                ? _quizGesehen[_quizGesehen.length - 1] : '';
+            try { zeigeBildVollbild(imgNeu, gesichterNeu || [], { bildPfad: neuerPfad }); } catch (_e) {}
+        }
+    });
+}
+
+// Macht ein <img> antippbar (Vollbild) - nutzt den nativen dataURL-String,
+// den das Quiz-Bild bereits im DOM haelt. `opts` wird an zeigeBildVollbild
+// durchgereicht (z. B. refKontext fuer die Referenz-Nachbearbeitung).
+function macheBildAntippbar(imgEl, gesichter, opts) {
+    if (!imgEl) return;
+    try {
+        imgEl.style.cursor = 'zoom-in';
+        imgEl.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            zeigeBildVollbild(imgEl, gesichter, opts);
+        });
+    } catch (_) {}
+}
+
+// Oeffnet das ORIGINALBILD einer Katalog-Referenz im Vollbild-Editor — MIT
+// vorhandenem Rahmen — und speichert Aenderungen ueber die STABILE ref_id
+// zurueck an genau diese Referenz (Fix 2026-09-15: "Katalog -> Referenz
+// anklicken -> Bild anklicken -> in der Referenz anpassen").
+function zeigeReferenzBearbeiten(name, ref, dataUrl, onGespeichert) {
+    if (!dataUrl || !ref || !ref.ref_id) return;
+    const norm = (ref.bbox_norm && ref.bbox_norm.length >= 4) ? ref.bbox_norm.slice() : null;
+    const gesicht = (norm
+        ? { bbox_norm: norm, bbox: ref.bbox || [] }
+        : { bbox: (ref.bbox && ref.bbox.length >= 4) ? ref.bbox.slice() : [] });
+    if (!gesicht.bbox_norm && (!gesicht.bbox || gesicht.bbox.length < 4)) {
+        // Ohne gespeicherten Rahmen gibt es nichts nachzubearbeiten (ehrlich).
+        try { alert && alert('Für diese Referenz ist kein Rahmen gespeichert.'); } catch (_e) {}
+        return;
+    }
+    const bild = new Image();
+    bild.alt = 'Referenz';
+    bild.src = dataUrl;
+    // Der Label-Text bleibt sichtbar (kein 0x0-Bild): nur der Editor zaehlt.
+    _aktuelleQuizPerson = name;
+    _aktuellerQuizPfad = ref.bild_pfad || '';
+    zeigeBildVollbild(bild, [gesicht], {
+        refKontext: { name: name, ref_id: ref.ref_id, onGespeichert: onGespeichert },
+    });
+}
+
+// Einheitliche Quiz-Button-Stile (der Betreiber: aufgeraeumt, keine wilden Styles):
+// typ = 'person' (bekannte Person, grün) | 'neu' (neue Person, rot) |
+//       'skip' (ueberspringen, grau) | 'akt' (primär-Aktion, grün markant)
+function macheQuizButton(text, typ, onclick) {
+    const b = document.createElement('button');
+    b.textContent = text;
+    const basis = 'border-radius:9px;font-size:0.84rem;cursor:pointer;font-weight:600';
+    const farben = {
+        person:  'border:1px solid #2e8b57;background:#1f3a2a;color:#8f8',
+        akt:     'border:1px solid #2e8b57;background:#2a5338;color:#9f9',
+        neu:     'border:1px solid #f88;background:#2a1515;color:#f88',
+        skip:    'border:1px solid #666;background:#2b2b2b;color:#bbb',
+    };
+    b.style.cssText = basis + ';' + (farben[typ] || farben.person);
+    if (onclick) b.onclick = onclick;
+    return b;
+}
+
+// Kleine Abschnitts-Überschrift innerhalb der Quiz-Karte fuer klare Struktur.
+function macheQuizLabel(text) {
+    const s = document.createElement('div');
+    s.style.cssText = 'margin:8px 0 4px;font-size:0.7rem;letter-spacing:.03em;color:#9f9;opacity:.75;text-transform:uppercase';
+    s.textContent = text;
+    return s;
+}
+
+// ---------------------------------------------------------------------------
+// QUIZ-SUCHE: ALLE Personen des Katalogs anbieten
+// Befund der Betreiber 2026-09-25 (sinngemäß): "Wenn ich eine Person suche, soll er
+// ja durch so eine Antwortauswahl kommen mit den Accounts. Den finde ich nicht.
+// Das passiert nicht. Nur bei einigen Personen. Personen sollen auftauchen —
+// nicht Daniel ausblenden."
+// Ursache: die drei Suchfelder (Gruppenbild / selbst gezogener Rahmen /
+// Einzelbild) wurden NUR mit den Kandidaten der laufenden Runde gefüttert — die
+// Namen des Personenkatalogs kamen dort nie an.
+// Fix: Katalog (GET /api/gesichter) laden, Kandidaten nur noch als SORTIERUNG
+// innen, Kennzeichnen statt Ausblenden, "als neue Person anlegen" im Dropdown.
+// ---------------------------------------------------------------------------
+let _quizKatalogNamen = null;   // letzter geladener Katalog (kurzer Cache)
+let _quizKatalogZeit = 0;       // Zeitpunkt des Ladens
+let _quizKatalogFehler = '';    // letzte Fehlermeldung (ehrlicher Zustand)
+const QUIZ_KATALOG_TTL_MS = 60 * 1000;   // Katalog hoechstens 60 s cachen
+
+/** Verwirft den Katalog-Cache. Wird nach JEDER Zuordnung gerufen: dann kann
+ *  eine neue Person dazugekommen sein, die Liste darf nicht alt stehen bleiben. */
+function quizKatalogVerwerfen() {
+    _quizKatalogNamen = null;
+    _quizKatalogZeit = 0;
+}
+
+/** Aktueller Katalog-Stand (ALLE Namen) als Start-Liste fuers Suchfeld; das
+ *  Feld laedt danach selbst frisch nach (ladeQuizKatalogNamen). */
+function quizKatalogNamen() {
+    return (_quizKatalogNamen || []).slice();
+}
+
+function quizKatalogFehlerText() { return _quizKatalogFehler || ''; }
+
+/** Holt ALLE Personennamen aus dem Katalog (GET /api/gesichter). Ehrlich:
+ *  Ladefehler werden gemerkt und im Suchfeld angezeigt — nie still leer. */
+async function ladeQuizKatalogNamen(erzwingen) {
+    const jetzt = Date.now();
+    if (!erzwingen && _quizKatalogNamen && (jetzt - _quizKatalogZeit) < QUIZ_KATALOG_TTL_MS) {
+        return _quizKatalogNamen.slice();
+    }
+    try {
+        const res = await fetch(`${API_BASE}/api/gesichter`);
+        const d = await res.json();
+        const personen = (d && d.personen) || [];
+        const namen = [];
+        personen.forEach(p => {
+            const n = String((p && p.name) || '').trim();
+            if (n && namen.indexOf(n) === -1) namen.push(n);
+        });
+        _quizKatalogNamen = namen;
+        _quizKatalogZeit = jetzt;
+        _quizKatalogFehler = '';
+        return namen.slice();
+    } catch (e) {
+        _quizKatalogFehler = 'Personenkatalog nicht ladbar';
+        return (_quizKatalogNamen || []).slice();
+    }
+}
+
+/** Namen, die auf diesem Bild schon zugeordnet sind — nur KENNZEICHNEN, nie
+ *  ausblenden (des Betreibers ausdruecklicher Wunsch: "Personen sollen auftauchen").
+ *  Quelle: bestaetigte Gesichter des Backends + lokal in dieser Sitzung
+ *  Zu-geordnetes (_quizEditor.personen). */
+function quizNamenAufBild(gesichter) {
+    const namen = [];
+    const dazu = (n) => { const s = String(n == null ? '' : n).trim(); if (s && namen.indexOf(s) === -1) namen.push(s); };
+    (gesichter || []).forEach(g => (((g && g.bestaetigt) ? g.bestaetigt : [])).forEach(dazu));
+    try { (((_quizEditor && _quizEditor.personen) ? _quizEditor.personen : [])).forEach(dazu); } catch (_e) {}
+    return namen;
+}
+
+/** Namen, die fuer DIESE Gesichts-Region (gesichter[idx]) schon bestaetigt
+ *  sind — ebenfalls nur Kennzeichnung, kein Ausblenden. */
+function quizNamenFuerRegion(gesichter, idx, bildPfad) {
+    const namen = [];
+    const dazu = (n) => { const s = String(n == null ? '' : n).trim(); if (s && namen.indexOf(s) === -1) namen.push(s); };
+    const g = (gesichter || [])[idx || 0] || {};
+    (((g && g.bestaetigt) ? g.bestaetigt : [])).forEach(dazu);
+    const reg = (g && g.region) ? g.region : bboxRegionSchluessel(g && g.bbox_norm);
+    if (reg && bildPfad) String(istBestaetigtLokal(bildPfad, reg) || '').split(',').forEach(dazu);
+    return namen;
+}
+
+/** Reine Listen-Logik der Quiz-Suche (ohne DOM, damit testbar):
+ *  - Reihenfolge: Kandidaten zuerst (Backend-Wahrscheinlichkeit), danach die
+ *    uebrigen Katalog-Namen ALPHABETISCH.
+ *  - Kein Ausblenden: wer auf diesem Bild schon zugeordnet (`aufBild`) oder fuer
+ *    diese Region schon bestaetigt ist (`bestaetigt`), bleibt drin und wird
+ *    markiert.
+ *  - Leere Eingabe -> leere Liste (das Suchfeld zeigt dann nichts an).
+ *  - Kennt der Katalog die Eingabe nicht, kommt sie als ERSTE Option
+ *    "➕ ... als neue Person anlegen" dazu (neu: true).
+ *  Rueckgabe: [{ name, kandidat, aufBild, bestaetigt, neu }] (max. 8). */
+function quizSuchVorschlaege(kandidaten, katalogNamen, eingabe, kontext) {
+    const q = String(eingabe == null ? '' : eingabe).trim().toLowerCase();
+    if (!q) return [];
+    const ktx = kontext || {};
+    const klein = (arr) => (arr || [])
+        .map(n => String(n == null ? '' : n).trim().toLowerCase()).filter(Boolean);
+    const aufBild = klein(ktx.aufBild);
+    const bestaetigt = klein(ktx.bestaetigt);
+    const eintrag = (name, istKandidat) => ({
+        name: name,
+        kandidat: !!istKandidat,
+        aufBild: aufBild.indexOf(name.toLowerCase()) !== -1,
+        bestaetigt: bestaetigt.indexOf(name.toLowerCase()) !== -1,
+        neu: false,
+    });
+    const gesehen = {};
+    const treffer = [];
+    // 1) Kandidaten in Backend-Reihenfolge (Wahrscheinlichkeit) — bleiben INNEN.
+    (kandidaten || []).forEach(n => {
+        const name = String(n == null ? '' : n).trim();
+        if (!name) return;
+        const low = name.toLowerCase();
+        if (gesehen[low] || low.indexOf(q) === -1) return;
+        gesehen[low] = true;                 // Kennzeichnen, NICHT ausblenden
+        treffer.push(eintrag(name, true));
+    });
+    // 2) restliche Katalog-Namen alphabetisch
+    const uebrige = [];
+    (katalogNamen || []).forEach(n => {
+        const name = String(n == null ? '' : n).trim();
+        if (!name) return;
+        const low = name.toLowerCase();
+        if (gesehen[low] || low.indexOf(q) === -1) return;
+        gesehen[low] = true;
+        uebrige.push(name);
+    });
+    uebrige.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase(), 'de'));
+    uebrige.forEach(n => treffer.push(eintrag(n, false)));
+    // 3) Eingabe im Katalog (und unter den Kandidaten) unbekannt -> der
+    //    BESTEHENDE "Neue Person"-Weg als ERSTE Option (Klick oeffnet das
+    //    vorhandene Formular, Name vorbelegt — kein neues Formular).
+    const kennt = (katalogNamen || []).concat(kandidaten || [])
+        .some(n => String(n == null ? '' : n).trim().toLowerCase() === q);
+    if (!kennt) {
+        treffer.unshift({ name: String(eingabe).trim(), kandidat: false, aufBild: false, bestaetigt: false, neu: true });
+    }
+    // Obergrenze 8 Eintraege (wie bisher) — ABER markierte Personen ("schon auf
+    // diesem Bild" / "schon bestaetigt") und die neue-Person-Option werden nie
+    // abgeschnitten (der Betreiber: "Personen sollen auftauchen", nichts ausblenden).
+    const sichtbar = treffer.slice(0, 8);
+    treffer.slice(8).forEach(v => { if (v.neu || v.aufBild || v.bestaetigt) sichtbar.push(v); });
+    return sichtbar;
+}
+
+/** Baut die "Suche andere Person"-Eingabe mit LIVE-Vorschlägen, wie sie in
+ *  Einzelbild- UND Gruppenbild-Quiz einheitlich erscheint (Wunsch des Betreibers:
+ *  Optionen nach Wahrscheinlichkeit, 5 Kacheln + Suche).
+ *
+ *  `kandidaten`   Kandidaten der laufenden Runde (nur noch SORTIERUNG innen)
+ *  `katalogNamen` ALLE Namen des Personenkatalogs (GET /api/gesichter) — damit
+ *                 auch Personen auftauchen, die das Modell hier NICHT
+ *                 vorschlaegt (Befund der Betreiber 2026-09-25)
+ *  `onwaehl`      bestehender Antwortweg (Person gewaehlt)
+ *  `kontext`      optional { aufBild:[], bestaetigt:[], onNeu: fn } — aufBild/
+ *                 bestaetigt werden nur MARKIERT (nie ausgeblendet), onNeu ist
+ *                 der BESTEHENDE "Neue Person"-Weg der jeweiligen Quiz-Karte.
+ *  Die Liste wird bei jedem Oeffnen/Tippen NEU gebaut (kein Einfrieren). */
+function baueSuchMitVorschlaegen(kandidaten, katalogNamen, onwaehl, kontext) {
+    const ktx = kontext || {};
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'margin-top:6px';
+    // Eingabefeld mit Dropdown (Suchmaschinen-/Autocomplete-Stil):
+    // Beim Tippen erscheinen die Treffer als auswählbare Optionen darunter.
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.autocomplete = 'off';
+    inp.placeholder = '🔍 Andere Person suchen… (alle Personen im Katalog)';
+    inp.style.cssText = 'width:100%;padding:7px 10px;border:1px solid #2e8b57;border-radius:8px;background:#0e1a14;color:inherit;font-size:0.85rem';
+    wrap.appendChild(inp);
+    // Ehrlicher Zustand: Lade-/Fehlerhinweis direkt unter dem Suchfeld — nie
+    // still leer (Forderung/Befund 2026-09-25).
+    const status = document.createElement('div');
+    status.style.cssText = 'font-size:0.72rem;color:#ccc;margin-top:3px;display:none';
+    wrap.appendChild(status);
+    const dd = document.createElement('div');
+    dd.style.cssText = 'display:flex;flex-direction:column;gap:2px;margin-top:4px;max-height:240px;overflow-y:auto;background:#0b1a12;border:1px solid #2e8b57;border-radius:8px';
+    dd.style.display = 'none';
+    wrap.appendChild(dd);
+    const zeigen = (sichtbar) => { dd.style.display = sichtbar ? 'block' : 'none'; };
+    // ALLE Namen des Katalogs: Start-Liste aus dem uebergebenen Stand, danach
+    // immer der frische Stand (kurzer Cache, Verwerfen nach jeder Zuordnung).
+    let katalog = Array.isArray(katalogNamen) ? katalogNamen.slice() : quizKatalogNamen();
+    let laedt = false;
+    const zeigeStatus = () => {
+        if (laedt) {
+            status.textContent = '⏳ Personenkatalog lädt …';
+            status.style.color = '#ccc';
+            status.style.display = '';
+            return;
+        }
+        const fehler = quizKatalogFehlerText();
+        if (fehler) {
+            status.textContent = '⚠️ ' + fehler + ' — nur Vorschläge';
+            status.style.color = '#f88';
+            status.style.display = '';
+            return;
+        }
+        status.style.display = 'none';
+    };
+    const aktualisieren = () => {
+        const q = (inp.value || '').trim();
+        dd.innerHTML = '';
+        // Kandidaten + Katalog werden bei JEDEM Aufbau frisch gelesen — die alte
+        // Auswahl bleibt nicht stehen (Befund 2026-09-25).
+        const vorschlaege = quizSuchVorschlaege(kandidaten, katalog, q, ktx);
+        if (!q) { zeigen(false); return; }
+        vorschlaege.forEach(v => {
+            const opt = document.createElement('div');
+            opt.style.cssText = 'padding:7px 10px;cursor:pointer;display:flex;align-items:center;gap:6px;border-bottom:1px solid #1f3a2a;font-size:0.85rem;color:#eee';
+            const nm = document.createElement('span');
+            nm.textContent = v.neu ? ('➕ ' + v.name + ' als neue Person anlegen') : ('👤  ' + v.name);
+            if (v.neu) nm.style.color = '#f88';
+            opt.appendChild(nm);
+            // Kennzeichnen statt Ausblenden: "✓ schon auf diesem Bild" /
+            // "✓ schon bestätigt" (der Betreiber: "Personen sollen auftauchen").
+            const marken = [];
+            if (v.aufBild) marken.push('✓ schon auf diesem Bild');
+            if (v.bestaetigt) marken.push('✓ schon bestätigt');
+            if (v.kandidat) marken.push('★ Vorschlag');
+            if (marken.length) {
+                const m = document.createElement('span');
+                m.style.cssText = 'font-size:0.7rem;color:#9f9;opacity:.85;white-space:nowrap';
+                m.textContent = marken.join(' · ');
+                opt.appendChild(m);
+            }
+            opt.addEventListener('pointerup', (ev) => {
+                ev.stopPropagation();
+                if (v.neu) neuePersonWaehlen(v.name);   // BESTEHENDER Weg, kein neues Formular
+                else onwaehl(v.name);
+                inp.value = '';
+                dd.innerHTML = '';
+                zeigen(false);
+            });
+            dd.appendChild(opt);
+        });
+        zeigen(true);
+    };
+    // BESTEHENDER "Neue Person"-Weg dieses Kontexts (KEIN neues Formular): die
+    // Quiz-Karte reicht ihr vorhandenes Formular als onNeu herein und bekommt
+    // nur den Namen vorbelegt. Ohne onNeu ist der bestehende Weg dieses
+    // Kontexts die Namenswahl selbst (das Backend legt die unbekannte Person
+    // dabei an — genau wie beim freien Eintippen vorher).
+    const neuePersonWaehlen = (name) => {
+        if (typeof ktx.onNeu === 'function') { ktx.onNeu(name); return; }
+        onwaehl(String(name || '').trim());
+    };
+    const katalogFrisch = () => {
+        if (laedt) return;
+        laedt = true;
+        zeigeStatus();
+        ladeQuizKatalogNamen(false).then(namen => {
+            katalog = namen || [];
+            laedt = false;
+            zeigeStatus();
+            aktualisieren();     // Liste mit dem frischen Katalog neu aufbauen
+        });
+    };
+    inp.addEventListener('input', aktualisieren);
+    inp.addEventListener('focus', (e) => {
+        // Beim Oeffnen frisch: Katalog nachladen + Vorschlaege neu berechnen.
+        katalogFrisch();
+        if ((inp.value||'').trim()) aktualisieren();
+    });
+    inp.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') { zeigen(false); }
+        if (e.key === 'Enter') {
+            const n = (inp.value || '').trim();
+            if (n) {
+                const bekannt = quizSuchVorschlaege(kandidaten, katalog, n, ktx)
+                    .some(v => !v.neu && v.name.toLowerCase() === n.toLowerCase());
+                if (bekannt) onwaehl(n); else neuePersonWaehlen(n);
+                inp.value=''; dd.innerHTML=''; zeigen(false);
+            }
+        }
+        // Pfeil-Highlight (basisch): erster Treffer bei Enter->Pfeilunten
+        if (e.key === 'ArrowDown' && dd.children && dd.children.length) {
+            e.preventDefault();
+            const erster = dd.children[0];
+            erster.style.background = '#1f3a2a';
+        }
+    });
+    // beim Wegklicken schliessen
+    inp.addEventListener('blur', () => setTimeout(() => zeigen(false), 150));
+    // Katalog sofort holen, wenn noch keiner da ist (sonst waere die Liste bis
+    // zum ersten Tippen leer) — der Ladehinweis ist dabei sichtbar.
+    if (!katalog.length) katalogFrisch();
+    zeigeStatus();
+    return wrap;
+}
+
+function starteGruppenQuiz(frageEl, karte, img, dataUrl, pfad, optionen, gesichter, erkannte) {
+    // Gruppenbild (>=2 Gesichter): jedes Gesicht einzeln markieren + beschriften.
+    const gs = gesichter || [];
+    let idx = 0;
+    // Wunsch des Betreibers 2026-09-14: IMMER bei JEDEM Gesicht auf jedem Bild
+    // zuerst die Ja/Nein-Frage stellen, erst nach "Nein" die Namensauswahl.
+    // Die fruehere Regel ("dieselbe Person nur EINMAL pro Bild fragen") ist
+    // damit abgeloest - auch ein zweites Gesicht derselben Person wird gefragt.
+    // Beim Durchlauf gesammelte Personen für die Abschluss-Bildunterschrift
+    // ("… das ist Person1, Person2") — Wunsch des Betreibers 2026-09-09.
+    const verarbeitetePersonen = [];   // {name,x,y} gesammelt je zugeordnetem Gesicht (räumlich sortierbar)
+    const umbruch = document.createElement('div');
+    umbruch.style.cssText = 'margin-top:8px;padding:10px;border:1px solid #2e8b57;border-radius:10px;background:#0f1f14';
+    karte.appendChild(umbruch);
+
+    // BESTAETIGTE REGIONEN DIESES BILDES (Fix 2026-09-15): jede Region, die
+    // schon einer Person zugeordnet ist, wird NICHT erneut gefragt. Quelle:
+    // (a) die vom Backend gelieferten `bestaetigt`-Namen je Gesicht (aus dem
+    // Katalog/Fortschritt), (b) lokal in dieser Sitzung Bestaetigtes (z. B.
+    // nach "💾 Speichern" im Vollbild). Damit rollt Speichern den Vorgang
+    // nicht mehr von vorne auf.
+    const bestaetigtRegion = {};
+    (gs || []).forEach(function (g) {
+        const reg = (g && g.region) ? g.region : bboxRegionSchluessel(g && g.bbox_norm);
+        if (!reg) return;
+        if (g && g.bestaetigt && g.bestaetigt.length) bestaetigtRegion[reg] = g.bestaetigt.join(', ');
+        const lokal = istBestaetigtLokal(pfad, reg);
+        if (lokal) bestaetigtRegion[reg] = lokal;
+    });
+
+    function maleRahmen() {
+        markiereGesichtImBild(img, gs, idx);
+    }
+    try { img.addEventListener('load', () => maleRahmen()); } catch (_) {}
+
+    // Fortschritt + aktuelles Gesicht markieren
+    function zeigeFortschritt() {
+        umbruch.innerHTML = '';
+        const fortschritt = document.createElement('div');
+        fortschritt.style.cssText = 'font-size:0.78rem;color:#9f9;font-weight:600';
+        fortschritt.textContent = `Gesicht ${idx+1} von ${gs.length}`;
+        umbruch.appendChild(fortschritt);
+    }
+
+    // Vermutungs-Frage für das aktuelle Gesicht (falls eine vorliegt).
+    // Wenn ja -> direkte Antwort; wenn nein -> Antwort-Zeile einblenden.
+    function zeigeVermutungsFrage() {
+        const g = gs[idx] || {};
+        const vm = g.vermutung || null;
+        // Keine Vermutung für dieses Gesicht (z. B. kein Embedding): trotzdem
+        // zuerst eine Ja/Nein-Frage ("Keine Person gefunden?"). Erst die
+        // Antwort darauf fuehrt zur Namensauswahl - nie direkt die Chips
+        // (Wunsch des Betreibers 2026-09-14: immer erst fragen, dann Auswahl).
+        if (!vm || !vm.person) {
+            baueKeinePersonGate();
+            return;
+        }
+        // Vermutung da: IMMER die "Ist das X?"-Ja/Nein-Frage stellen - auch
+        // wenn dieselbe Person bei einem frueheren Gesicht schon gefragt wurde.
+        baueVermutungsBox(vm);
+    }
+
+    // Gate fuer ein Gesicht OHNE Vermutung: erst Ja/Nein, dann Namensauswahl.
+    // Gleiches Muster wie im Einzelbild-Flow (zeigeQuizKarte), nur pro Gesicht.
+    function baueKeinePersonGate() {
+        const gate = document.createElement('div');
+        gate.style.cssText = 'margin-top:6px;padding:8px;border:1px solid #2e8b57;border-radius:9px;background:#12251a';
+        const gt = document.createElement('div');
+        gt.style.cssText = 'color:#8f8;font-size:0.85rem;font-weight:600';
+        gt.textContent = '👤 Keine Person gefunden?';
+        gate.appendChild(gt);
+        const gz = document.createElement('div');
+        gz.style.cssText = 'display:flex;gap:6px;margin-top:6px;flex-wrap:wrap';
+        gz.appendChild(macheQuizButton('✅ Ja → Person einzeichnen', 'akt', () => {
+            gate.remove();
+            zeigeEinzeichnen(karte, img, dataUrl, pfad, optionen);
+        }));
+        gz.appendChild(macheQuizButton('❌ Nein → nächstes Gesicht', 'skip', () => {
+            gate.remove();
+            weiter();
+        }));
+        gate.appendChild(gz);
+        const direkt = macheQuizButton('👤 Person direkt benennen', 'person', () => {
+            gate.remove();
+            zeigeAntwortZeile();
+        });
+        direkt.style.cssText += ';margin-top:6px;width:100%;text-align:center';
+        gate.appendChild(direkt);
+        umbruch.appendChild(gate);
+    }
+        // Baut die "Ist das X?"-Ja/Nein-Box für eine Vermutung und zeigt sie.
+    // JEDES Gesicht bekommt seine eigene Ja/Nein-Frage; nach "Nein" klappt die
+    // Antwortauswahl auf (zeigeAntwortZeile). Stand 2026-09-14 ohne Ausnahme.
+    function baueVermutungsBox(v) {
+        const box = document.createElement('div');
+        box.style.cssText = 'margin-top:6px;padding:8px;border:1px solid #2e8b57;border-radius:9px;background:#12251a';
+        const sh = (v.sicherheit || '');
+        const txt = document.createElement('div');
+        txt.style.cssText = 'color:#8f8;font-size:0.85rem;font-weight:600';
+        txt.textContent = `🔎 Ist das ${v.person}?` + (sh ? ` (Sicherheit: ${sh})` : '');
+        box.appendChild(txt);
+        const zeile = document.createElement('div');
+        zeile.style.cssText = 'display:flex;gap:6px;margin-top:6px;flex-wrap:wrap';
+        zeile.appendChild(macheQuizButton('✅ Ja', 'akt', () => antworten(v.person, false, false)));
+        zeile.appendChild(macheQuizButton('❌ Nein', 'neu', () => {
+            box.remove();
+            zeigeAntwortZeile();
+        }));
+        box.appendChild(zeile);
+        // "Keine Person vorhanden" soll IMMER direkt unter Ja/Nein stehen
+        // (Wunsch des Betreibers 2026-09-09) - springt SOFORT zum nächsten BILD
+        // (persistiert erledigt + naechsteQuizRunde), nicht zum nächsten
+        // Gesicht.
+        const skipDirekt = macheQuizButton('🚫 Keine Person vorhanden', 'skip', () => markiereBildErledigt());
+        skipDirekt.style.cssText += ';margin-top:6px;width:100%;text-align:center';
+        box.appendChild(skipDirekt);
+        umbruch.appendChild(box);
+    }
+
+    // Kennzeichnung statt Ausblenden (Befund der Betreiber 2026-09-25: "Personen
+    // sollen auftauchen"): welche Namen sind auf DIESEM Bild schon zugeordnet
+    // bzw. fuer DIESE Gesichts-Region schon bestaetigt? Beides wird im Suchfeld
+    // nur MARKIERT — die Personen bleiben waehlbar.
+    function namenAufDiesemBild() {
+        const namen = quizNamenAufBild(gs);
+        const dazu = (n) => { const s = String(n == null ? '' : n).trim(); if (s && namen.indexOf(s) === -1) namen.push(s); };
+        Object.keys(bestaetigtRegion).forEach(r => String(bestaetigtRegion[r] || '').split(',').forEach(dazu));
+        (verarbeitetePersonen || []).forEach(p => dazu(p && p.name));
+        return namen;
+    }
+
+    function namenFuerRegion(i) {
+        const g = gs[i] || {};
+        const reg = g.region || bboxRegionSchluessel(g.bbox_norm);
+        const wer = reg ? (bestaetigtRegion[reg] || istBestaetigtLokal(pfad, reg)) : '';
+        const namen = [];
+        const dazu = (n) => { const s = String(n == null ? '' : n).trim(); if (s && namen.indexOf(s) === -1) namen.push(s); };
+        String(wer || '').split(',').forEach(dazu);
+        return namen;
+    }
+
+    // Antwort-Zeile (Person wählen / neu / überspringen)
+    function zeigeAntwortZeile() {
+        const label = macheQuizLabel('Dieses Gesicht gehört zu:');
+        umbruch.appendChild(label);
+        const zeile = document.createElement('div');
+        zeile.style.cssText = 'display:flex;flex-direction:column;gap:6px';
+        // Optionen sortiert (Backend nach Wahrscheinlichkeit) — nur die ersten
+        // 5 als Kacheln, konsistent zum Einzelbild (Wunsch des Betreibers).
+        const kacheln = document.createElement('div');
+        kacheln.style.cssText = 'display:flex;flex-direction:column;gap:6px';
+        (optionen || []).slice(0, 5).forEach(o => {
+            const b = macheQuizButton(o, 'person', () => antworten((o||'').trim(), false, false));
+            kacheln.appendChild(b);
+        });
+        if ((optionen || []).length > 5) {
+            const mehr = document.createElement('div');
+            mehr.style.cssText = 'font-size:0.72rem;color:#9f9;opacity:.8;margin-top:2px';
+            mehr.textContent = `… und ${(optionen || []).length - 5} weitere (siehe Suche).`;
+            kacheln.appendChild(mehr);
+        }
+        zeile.appendChild(kacheln);
+        zeile.appendChild(baueSuchMitVorschlaegen(
+            (optionen || []),          // Kandidaten: nur noch Sortierung INNEN
+            quizKatalogNamen(),        // ALLE Namen aus GET /api/gesichter (Befund 2026-09-25)
+            (n) => antworten(n, false, false),
+            {
+                aufBild: namenAufDiesemBild(),
+                bestaetigt: namenFuerRegion(idx),
+                // BESTEHENDE "Neue Person"-Box dieser Karte — nur vorbelegt
+                // (kein neues Formular, KEIN prompt()).
+                onNeu: (n) => {
+                    inp.value = n;
+                    form.style.display = 'block';
+                    try { if (inp.focus) inp.focus(); } catch (_e) {}
+                },
+            }));
+        // 'Neue Person' als volle, aufklappbare Eingabebox (Name + Rolle + EIN
+        // Textfeld für alle Infos) — gleiches Menue wie im Einzelbild-Quiz.
+        // Beschreibung/Lebensinfos war doppelt gemoppelt, alles geht in das
+        // Infos-Feld (Wunsch des Betreibers 2026-09-09).
+        const neuBtn = macheQuizButton('➕ Neue Person', 'neu', null);
+        const form = document.createElement('div');
+        form.style.display = 'none';
+        form.style.cssText = 'display:none;margin:8px 0;padding:10px;border:2px solid #f88;border-radius:10px;background:#221010';
+        const inp = document.createElement('input');
+        inp.placeholder = 'Name* (z. B. Jonas)';
+        inp.style.cssText = 'width:100%;padding:7px;border:1px solid #f88;border-radius:7px;background:#1a0d0d;color:inherit;font-size:0.88rem';
+        const inpRolle = document.createElement('input');
+        inpRolle.placeholder = 'Rolle / Bedeutung (z. B. Bruder, Mutter)';
+        inpRolle.style.cssText = 'width:100%;padding:7px;margin-top:6px;border:1px solid #f88;border-radius:7px;background:#1a0d0d;color:inherit;font-size:0.88rem';
+        const bezWrap = document.createElement('div');
+        bezWrap.style.cssText = 'display:flex;align-items:center;gap:4px;margin-top:6px';
+        const inpBez = document.createElement('textarea');
+        inpBez.placeholder = 'Infos über die Person — Beziehung + alles, was du weißt (Diktat möglich)';
+        inpBez.rows = 2;
+        inpBez.style.cssText = 'width:100%;padding:7px;border:1px solid #f88;border-radius:7px;background:#1a0d0d;color:inherit;font-size:0.85rem;resize:vertical;flex:1';
+        bezWrap.appendChild(inpBez);
+        fuegeFeldMikrofonHinzu(inpBez, bezWrap, 'Infos über die Person diktieren');
+        const speichern = macheQuizButton('✅ Person speichern', 'neu', () => {
+            const n = (inp.value || '').trim();
+            if (!n) { inp.style.borderColor = '#f55'; return; }
+            // rolle/beziehung an das Backend durchreichen (beschreibung leer)
+            antworten(n, true, false, (inpRolle.value || '').trim(), (inpBez.value || '').trim(), '');
+        });
+        speichern.style.cssText += ';margin-top:8px;width:100%;padding:8px';
+        // Abbrechen (Spec-Schritt 9): klappt das Formular zu, ohne eine Person
+        // anzulegen — nichts wird gespeichert, die Runde laeuft weiter.
+        const abbrechen = macheQuizButton('✖ Abbrechen', 'skip', () => {
+            form.style.display = 'none';
+            inp.value = ''; inpRolle.value = ''; inpBez.value = '';
+        });
+        abbrechen.style.cssText += ';margin-top:6px;width:100%;text-align:center';
+        form.appendChild(inp);
+        form.appendChild(inpRolle);
+        form.appendChild(bezWrap);
+        form.appendChild(speichern);
+        form.appendChild(abbrechen);
+        neuBtn.onclick = () => { form.style.display = form.style.display === 'none' ? 'block' : 'none'; };
+        zeile.appendChild(neuBtn);
+        umbruch.appendChild(form);
+        const skip = macheQuizButton('🚫 Keine Person vorhanden', 'skip', () => antworten('', true, true));
+        skip.style.cssText += ';margin-top:6px;width:100%;text-align:center';
+        umbruch.appendChild(zeile);
+        umbruch.appendChild(skip);
+    }
+
+    function weiter() {
+        // letztes Gesicht des Bildes fertig -> automatisch naechstes Bild.
+        // Davor das Bild EINMAL als 'gesehen/uebersprungen' persistieren
+        // (POST ans Backend), damit NICHT nur-gruppenskippte Bilder bei einem
+        // Server-Neustart erneut erscheinen -> keine staendigen
+        // Bildwiederholungen (Wunsch des Betreibers 2026-09-09).
+        if (idx >= gs.length - 1) {
+            markiereBildErledigt();
+            return;
+        }
+        idx++;
+        // Bereits bestaetigte Gesichter ueberspringen (nicht erneut fragen).
+        if (ueberspringeBestaetigte()) return;
+        maleRahmen();        // Kasten springt zum naechsten Gesicht im Hauptbild
+        zeigeFortschritt();
+        zeigeVermutungsFrage(); // erst Ja/Nein, bei Nein dann Chips
+    }
+
+    // Laesst Gesichter aus, deren Region schon einer Person zugeordnet ist.
+    // Sind ALLE restlichen Gesichter bestaetigt, ist das Bild fertig (der
+    // Vorgang ist abgeschlossen, statt von vorne zu beginnen).
+    function ueberspringeBestaetigte() {
+        while (idx < gs.length) {
+            const g = gs[idx] || {};
+            const reg = g.region || bboxRegionSchluessel(g.bbox_norm);
+            const wer = reg ? bestaetigtRegion[reg] : '';
+            if (!wer) return false;
+            (String(wer).split(',') || []).forEach(function (n) {
+                const name2 = (n || '').trim();
+                if (name2 && !verarbeitetePersonen.some(z => z.name === name2)) {
+                    verarbeitetePersonen.push({ name: name2, x: 0, y: 0 });
+                }
+            });
+            idx++;
+        }
+        markiereBildErledigt();
+        return true;
+    }
+
+    // Markiert das Gruppenbild beim Durchlaufen als persistent 'gesehen'
+    // (uebersprungen), wenn nicht jede Person einzeln benannt wurde. Verhindert
+    // Wiederholungen derselben Bilder im Quiz. NUR der Bild-Pfad geht raus.
+    // Zeigt danach die Karte als BILD + Bildunterschrift "… das ist Person1,
+    // Person2" an (Wunsch des Betreibers 2026-09-09): Menü- und Beenden-Buttons
+    // verschwinden (überflüssig), die nächste Quizrunde kommt als NEUE
+    // Chatblase darunter (naechsteQuizRunde).
+    function markiereBildErledigt() {
+        // ganze Karte leeren (inkl. Kopf mit Menü/Beenden) -> Bildunterschrift
+        karte.innerHTML = '';
+        // Bildtitel (Menü) weg, dafür direkt das Bild + Bildunterschrift
+        const zeile = document.createElement('div');
+        zeile.style.cssText = 'padding:8px;border:1px solid #2e8b57;border-radius:10px;background:#0f1f14;font-weight:600;color:#8f8';
+        zeile.textContent = '✅ Alle Personen dieses Bildes verarbeitet.';
+        karte.appendChild(zeile);
+        const cap = document.createElement('div');
+        cap.style.cssText = 'margin-top:6px;padding:6px;border:1px solid #4a7;border-radius:8px;background:#0f1f14';
+        const capImg = document.createElement('img');
+        capImg.src = dataUrl || '';
+        capImg.alt = 'Quiz-Bild';
+        capImg.style.cssText = 'display:block;max-width:100%;max-height:220px;border-radius:8px;border:1px solid #4a7';
+        cap.appendChild(capImg);
+        const capTxt = document.createElement('div');
+        capTxt.style.cssText = 'color:#8f8;font-size:0.85rem;font-weight:600;margin-top:4px';
+        capTxt.textContent = (verarbeitetePersonen && verarbeitetePersonen.length)
+            ? '… das ist ' + verarbeitetePersonen
+                .map(z => ({ n: z.name || z, y: z.y || 9999, x: z.x || 0 }))
+                .sort((a, b) => (a.y !== b.y) ? (a.y - b.y) : (a.x - b.x))
+                .map(o => o.n).join(', ')
+            : '… keine Person zugeordnet';
+        cap.appendChild(capTxt);
+        karte.appendChild(cap);
+        try {
+            fetch(`${API_BASE}/api/gesichter/quiz/antwort`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ bild_pfad: pfad, person: '', ist_neu: false, rolle: '', ueberspringen: true }),
+            }).catch(() => {});
+        } catch (_) {}
+        _quizWeiterPlanen(1600);
+    }
+
+    function antworten(person, istNeu, skip, rolle, beziehung, beschreibung) {
+        if (skip) { weiter(); return; }
+        // Person für die Abschluss-Bildunterschrift sammeln (einmalig je Name)
+        if (person && !verarbeitetePersonen.some(z => z.name === person)) {
+            let px = 0, py = 0;
+            try {
+                const bb = (gs[idx] && gs[idx].bbox) || [];
+                px = bb[0] || 0; py = bb[1] || 0;
+            } catch (_e) {}
+            verarbeitetePersonen.push({ name: person, x: px, y: py });
+        }
+        // SOFORT sichtbares Feedback (Wunsch des Betreibers 2026-09-09): Den
+        // Umbruch-Bereich auf eine grüne Bestätigung umschalten, damit der
+        // Klick sofort sichtbar ist, bevor die Server-Antwort/der Folge-Start
+        // das Bild wechseln.
+        umbruch.innerHTML = '';
+        const best = document.createElement('div');
+        best.style.cssText = 'font-size:0.85rem;color:#9f9;font-weight:600;margin-top:2px';
+        best.textContent = '✓ Gespeichert (' + (person || 'Person') + ') – weiter…';
+        umbruch.appendChild(best);
+        // Live-korrigierte bbox des aktuellen Gesichts (idx) mitsenden, falls
+        // der Nutzer den Rahmen im Vollbild verändert hat
+        let liveBbox = null;
+        try {
+            if (_quizEditor && _quizEditor.bbox_live && Array.isArray(_quizEditor.bbox_live[idx])
+                && _quizEditor.bbox_live[idx].length >= 4) liveBbox = _quizEditor.bbox_live[idx];
+        } catch (_e) {}
+        quizBeantwortenSilent(pfad, person, istNeu, rolle || '', beziehung || '', beschreibung || '', liveBbox).then((d) => {
+            // Nur bei BESTÄTIGTER Zuordnung (ok) merken (Wunsch 2026-09-10:
+            // nur wenn Person gequizt UND richtig zugeordnet wurde). Die REGION
+            // wird mitgemerkt -> ohne erneute Frage, auch wenn das Bild spaeter
+            // noch einmal aufgebaut wird (Fix 2026-09-15).
+            if (d && d.ok) {
+                try { _quizEditor.personen[idx] = person; } catch (_e) {}
+                try {
+                    const g = gs[idx] || {};
+                    const reg = g.region || bboxRegionSchluessel(g.bbox_norm);
+                    if (reg) { bestaetigtRegion[reg] = person; merkeBestaetigt(pfad, reg, person); }
+                } catch (_e) {}
+                // Katalog-Cache verwerfen: gerade kann eine neue Person
+                // dazugekommen sein -> Suchfeld listet sie beim naechsten
+                // Oeffnen/Tippen (Befund 2026-09-25, kein Einfrieren).
+                try { quizKatalogVerwerfen(); } catch (_e) {}
+            }
+            weiter();
+        });
+    }
+
+    zeigeFortschritt();
+    zeigeVermutungsFrage();
+    maleRahmen();
+    // Sind ALLE Gesichter dieses Bildes bereits bestaetigt (z. B. nach einem
+    // "💾 Speichern" im Vollbild), wird nichts erneut gefragt: das Bild gilt
+    // als abgeschlossen (Wunsch/Befund der Betreiber 2026-09-15).
+    try { if (ueberspringeBestaetigte()) return; } catch (_e) {}
+}
+
+// Manuelles Einzeichnen eines Gesichts-Rahmens bei 0 automatisch erkannten
+// Gesichtern (Wunsch des Betreibers 2026-09-11): Ja/Nein → Ja = Rahmen per Touch-Drag
+// auf dem Bild zeichnen, dann Person benennen. Wird global definiert, weil beide
+// Quiz-Flows (Einzel/Gruppe) darauf zugreifen koennen.
+function zeigeEinzeichnen(container, img, dataUrl, pfad, optionen) {
+    if (!img || !container) return;
+    // ZeichenOverlay auf dem Bild: absolut ueber der Imagebox
+    let anchor = img.parentElement;   // imgWrap (position:relative)
+    if (!anchor) anchor = img;
+    if (!anchor.style.cssText.includes('position')) {
+        // sicherstellen, dass das Overlay relativ zum Bild haelt
+        anchor.style.position = 'relative';
+    }
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:absolute;inset:0;z-index:6;background:rgba(46,139,87,0.06);cursor:crosshair;touch-action:none';
+    const rechteck = document.createElement('div');
+    rechteck.style.cssText = 'position:absolute;border:2px solid #ff6;background:rgba(255,255,0,0.08);pointer-events:none;box-sizing:border-box';
+    overlay.appendChild(rechteck);
+    anchor.appendChild(overlay);
+
+    let zeichnet = false, sx = 0, sy = 0;
+    // Koordinaten relativ zum Overlay (nicht Viewport), damit das Rechteck
+    // korrekt ueber dem Bild haelt — auch wenn gescrollt/anders positioniert
+    // (Wunsch des Betreibers: Zeichnen + Grösse/Position sollen funktionieren).
+    const rel = (clientX, clientY) => {
+        try {
+            const r = overlay.getBoundingClientRect();
+            return { x: clientX - r.left, y: clientY - r.top };
+        } catch (_) { return { x: clientX, y: clientY }; }
+    };
+    const zuOriginal = (rect) => {
+        // relative px -> Original-Bildkoordinaten
+        try {
+            const iw = img.naturalWidth || 1, ih = img.naturalHeight || 1;
+            const im = img.getBoundingClientRect();
+            // Overlay entspricht der imgBox; relativ zu im-Startpunkt rechnen
+            const ov = overlay.getBoundingClientRect();
+            const offsetX = ov.left - im.left, offsetY = ov.top - im.top;
+            const skw = iw / (im.width || 1), skh = ih / (im.height || 1);
+            return {
+                x: Math.max(0, (rect.x - offsetX) * skw),
+                y: Math.max(0, (rect.y - offsetY) * skh),
+                w: rect.w * skw, h: rect.h * skh,
+            };
+        } catch (_) { return rect; }
+    };
+    overlay.addEventListener('pointerdown', (e) => {
+        const p = rel(e.clientX, e.clientY);
+        zeichnet = true; sx = p.x; sy = p.y;
+        rechteck.style.left = sx + 'px'; rechteck.style.top = sy + 'px';
+        rechteck.style.width = '0px'; rechteck.style.height = '0px';
+        e.preventDefault(); e.stopPropagation();
+    });
+    overlay.addEventListener('pointermove', (e) => {
+        if (!zeichnet) return;
+        const p = rel(e.clientX, e.clientY);
+        const x = Math.min(sx, p.x), y = Math.min(sy, p.y);
+        const w = Math.abs(p.x - sx), h = Math.abs(p.y - sy);
+        rechteck.style.left = x + 'px'; rechteck.style.top = y + 'px';
+        rechteck.style.width = w + 'px'; rechteck.style.height = h + 'px';
+    });
+    overlay.addEventListener('pointerup', () => {
+        if (!zeichnet) return;
+        zeichnet = false;
+        const l = parseFloat(rechteck.style.left) || 0, t = parseFloat(rechteck.style.top) || 0;
+        const w = parseFloat(rechteck.style.width) || 0, h = parseFloat(rechteck.style.height) || 0;
+        if (w < 8 || h < 8) { overlay.remove(); return; }   // zu klein = Abbruch
+        const orig = zuOriginal({ x: l, y: t, w: w, h: h });
+        // Neuen Rahmen NORMALISIERT in den Editor uebernehmen (0..1 relativ zum
+        // Anzeigebild) — dieselbe Ankerung wie beim Oeffnen/Ziehen/Speichern.
+        if (!_quizEditor) {
+            _quizEditor = { bbox_norm_live: [], bbox_live: [], undo: [], personen: [],
+                            dreh: 0, refKontext: null, px_rest: [] };
+        }
+        if (!_quizEditor.personen) _quizEditor.personen = [];
+        if (!_quizEditor.bbox_norm_live) _quizEditor.bbox_norm_live = [];
+        const iwN = img.naturalWidth || 1, ihN = img.naturalHeight || 1;
+        const normNeu = bboxNormClampen(bboxNormVonPixeln([orig.x, orig.y, orig.w, orig.h], iwN, ihN));
+        _quizEditor.bbox_norm_live.push(normNeu);
+        _quizEditor.bbox_live.push([orig.x, orig.y, orig.w, orig.h]);
+        const neuIdx = _quizEditor.bbox_norm_live.length - 1;
+        overlay.remove();
+        // Rahmen im Bild sichtbar machen (normalisierte Ankerung)
+        try { markiereGesichtImBild(img, [{ bbox_norm: normNeu }], 0); } catch (_e) {}
+        // Namensauswahl (Optionen-Dropdown) fuer die eingezeichnete Person
+        const auswahl = document.createElement('div');
+        auswahl.style.cssText = 'margin-top:6px';
+        const hinweis = document.createElement('div');
+        hinweis.style.cssText = 'font-size:0.82rem;color:#8f8;margin-bottom:4px';
+        hinweis.textContent = '✅ Rahmen gesetzt – jetzt die Person benennen (oder "Neue Person" über die Suche):';
+        auswahl.appendChild(hinweis);
+        auswahl.appendChild(baueSuchMitVorschlaegen(
+            (optionen || []),          // Kandidaten: nur noch Sortierung INNEN
+            quizKatalogNamen(),        // ALLE Namen aus GET /api/gesichter (Befund 2026-09-25)
+            (n) => {
+                _quizEditor.personen[neuIdx] = n;
+                // Region als bestaetigt merken (nicht erneut fragen).
+                try { merkeBestaetigt(pfad, bboxRegionSchluessel(normNeu), n); } catch (_e) {}
+                // manuell=true: das gezeichnete Rechteck wird direkt eingebettet
+                // (op:embed_crop) — auch wenn YuNet das Gesicht nicht erkannt hat.
+                quizBeantworten(pfad, n, false, '', '', '', _quizEditor.bbox_live[neuIdx], true);
+                container.innerHTML = '';
+                const ok = document.createElement('div');
+                ok.style.cssText = 'color:#8f8;font-weight:600';
+                ok.textContent = `✓ ${n} gespeichert (ergänzt).`;
+                container.appendChild(ok);
+            },
+            {
+                // Kennzeichnen statt Ausblenden: was in dieser Sitzung schon auf
+                // dem Bild zugeordnet wurde, bleibt waehlbar und wird markiert.
+                aufBild: quizNamenAufBild([]),
+                bestaetigt: [],   // die gerade gezeichnete Region ist neu
+                // Ohne eigenes Formular in dieser Ansicht ist der bestehende Weg
+                // die Namenswahl selbst (Backend legt die Person dabei an).
+            }));
+        container.appendChild(auswahl);
+    });
+    // Hinweis im Container
+    const h = document.createElement('div');
+    h.style.cssText = 'font-size:0.82rem;color:#ccc;margin-top:4px';
+    h.textContent = '👆 Zeichne mit dem Finger ein Rechteck um die Person.';
+    container.appendChild(h);
+}
+
+function zeigeQuizKarte(pfad, name, dataUrl, optionen, vermutung, anzahl, erkannte, gesichter, zielContainer) {
+    // ML-Quiz-Karte: KI stellt eine Vermutung vor, der Nutzer bestaetigt/korrigiert.
+    // Aufgeraeumtes Layout (der Betreiber): Bild -> Gesicht-Crop -> Vermutung ->
+    // Antwort-Choices -> Neue Person -> Ueberspringen, einheitliche Buttons.
+    // `zielContainer` (optional): vorhandene Antwortblase wiederverwenden statt
+    // eine NEUE zu erzeugen — genutzt fuer die wiederhergestellte, offene Frage.
+    const karte = zielContainer
+        ? zielContainer
+        : addMessage('', 'assistant', undefined, pfad);
+    karte.innerHTML = '';
+    // global merken (fuer quizBeantworten, um die Karte nach der Antwort auf
+    // das Ergebnis umzuschreiben und die Buttons zu entfernen)
+    // eslint-disable-next-line no-global-assign
+    _letzteQuizKarte = karte;
+    // Blase als Quiz-Karte markieren: ermoeglicht das gezielte Aufraeumen der
+    // fluechtigen Bildkopie (base64-DatenURL) nach Antwort/Weiter/Beenden,
+    // damit keine angehaeuften Mega-URLs im Chat-Speicher bleiben.
+    try { karte.dataset.quizKarte = '1'; } catch (_) {}
+
+    // Kopfzeile: Menue-Symbol (Personen verwalten) links, Titel, Stopp rechts.
+    const kopf = document.createElement('div');
+    kopf.style.cssText = 'display:flex;justify-content:space-between;align-items:center';
+    // Menue-Knopf oben links: oeffnet das Personen-Bearbeitsmenue direkt aus
+    // der Quiz-Bubble (der Betreiber: Menue-Symbol oben links).
+    const menue = macheQuizButton('👥', 'person', zeigePersonenVerwaltung);
+    menue.title = 'Personen verwalten (Rollen/Referenzen)';
+    menue.style.cssText += ';padding:2px 9px;font-size:0.85rem;background:transparent;border:1px solid #2e8b57;color:#8f8';
+    const titel = document.createElement('div');
+    titel.style.cssText = 'flex:1;text-align:center;font-weight:700;font-size:0.86rem;color:#9f9';
+    titel.textContent = '🧠 Gesichter-Quiz';
+    const stopp = macheQuizButton('✕', 'skip', beendeQuizAktiv);
+    stopp.title = 'Quiz beenden';
+    stopp.style.cssText += ';padding:1px 8px;font-size:0.95rem;background:transparent;border:1px solid #555;color:#bbb';
+    kopf.appendChild(menue);
+    kopf.appendChild(titel);
+    kopf.appendChild(stopp);
+    karte.appendChild(kopf);
+
+    // Bild in einem eigenen, scrollbaren Wrapper mit position:relative: So ist
+    // das Foto proportional skaliert (kein object-fit:cover, das den gelben
+    // bbox-Rahmen verrutschen liess) und grosse Bilder sind per Scroll bar.
+    // Der gelbe Kasten (markiereGesichtImBild) liegt als Overlay darüber.
+    const imgWrap = document.createElement('div');
+    imgWrap.style.cssText = 'position:relative;display:block;width:100%;max-height:320px;overflow:auto;background:#000;border-radius:10px;margin-top:6px;border:1px solid #444';
+    const img = document.createElement('img');
+    img.src = dataUrl;
+    img.alt = 'Quiz-Bild';
+    img.style.cssText = 'display:block;width:100%;height:auto;border-radius:10px';
+    macheBildAntippbar(img, gesichter || [], { bildPfad: pfad });   // Tipp -> Vollbild (Person wirklich erkennen)
+    imgWrap.appendChild(img);
+    karte.appendChild(imgWrap);
+
+    const frage = document.createElement('div');
+    frage.style.cssText = 'margin-top:6px;font-weight:600;color:#eef';
+    frage.textContent = 'Wer ist auf diesem Bild?';
+    karte.appendChild(frage);
+
+    // --- Gesicht/er im Bild markieren (gelber Rahmen) + prominenter Ausschnitt ---
+    const anzahlGes = (anzahl && anzahl >= 1) ? anzahl : 0;
+    if (anzahlGes >= 2) {
+        // Gruppenbild (>=2): Gesicht fuer Gesicht durchgehen + je markieren.
+        starteGruppenQuiz(frage, karte, img, dataUrl, pfad, optionen, gesichter || [], erkannte || []);
+        return;  // Gruppen-Flow baut seine eigene Antwort-Sektion
+    } else if (anzahlGes === 1 && gesichter && gesichter.length) {
+        markiereGesichtImBild(img, gesichter, 0);
+        try { img.addEventListener('load', () => markiereGesichtImBild(img, gesichter, 0)); } catch (_) {}
+        zeigeGesichtCropIn(karte, dataUrl, gesichter[0].bbox, 240, pfad);
+    } else {
+        // 0 erkannte Gesichter: KEIN Ja/Nein mehr (Wunsch des Betreibers 2026-09-14).
+        // Nur das Bild zeigen + Bildunterschrift "keine bekannte Person erkannt",
+        // dann automatisch zum naechsten Bild. quizUeberspringen baut diese Karte
+        // bereits auf Bild + Untertitel um und ruft naechsteQuizRunde() -> es
+        // entsteht keine Ja/Nein-Frage und keine zweite Quiz-Session.
+        quizUeberspringen(pfad);
+        return;
+    }
+
+    // --- Vermutung: erst reine Ja/Nein-Frage stellen (kein aufdringliches
+    //     "eigenes Raten"). Name/Auswahl/Neue Person/Kein Gesicht erscheinen
+    //     erst NACH "Nein" (der Betreiber: erst Ja/Nein, wenn Nein dann 'wer ist das'). ---
+    const v = vermutung ? (vermutung.person ? vermutung : null) : null;
+    if (v) {
+        const vbox = document.createElement('div');
+        vbox.style.cssText = 'margin-top:8px;padding:8px;border:1px solid #2e8b57;border-radius:9px;background:#12251a';
+        const sh = (v.sicherheit || '');
+        const txt = document.createElement('div');
+        txt.style.cssText = 'color:#8f8;font-size:0.85rem;font-weight:600';
+        txt.textContent = `🔎 Ist das ${v.person}?` + (sh ? ` (Sicherheit: ${sh})` : '');
+        vbox.appendChild(txt);
+        const zeile = document.createElement('div');
+        zeile.style.cssText = 'display:flex;gap:6px;margin-top:6px;flex-wrap:wrap';
+        zeile.appendChild(macheQuizButton('✅ Ja', 'akt', () => {
+            // SOFORT sichtbares Feedback (Wunsch des Betreibers 2026-09-09): die
+            // Ja/Nein-Box auf eine grüne Bestätigung umschalten, damit der
+            // Klick nicht "taub" wirkt, bevor der Server antwortet.
+            vbox.innerHTML = '';
+            const best = document.createElement('div');
+            best.style.cssText = 'font-size:0.85rem;color:#9f9;font-weight:600';
+            best.textContent = `✓ ${v.person} gespeichert – weiter…`;
+            vbox.appendChild(best);
+            // Live-korrigierte bbox des Einzelgesichts (Index 0) mitsenden
+            let liveBbox = null;
+            try {
+                if (_quizEditor && _quizEditor.bbox_live && Array.isArray(_quizEditor.bbox_live[0])
+                    && _quizEditor.bbox_live[0].length >= 4) liveBbox = _quizEditor.bbox_live[0];
+            } catch (_e) {}
+            quizBeantworten(pfad, v.person, false, '', '', '', liveBbox);
+            _aktuelleQuizPerson = v.person; _aktuellerQuizPfad = pfad;  // fuer 💾-Speichern
+        }));
+        zeile.appendChild(macheQuizButton('❌ Nein', 'neu', () => {
+            vbox.style.display = 'none';
+            zeigeAntwortEingabe();   // erst jetzt: Wer ist es denn?
+        }));
+        vbox.appendChild(zeile);
+        // "Keine Person vorhanden" soll IMMER direkt unter Ja/Nein stehen
+        // (Wunsch des Betreibers 2026-09-09) - nicht erst nach "Nein". Wechselt
+        // zum nächsten BILD (überspringt dieses).
+        const skipDirekt = macheQuizButton('🚫 Keine Person vorhanden', 'skip', () => quizUeberspringen(pfad));
+        skipDirekt.style.cssText += ';margin-top:6px;width:100%;text-align:center';
+        vbox.appendChild(skipDirekt);
+        karte.appendChild(vbox);
+    }
+
+    // Baut den Antwort-Block (Namen + Neue Person + Kein Gesicht). Wird bei
+    // einer Vermutung erst nach "Nein" eingeblendet, sonst direkt gezeigt.
+    function zeigeAntwortEingabe() {
+        auswahlBox.style.display = 'flex';
+        neu.style.display = '';
+        skip.style.display = '';
+        frage.textContent = 'Wer ist auf diesem Bild?';
+    }
+
+    // --- Antwort-Sektion: die 5 wahrscheinlichsten Namen (Kacheln) + Suche ---
+    const auswahlBox = document.createElement('div');
+    auswahlBox.style.cssText = 'display:' + (v ? 'none' : 'flex') + ';flex-direction:column;gap:6px;margin-top:8px';
+    // Optionen sind im Backend nach Wahrscheinlichkeit sortiert — nur die
+    // ersten 5 zeigen (Wunsch des Betreibers: 5 Namen untereinander reicht).
+    const kacheln = document.createElement('div');
+    kacheln.style.cssText = 'display:flex;flex-direction:column;gap:6px';
+    (optionen || []).slice(0, 5).forEach(o => {
+        // Bekannte Person: deren gemerkte Rolle bleibt erhalten -> leerer String.
+        kacheln.appendChild(macheQuizButton(o, 'person', () => quizBeantworten(pfad, o, false, '')));
+    });
+    if ((optionen || []).length > 5) {
+        const mehr = document.createElement('div');
+        mehr.style.cssText = 'font-size:0.72rem;color:#9f9;opacity:.8;margin-top:2px';
+        mehr.textContent = `… und ${(optionen || []).length - 5} weitere (siehe Suche).`;
+        kacheln.appendChild(mehr);
+    }
+    auswahlBox.appendChild(kacheln);
+    // "Suche andere Person": freie Eingabe mit LIVE-Vorschlägen (wie Gruppenbild)
+    auswahlBox.appendChild(baueSuchMitVorschlaegen(
+        (optionen || []),          // Kandidaten: nur noch Sortierung INNEN
+        quizKatalogNamen(),        // ALLE Namen aus GET /api/gesichter (Befund 2026-09-25)
+        (n) => quizBeantworten(pfad, n, false, ''),
+        {
+            // Kennzeichnen statt Ausblenden: schon auf diesem Bild zugeordnete
+            // bzw. fuer dieses Gesicht bestaetigte Personen bleiben waehlbar.
+            aufBild: quizNamenAufBild(gesichter || []),
+            bestaetigt: quizNamenFuerRegion(gesichter || [], 0, pfad),
+            // BESTEHENDE "Neue Person"-Box dieser Karte — nur vorbelegt
+            // (kein neues Formular, KEIN prompt()).
+            onNeu: (n) => {
+                neuName.value = n;
+                neuForm.style.display = 'block';
+                try { if (neuName.focus) neuName.focus(); } catch (_e) {}
+            },
+        }));
+    karte.appendChild(auswahlBox);
+
+    // 'Neue Person' als eingebettetes, GROESSERES Formular (kein prompt(), PWA-
+    // sicher): Name + Rolle + EIN Textfeld für alle Infos über die Person +
+    // Speicherknopf. Beschreibung/Lebensinfos war doppelt gemoppelt — alles
+    // geht jetzt in das Zusatzkontext-Feld (Wunsch des Betreibers 2026-09-09).
+    const neu = macheQuizButton('➕ Neue Person', 'neu', null);
+    const neuForm = document.createElement('div');
+    neuForm.style.display = 'none';
+    neuForm.style.cssText = 'display:none;margin-top:6px;padding:10px;border:2px solid #f88;border-radius:10px;background:#221010';
+    const neuName = document.createElement('input');
+    neuName.placeholder = 'Name* (z. B. Jonas)';
+    neuName.style.cssText = 'width:100%;padding:7px;border:1px solid #f88;border-radius:7px;background:#1a0d0d;color:inherit;font-size:0.88rem';
+    const neuRolle = document.createElement('input');
+    neuRolle.placeholder = 'Rolle / Bedeutung (z. B. Bruder, Mutter)';
+    neuRolle.style.cssText = 'width:100%;padding:7px;margin-top:6px;border:1px solid #f88;border-radius:7px;background:#1a0d0d;color:inherit;font-size:0.88rem';
+    const neuBezWrap = document.createElement('div');
+    neuBezWrap.style.cssText = 'display:flex;align-items:center;gap:4px;margin-top:6px';
+    const neuBez = document.createElement('textarea');
+    neuBez.placeholder = 'Infos über die Person — Beziehung + alles, was du weißt (Diktat möglich)';
+    neuBez.rows = 3;
+    neuBez.style.cssText = 'width:100%;padding:7px;border:1px solid #f88;border-radius:7px;background:#1a0d0d;color:inherit;font-size:0.85rem;resize:vertical;flex:1';
+    neuBezWrap.appendChild(neuBez);
+    fuegeFeldMikrofonHinzu(neuBez, neuBezWrap, 'Infos über die Person diktieren');
+    const neuSpeichern = macheQuizButton('✅ Person speichern', 'neu', () => {
+        const n = (neuName.value || '').trim();
+        if (!n) { neuName.style.borderColor = '#f55'; return; }
+        quizBeantworten(pfad, n, true, (neuRolle.value || '').trim(), (neuBez.value || '').trim(), '');
+    });
+    neuSpeichern.style.cssText += ';margin-top:8px;width:100%;padding:8px';
+    // Abbrechen (Spec-Schritt 9): Formular zuklappen, nichts anlegen.
+    const neuAbbrechen = macheQuizButton('✖ Abbrechen', 'skip', () => {
+        neuForm.style.display = 'none';
+        neuName.value = ''; neuRolle.value = ''; neuBez.value = '';
+    });
+    neuAbbrechen.style.cssText += ';margin-top:6px;width:100%;text-align:center';
+    neuForm.appendChild(neuName);
+    neuForm.appendChild(neuRolle);
+    neuForm.appendChild(neuBezWrap);
+    neuForm.appendChild(neuSpeichern);
+    neuForm.appendChild(neuAbbrechen);
+    neu.onclick = () => { neuForm.style.display = neuForm.style.display === 'none' ? 'block' : 'none'; };
+    karte.appendChild(neu);
+    karte.appendChild(neuForm);
+
+    const skip = macheQuizButton('🚫 Keine Person vorhanden', 'skip', () => quizUeberspringen(pfad));
+    skip.style.cssText += ';margin-top:6px;width:100%;text-align:center';
+    karte.appendChild(skip);
+
+    // Vermutung vorhanden? Dann Antwort-Block anfangs verstecken (nur Ja/Nein
+    // sichtbar); erst "Nein" blendet den Antwort-Block ein.
+    if (v) {
+        auswahlBox.style.display = 'none';
+        neu.style.display = 'none';
+        skip.style.display = 'none';
+    } else {
+        // Keine ML-Vermutung: zuerst eine klare Ja/Nein-Frage "Keine Person
+        // gefunden?" (Wunsch des Betreibers 2026-09-11). Ja -> naechstes Bild;
+        // Nein -> Rahmen zeichnen & Person ergaenzen. Die direkte Benennung
+        // bleibt als Zweitweg erreichbar.
+        // WICHTIG: Auch hier die Namens-Chips/Neue Person/Überspringen anfangs
+        // VERSTECKEN (nicht nur bei Vermutung). Sonst erscheinen neben dem
+        // Gate die Chips mit "Wer ist auf diesem Bild?" -> Redundanz/Dopplung,
+        // die der Betreiber stört. Erst "Person direkt benennen" blendet sie ein.
+        auswahlBox.style.display = 'none';
+        neu.style.display = 'none';
+        skip.style.display = 'none';
+        const gate = document.createElement('div');
+        gate.style.cssText = 'margin-top:8px;padding:8px;border:1px solid #2e8b57;border-radius:9px;background:#12251a';
+        const gt = document.createElement('div');
+        gt.style.cssText = 'color:#8f8;font-size:0.85rem;font-weight:600';
+        gt.textContent = '👤 Keine Person gefunden?';
+        gate.appendChild(gt);
+        const gz = document.createElement('div');
+        gz.style.cssText = 'display:flex;gap:6px;margin-top:6px;flex-wrap:wrap';
+        gz.appendChild(macheQuizButton('✅ Ja → Person einzeichnen', 'akt', () => {
+            gate.remove();
+            zeigeEinzeichnen(karte, img, dataUrl, pfad, optionen);
+        }));
+        gz.appendChild(macheQuizButton('❌ Nein → nächstes Bild', 'skip', () => quizUeberspringen(pfad)));
+        gate.appendChild(gz);
+        const direkt = macheQuizButton('👤 Person direkt benennen', 'person', () => {
+            gate.remove();
+            zeigeAntwortEingabe();
+        });
+        direkt.style.cssText += ';margin-top:6px;width:100%;text-align:center';
+        gate.appendChild(direkt);
+        karte.appendChild(gate);
+        frage.textContent = '👤 Keine Person gefunden?';
+    }
+}
+
+// Ergebnis der Quiz-Runde in der Karte anzeigen: Ersetzt den Antwortbereich
+// (Buttons verschwinden) durch eine Bildunterschrift "… das ist [Person]".
+// Verhindert so das versehentliche MEHRFACH-Speichern durch wiederholte
+// Klicks auf dieselbe Antwort (Buttons sind danach weg).
+// Wunsch des Betreibers 2026-09-09: auch beim Einzelbild das BILD + "das ist …"
+// als Bildunterschrift zeigen statt nur nacktem Text.
+function macheQuizFertig(karte, text, ok, bildSrc) {
+    if (!karte) return;
+    try {
+        // gesamten Karten-Inhalt durch das Ergebnis ersetzen
+        karte.innerHTML = '';
+        const zeile = document.createElement('div');
+        zeile.style.cssText = 'padding:10px;border:1px solid ' + (ok ? '#2e8b57' : '#f88')
+            + ';border-radius:10px;background:' + (ok ? '#0f1f14' : '#221010')
+            + ';font-weight:600;color:' + (ok ? '#8f8' : '#f88');
+        zeile.textContent = ok ? ('✅ ' + text) : ('⚠️ ' + text);
+        karte.appendChild(zeile);
+        // Bildunterschrift: kleines Bild oben + darunter "… das ist X" (falls
+        // ein Bild-Src vorhanden ist). Bei Erfolg wird das aktuelle Bild
+        // kompakt als Bestaetigung gezeigt, mit der zugeordneten Person als
+        // Bildunterschrift darunter.
+        if (ok && bildSrc) {
+            const cap = document.createElement('div');
+            cap.style.cssText = 'margin-top:6px;padding:6px;border:1px solid #4a7;border-radius:8px;background:#0f1f14';
+            const capImg = document.createElement('img');
+            capImg.src = bildSrc;
+            capImg.alt = 'Bestätigt';
+            capImg.style.cssText = 'max-width:90px;max-height:90px;border-radius:8px;border:1px solid #4a7;vertical-align:middle';
+            const capTxt = document.createElement('span');
+            capTxt.style.cssText = 'color:#8f8;font-size:0.82rem;font-weight:600;margin-left:8px';
+            capTxt.textContent = '… das ist ' + (text || '');
+            cap.appendChild(capImg);
+            cap.appendChild(capTxt);
+            karte.appendChild(cap);
+        }
+        // nach kurzer Zeit automatisch zur naechsten Runde
+        _quizWeiterPlanen(1500);
+    } catch (_) {}
+}
+
+async function quizUeberspringen(pfad) {
+    // Sofort-laufende Gesichts-Analyse der Sofort-Ladevorschau UNBEDINGT ganz
+    // am Anfang abbrechen (VOR dem ersten await) — sonst kann die Analyse noch
+    // fertig werden und die Karte als Quiz (Rahmen/Ja-Nein) rendern, bevor der
+    // Abort greift -> zweites Quiz (Wunsch des Betreibers 2026-09-14).
+    try { if (_analyseAbort && !_analyseAbort.aborted) _analyseAbort.abort(); } catch (_ab) {}
+    try {
+        const r = await fetch(`${API_BASE}/api/gesichter/quiz/antwort`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bild_pfad: pfad, person: '', ist_neu: false, rolle: '', ueberspringen: true }),
+        });
+        const d = await r.json();
+        // Ziel-Karte: die zuletzt hinzugefügte Quiz-Karte (auch die Sofort-Karte
+        // beim Laden, die NICHT _letzteQuizKarte ist). Fallback ins DOM.
+        let zielKarte = _letzteQuizKarte;
+        if (!zielKarte) {
+            try {
+                const alle = Array.from(document.querySelectorAll('#messages .message.assistant'));
+                for (let i = alle.length - 1; i >= 0; i--) {
+                    if (alle[i].dataset && alle[i].dataset.quizKarte === '1') { zielKarte = alle[i]; break; }
+                }
+            } catch (_e3) {}
+        }
+        // Nach "Keine Person vorhanden": das BILD beibehalten, aber alle
+        // Quiz-Bedienelemente (Buttons/Formulare) entfernen und nur die
+        // Bildunterschrift "Keine Person vorhanden" als finale Ansicht zeigen.
+        // So entsteht NIE eine zweite Quiz-Session (Wunsch des Betreibers 2026-09-11).
+        try {
+            if (zielKarte) {
+                // Alle Kinder der Karte sammeln; das Kind, das das <img> enthält
+                // (Bild-Wrapper), bleibt, der Rest wird entfernt.
+                for (const kind of Array.from(zielKarte.children)) {
+                    const hatBild = kind.querySelector && kind.querySelector('img');
+                    if (hatBild) continue;
+                    // Bildunterschrift HTML nicht beibehalten; alle anderen Kinder raus
+                    try { kind.remove(); } catch (_e2) {}
+                }
+                // Bildunterschrift unter das erhaltene Bild setzen
+                const unt = document.createElement('div');
+                unt.style.cssText = 'margin-top:4px;padding:4px;border:1px solid #666;border-radius:8px;background:#1e1e1e;font-size:0.8rem;color:#ccc';
+                unt.textContent = '🚫 Keine bekannte Person erkannt';
+                zielKarte.appendChild(unt);
+            }
+        } catch (_e) {}
+        addMessage((d && d.ok) ? '✅ Bild gespeichert (keine Person).' : `⚠️ ${(d && d.fehler) || 'Fehler'}`, 'assistant');
+        naechsteQuizRunde();  // weiter zur naechsten Frage
+    } catch (e) {
+        addMessage('⚠️ Überspringen fehlgeschlagen: ' + (e && e.message), 'assistant');
+    }
+}
+
+function beendeQuizAktiv() {
+    // BEWUSST kein Guard mehr auf `_quizAktiv`: Eine wiederhergestellte
+    // (Reload) oder fortgesetzte Quiz-Karte kann sichtbar und bedienbar sein,
+    // waehrend `_quizAktiv` (noch) false ist. Vorher war der ✕-Knopf in genau
+    // diesem Zustand ein No-Op ("Quiz-Antworten bleiben stehen, Quiz laesst
+    // sich nicht beenden"). An dieser Funktion haengt nur der ✕-Knopf der
+    // Quiz-Karte — sie wird nie "ins Leere" gerufen.
+    _quizAktiv = false;
+    // Laufende Verkettung stoppen: geplanten Auto-Weiter-Timer abraeumen,
+    // bereits angestossene Runden entwerten (Lauf-Token) und eine evtl.
+    // laufende Gesichts-Analyse abbrechen. Sonst schiebt einer dieser Wege
+    // kurz nach dem Beenden doch wieder eine neue Quiz-Karte nach.
+    _quizWeiterAbbrechen();
+    _rundeToken++;
+    try { if (_analyseAbort && !_analyseAbort.aborted) _analyseAbort.abort(); } catch (_) {}
+    // 1) Noch offene (bestaetigte) Gruppen-Zuordnungen ans Backend persistieren,
+    //    die beim ✕ noch nicht durch "weiter" gespeichert wurden.
+    try {
+        const offen = (_quizOffeneZuordnungen || []).filter(z => z && z.person && z.bild_pfad);
+        for (const z of offen) {
+            try {
+                quizBeantwortenSilent(z.bild_pfad, z.person, z.ist_neu || false, z.rolle || '', '', '', z.bbox);
+            } catch (_e) {}
+        }
+    } catch (_e) {}
+    _quizOffeneZuordnungen = [];
+    // 2) Alle Quiz-Buttons/Bedienung entfernen: Jede als Quiz-Karte markierte
+    //    Blase leeren und auf "beendet"-Hinweis umschalten. Der Kopf (Menue/
+    //    Beenden), Antwort-Choices und Vermutungs-Buttons verschwinden.
+    try {
+        const karten = Array.from(document.querySelectorAll('[data-quizkarte="1"], [data-quiz-karte="1"]'));
+        for (const k of karten) { k.innerHTML = ''; }
+    } catch (_e) {}
+    raeumeQuizKopienAuf();
+    addMessage('🛑 **Quiz beendet** — du kannst jederzeit neu starten.', 'assistant');
+}
+
+async function quizFortsetzen() {
+    // Zeigt den LETZTEN Stand wieder: die letzte offene Quiz-Frage aus dem
+    // Verlauf (conv_main) mit Bild + Antwort-Optionen + Vermutung.
+    try {
+        const res = await fetch(`${API_BASE}/api/conversations/conv_main`);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const nachrichten = (await res.json()).messages || [];
+        // letzte [QUIZ-OFFEN]-Nachricht finden
+        let offen = -1;
+        for (let i = 0; i < nachrichten.length; i++) {
+            if ((nachrichten[i].content || '').indexOf('[QUIZ-OFFEN]') !== -1) offen = i;
+        }
+        if (offen === -1) {
+            addMessage('ℹ️ Keine offene Quiz-Frage im Verlauf. Sag "quiz starten" für ein neues.', 'assistant');
+            return;
+        }
+        const m = nachrichten[offen];
+        const pfad = m.bild_pfad;
+        if (!pfad) { addMessage('ℹ️ Offene Frage hat kein Bild.', 'assistant'); return; }
+        addMessage(`🔄 **Quiz fortgesetzt** – letzte offene Frage wieder angezeigt.`, 'assistant');
+        // Vorbereiten: bekannte Personen als Optionen holen
+        const gr = await fetch(`${API_BASE}/api/gesichter`);
+        const gd = await gr.json();
+        const optionen = (gd && gd.personen || []).map(p => p.name).filter(Boolean);
+        const ui = m.ui || null;
+        const vermutung = ui && ui.vermutung && ui.vermutung.person ? ui.vermutung : (null);
+        // Gesicht-Bboxen aus dem persistierten ui-Block holen (sonst keiner):
+        // so zeichnet zeigeQuizKarte den gelben bbox-Rahmen ueber dem Bild.
+        const gesichterUi = (ui && ui.gesichter) || [];
+        const anzahlGes = gesichterUi.length;
+        // data_url laden
+        const dr = await fetch(`${API_BASE}/api/dateien/daten?pfad=${encodeURIComponent(pfad)}`);
+        const dd = await dr.json();
+        const dataUrl = (dd && dd.data_url) || '';
+        if (!dataUrl) {
+            addMessage('🖼 Bild nicht (mehr) ladbar (gelöscht/verschoben).', 'assistant');
+        }
+        _quizAktiv = true;       // fortgesetzte Sitzung gilt als aktiv
+        _quizWeiterAbbrechen();  // keinen Alt-Timer der vorigen Sitzung uebernehmen
+        zeigeQuizKarte(pfad, m.name || '', dataUrl, optionen, vermutung, anzahlGes, [], gesichterUi);
+        // interaktive Antworten rekonstruieren (nur die letzte -> hier genau diese)
+        const letzte = document.querySelectorAll('.message.assistant');
+        // Nach der neuen Karte die Antwort-Buttons ergaenzen (ui-basiert)
+        // -> wiederherstellenQuizAntworten auf die zuletzt hinzugefuegte Karte
+        const alle = Array.from(document.querySelectorAll('.message.assistant .message-content'));
+        const cz = alle[alle.length - 1] || null;
+        if (cz) wiederherstellenQuizAntworten(cz, pfad, ui);
+    } catch (e) {
+        addMessage('⚠️ Quiz konnte nicht fortgesetzt werden: ' + (e && e.message), 'assistant');
+    }
+}
+
+// Raeumt die fluechtigen base64-Bildkopien ABGESCHLOSSENER Quiz-Karten auf.
+// Nur Blasen mit dataset.quizKarte (= per zeigeQuizKarte erzeugt) und deren
+// <img src="data:..."> werden geleert + der gelbe Rahmen entfernt. So bleibt
+// jede beantwortete/uebersprungene Frage nicht als Mega-DatenURL im DOM/
+// Arbeitsspeicher haengen (der Betreiber: Bilder fluechtig, nie anhaeufen).
+function raeumeQuizKopienAuf() {
+    try {
+        const blasen = Array.from(document.querySelectorAll('.message.assistant'));
+        for (const blas of blasen) {
+            if (!(blas.dataset && blas.dataset.quizKarte)) continue;
+            const imgs = blas.querySelectorAll('img');
+            for (const im of imgs) {
+                const src = im.src || '';
+                if (src.indexOf('data:') === 0) {  // nur base64-DatenURLs, nicht http
+                    try { im.removeAttribute('src'); } catch (e) {}
+                    im.src = '';
+                }
+            }
+            const marke = blas.querySelector('.quiz-marke');
+            if (marke) { try { marke.remove(); } catch (e) {} }
+        }
+    } catch (_) {}
+}
+
+// Holt die naechste Quiz-Runde vom Server und zeigt sie. KEIN _quizAktiv-Guard:
+// diese Funktion ist die FORTSETZUNG innerhalb einer bereits laufenden Sitzung
+// (nach "weiter"/"Naechstes Bild"/"Keine Person drauf"). _quizAktiv bleibt true,
+// solange die Sitzung laeuft; nur der echte Neustart (quizStart) guardet.
+// Liefert true, wenn eine Runde angezeigt wurde; false, wenn Quiz zu Ende/Fehler.
+async function naechsteQuizRunde(nachRunde) {
+    // Sitzung beendet? Dann KEINE neue Runde mehr aufbauen. Dieser Fall tritt
+    // ein, wenn ein Auto-Weiter-Timer, ein "weiter"-Klick oder eine noch
+    // laufende Analyse NACH dem Beenden feuert — ohne diese Sperre oeffnet sich
+    // das Quiz von selbst wieder ("laesst sich nicht beenden").
+    if (!_quizAktiv) return false;
+    // Lauf-Token: diese Runde kennzeichnet sich mit einem frischen Token. Wenn
+    // waehrend eines await eine NEUERE Runde startet (skipSofort, quizUeberspringen,
+    // "weiter", setTimeouts), erhoeht sich _rundeToken und __diese__ alte Runde
+    // verwirft sich beim naechsten token-Check - nie zwei parallele Quizze.
+    const token = ++_rundeToken;
+    const abgeloest = () => (token !== _rundeToken);
+    // `nachRunde` (optional): wird nach dem Anzeigen einer Runde aufgerufen mit
+    // (hauptQuizImg, gesichter). Nutzt der Vollbild-Durchlauf ("Nächstes Bild ➡️"),
+    // um das neue Bild direkt wieder als Vollbild zu oeffnen. Ohne Callback
+    // verhaelt sich die Funktion exakt wie zuvor.
+    raeumeQuizKopienAuf();  // verbrauchte Quiz-Karte(n): Bildkopie freigeben
+    const warteblase = addMessage('', 'assistant');
+    // Gleiche animierte Dreipunkt-Blase wie beim Agenten-Denken (siehe Typing-Indicator
+    // weiter unten): zeigt "Quiz lädt" als pulsierende Bubble statt nacktem Text und wird
+    // direkt nach der Server-Antwort wieder entfernt.
+    warteblase.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div><span class="loading-text">🧠 Quiz lädt – prüfe Gesichter …</span>';
+    try {
+        const r = await fetch(`${API_BASE}/api/gesichter/quiz/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ausgeschlossen: _quizGesehen }),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        if (abgeloest()) { try { if (warteblase && warteblase.remove) warteblase.remove(); } catch (_e) {} return false; }
+        if (warteblase) { const b = warteblase.closest ? warteblase.closest('.message') : null; if (b) b.remove(); }
+        if (d && d.keine) { addMessage('⚠️ Kein Lieblingsbilder-Ordner gefunden.', 'assistant'); _quizAktiv = false; return false; }
+        if (d && d.fertig) {
+            addMessage(`🎉 **Quiz beendet!** Du hast ${d.verarbeitet||0} von ${d.gesamt||0} Lieblingsbildern durchgespielt. Die Gesichter sind jetzt robuster gelernt. Danke fürs Trainieren!`, 'assistant');
+            _quizAktiv = false;
+            return false;
+        }
+        const pfad = d.bild_pfad;
+        _quizGesehen.push(pfad);
+        const name = d.name || '';
+        const dataUrl = d.data_url || '';
+        const optionen = d.optionen || [];
+        // Wunsch des Betreibers: Bild SOFORT anzeigen (start_runde blockiert nicht
+        // mehr auf die Gesichtserkennung); darunter die "Quiz lädt"-Animation;
+        // sobald die Analyse fertig ist, ersetzt die Ja/Nein-Frage die Animation.
+        if (d.analyse_ausstehend) {
+            // 1) Karte sofort mit Bild erstellen (dataUrl ist lokal -> sofort)
+            const sofortKarte = addMessage('', 'assistant', undefined, pfad);
+            try { sofortKarte.dataset.quizKarte = '1'; } catch (_e) {}
+            const imgWrap = document.createElement('div');
+            imgWrap.style.cssText = 'position:relative;display:block;width:100%;max-height:320px;overflow:auto;background:#000;border-radius:10px;border:1px solid #444';
+            const img = document.createElement('img');
+            img.src = dataUrl;
+            img.alt = 'Quiz-Bild';
+            img.style.cssText = 'display:block;width:100%;height:auto;border-radius:10px';
+            imgWrap.appendChild(img);
+            sofortKarte.appendChild(imgWrap);
+            // 2) Lade-Animation direkt UNTER dem Bild
+            const ladewrap = document.createElement('div');
+            ladewrap.style.cssText = 'margin-top:6px;padding:8px;background:#0f1f14;border-radius:10px;text-align:center';
+            ladewrap.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div><span class="loading-text">🧠 Quiz lädt – prüfe Gesichter …</span>';
+            sofortKarte.appendChild(ladewrap);
+            // "Keine Person vorhanden" schon jetzt anbieten (auch waehrend die
+            // Analyse laeuft) — Wunsch des Betreibers 2026-09-10: kann sofort zum
+            // naechsten Bild durchdruecken.
+            const skipSofort = macheQuizButton('🚫 Keine Person vorhanden', 'skip', () => quizUeberspringen(pfad));
+            skipSofort.style.cssText += ';margin-top:6px;width:100%;text-align:center';
+            sofortKarte.appendChild(skipSofort);
+            scrollToBottom(true);
+            // 3) Analyse nachholen, danach die Karte fertig rendern (Ja/Nein
+            //    ersetzt die Animation). Ein Skip kann die FETCH via AbortController
+            //    sofort abbrechen (Übertragung stoppen).
+            let abortCtrl = new AbortController();
+            _analyseAbort = abortCtrl;
+            // PITFALL: Die Abpruefung NACH dem await muss gegen den LOKALEN
+            // abortCtrl laufen, NICHT gegen die globale _analyseAbort. Beim Skip
+            // ruft quizUeberspringen -> naechsteQuizRunde() die globale _analyseAbort
+            // auf einen NEUEN Controller fuer das naechste Bild um; eine haengende
+            // Analyse des VORIGEN Bildes wuerde sonst den neuen (nicht abgebrochenen)
+            // Controller pruefen und das Quiz doppelt rendern (Wunsch des Betreibers 2026-09-14).
+            try {
+                const ar = await fetch(`${API_BASE}/api/gesichter/quiz/analysiere`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ bild_pfad: pfad }),
+                    signal: abortCtrl.signal,
+                });
+                const a = await ar.json();
+                if (abortCtrl.aborted || abgeloest()) {
+                    // Skip inzwischen gedrueckt / neuere Runde gestartet ->
+                    // Analyse-Antwort VERWERFEN (die Karte wurde bereits von
+                    // quizUeberspringen / der neuen Runde umgebaut).
+                    return true;
+                }
+                zeigeQuizKarte(pfad, name, dataUrl, optionen,
+                    a.vermutung, a.anzahl_gesichter || 0, a.erkannte_personen || [], a.gesichter || [],
+                    sofortKarte);
+                // Vollbild-Durchlauf: neues Bild nach der Analyse direkt wieder als
+                // Vollbild anzeigen (mit den analysierten Gesichtern fuer die Rahmen).
+                if (typeof nachRunde === 'function') {
+                    try { nachRunde(findeHauptQuizBild(sofortKarte), a.gesichter || []); } catch (_c) {}
+                }
+            } catch (e2) {
+                if (abortCtrl.aborted || abgeloest()) {
+                    // Skip abgebrochen / neuere Runde -> nicht neu rendern
+                    return true;
+                }
+                // Analyse fehlgeschlagen: zumindest die Antwort-Chips anbieten
+                zeigeQuizKarte(pfad, name, dataUrl, optionen, null, 0, [], [], sofortKarte);
+                if (typeof nachRunde === 'function') {
+                    try { nachRunde(findeHauptQuizBild(sofortKarte), []); } catch (_c) {}
+                }
+            }
+            return true;
+        }
+        zeigeQuizKarte(pfad, name, dataUrl, optionen, d.vermutung, d.anzahl_gesichter || 0, (d.erkannte_personen || []), (d.gesichter || []));
+        // Vollbild-Durchlauf: neues Bild direkt wieder als Vollbild anzeigen.
+        if (typeof nachRunde === 'function') {
+            try { nachRunde(findeHauptQuizBild(_letzteQuizKarte), d.gesichter || []); } catch (_c) {}
+        }
+        return true;
+    } catch (e) {
+        if (warteblase) { const b = warteblase.closest ? warteblase.closest('.message') : null; if (b) b.remove(); }
+        addMessage('⚠️ Quiz konnte nicht starten: ' + (e && e.message), 'assistant');
+        _quizAktiv = false;
+        return false;
+    }
+}
+
+async function quizStart() {
+    // NUR EINE Quiz-Instanz erlauben: kein zweites starten, solange eines laeuft.
+    if (_quizAktiv) {
+        addMessage('⚠️ Es läuft bereits eine Quiz-Sitzung. Beende sie erst mit "quiz beenden", bevor du neu startest.', 'assistant');
+        return;
+    }
+    _quizAktiv = true;
+    naechsteQuizRunde();
+}
+
+async function quizBeantwortenSilent(pfad, person, istNeu, rolle, beziehung, beschreibung, bbox) {
+    try {
+        const payload = { bild_pfad: pfad, person: (person||'').trim(), ist_neu: !!istNeu, rolle: (rolle||'').trim(), beziehung: (beziehung||'').trim(), beschreibung: (beschreibung||'').trim() };
+        // Korrigierte/geänderte Gesichts-box aus dem Vollbild-Editor mitsenden
+        // (Wunsch des Betreibers 2026-09-09: Ausschnitt im Originalbild nachjustieren)
+        if (Array.isArray(bbox) && bbox.length >= 4) payload.bbox = bbox;
+        const r = await fetch(`${API_BASE}/api/gesichter/quiz/antwort`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        return await r.json();
+    } catch (e) {
+        return { ok: false, fehler: e && e.message };
+    }
+}
+
+async function quizBeantworten(pfad, person, istNeu, rolle, beziehung, beschreibung, bbox, manuell) {
+    try {
+        const payload = { bild_pfad: pfad, person, ist_neu: istNeu, rolle: (rolle || ''), beziehung: (beziehung||''), beschreibung: (beschreibung||'') };
+        if (Array.isArray(bbox) && bbox.length >= 4) payload.bbox = bbox;
+        // Selbst gezeichneter Rahmen (Person per Ausschnitt ergänzen): Backend
+        // soll GENAU DIESEN bbox-Ausschnitt einbetten (nicht das YuNet-Gesicht).
+        if (manuell) payload.manuell_bbox = true;
+        const r = await fetch(`${API_BASE}/api/gesichter/quiz/antwort`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const d = await r.json();
+        if (d && d.ok) {
+            // REGION als bestaetigt merken (Fix 2026-09-15): dieselbe Region
+            // wird fuer dieselbe Person nicht erneut gefragt/eingelernt — auch
+            // dann nicht, wenn die Runde spaeter neu aufgebaut wird.
+            try {
+                const normE = (_quizEditor && _quizEditor.bbox_norm_live && _quizEditor.bbox_norm_live[0]) || null;
+                if (normE && normE.length >= 4) merkeBestaetigt(pfad, bboxRegionSchluessel(normE), person);
+            } catch (_e) {}
+            // Katalog-Cache verwerfen: gerade kann eine neue Person dazugekommen
+            // sein -> das Suchfeld listet sie beim naechsten Oeffnen/Tippen
+            // (Befund 2026-09-25: Liste darf nicht alt stehen bleiben).
+            try { quizKatalogVerwerfen(); } catch (_e) {}
+        }
+        const meldung = (d && d.ok)
+            ? `✓ **${person}** gespeichert${d.ist_neu ? ' (neu)' : ''} — ${d.referenzen} Referenz(en).`
+            : (`⚠️ ${(d && d.fehler) || 'Unbekannter Fehler'}`);
+        if (d && d.ok && _letzteQuizKarte) {
+            // Bildunterschrift in der BESTEHENDEN Karte: Bild + "… das ist X"
+            // (Wunsch des Betreibers 2026-09-09). Buttons weg, Bild bleibt als
+            // kompakte Bestaetigung mit der zugeordneten Person darunter.
+            _letzteQuizKarte.innerHTML = '';
+            const zeile = document.createElement('div');
+            zeile.style.cssText = 'padding:8px;border:1px solid #2e8b57;border-radius:10px;background:#0f1f14;font-weight:600;color:#8f8';
+            zeile.textContent = meldung;
+            _letzteQuizKarte.appendChild(zeile);
+            const cap = document.createElement('div');
+            cap.style.cssText = 'margin-top:6px;padding:6px;border:1px solid #4a7;border-radius:8px;background:#0f1f14';
+            // aktuelle Quiz-Bild-DatenURL aus der Karte entnehmen
+            let src = '';
+            const imgAlt = _letzteQuizKarte.querySelector('img');
+            if (imgAlt && imgAlt.src && ('' + imgAlt.src).indexOf('data:') === 0) src = imgAlt.src;
+            if (src) {
+                const capImg = document.createElement('img');
+                capImg.src = src;
+                capImg.style.cssText = 'max-width:120px;max-height:120px;border-radius:8px;border:1px solid #4a7;vertical-align:middle';
+                cap.appendChild(capImg);
+            }
+            const capTxt = document.createElement('span');
+            capTxt.style.cssText = 'color:#8f8;font-size:0.85rem;font-weight:600;margin-left:8px';
+            capTxt.textContent = '… das ist ' + (person || '');
+            cap.appendChild(capTxt);
+            _letzteQuizKarte.appendChild(cap);
+            _quizWeiterPlanen(1500);
+            return;
+        }
+        addMessage(meldung, 'assistant');
+        // naechste Frage (Moeglichkeit, durchzuspielen) — kleiner Quick-Link:
+        const weiter = document.createElement('button');
+        weiter.textContent = 'Nächstes Bild ➡️';
+        weiter.style.cssText = 'align:left;padding:6px 10px;border:1px solid #4a7;border-radius:8px;background:#1f3a2a;color:#8f8;cursor:pointer;font-size:0.8rem';
+        weiter.onclick = naechsteQuizRunde;
+        const c = addMessage('', 'assistant');
+        c.appendChild(weiter);
+    } catch (e) {
+        addMessage('⚠️ Antwort fehlgeschlagen: ' + (e && e.message), 'assistant');
+    }
+}
+
+// Referenz-Check: interaktive Liste aller gelernten Referenzen je Person,
+// mit Bild-Vorschau und Loesch-Button fuer falsche Referenzen.
+function zeigeReferenzen() {
+    addMessage('🔎 **Referenz-Check** – lade gelernte Referenzen …', 'assistant');
+    (async () => {
+        try {
+            const res = await fetch(`${API_BASE}/api/gesichter/referenzen`);
+            const d = await res.json();
+            const personen = (d && d.personen) || [];
+            if (!personen.length) { addMessage('ℹ️ Noch keine Personen mit Referenzen gelernt.', 'assistant'); return; }
+            // pro Person eine Karte
+            for (const p of personen) {
+                const karte = addMessage('', 'assistant');
+                const head = document.createElement('div');
+                head.style.cssText = 'font-weight:700;margin-bottom:4px';
+                head.textContent = `👤 ${p.name}` + (p.rolle ? ` (${p.rolle})` : '') + ` – ${p.anzahl} Referenz(en)`;
+                karte.appendChild(head);
+                if (p.miniatur) {
+                    const img = document.createElement('img');
+                    img.src = p.miniatur;
+                    img.style.cssText = 'max-width:80px;max-height:80px;border-radius:8px;border:1px solid #555;margin-right:6px;vertical-align:top';
+                    karte.appendChild(img);
+                }
+                const liste = document.createElement('div');
+                liste.style.cssText = 'margin-top:4px;font-size:0.8rem;color:#bbb';
+                if (!p.referenzen.length) {
+                    liste.textContent = '– keine Einzel-Referenzen (nur alte Embeddings) –';
+                } else {
+                    p.referenzen.forEach(r => {
+                        const zeile = document.createElement('div');
+                        zeile.style.cssText = 'display:flex;align-items:center;gap:6px;margin:2px 0';
+                        const txt = document.createElement('span');
+                        txt.textContent = `#{${r.index}} Aufnahmejahr: ${r.jahr || 'unbekannt'} `;
+                        zeile.appendChild(txt);
+                        const del = document.createElement('button');
+                        del.textContent = '✕ löschen';
+                        del.style.cssText = 'padding:2px 8px;border:1px solid #f88;border-radius:6px;background:#2a1515;color:#f88;cursor:pointer;font-size:0.75rem';
+                        del.onclick = () => referenzLoeschen(p.name, r.ref_id, del);
+                        zeile.appendChild(del);
+                        liste.appendChild(zeile);
+                    });
+                }
+                karte.appendChild(liste);
+            }
+            addMessage('💡 **Passe auf:** Nicht geloeschte Referenzen bleiben als Erkennungs-Basis. Gelöschte Einzel-Referenzen vernichte ich nur fuer diese Person.', 'assistant');
+        } catch (e) {
+            addMessage('⚠️ Referenzen konnten nicht geladen werden: ' + (e && e.message), 'assistant');
+        }
+    })();
+}
+
+async function referenzLoeschen(name, refId, btn) {
+    // Sichtbare Rueckmeldung: die Serverantwort wird ausgewertet, ein Fehlschlag
+    // erscheint als Fehler (nie als "✓ gelöscht"). Fix 2026-09-20.
+    if (typeof confirm === 'function' && !confirm(`Diese Referenz von ${name} wirklich löschen?`)) return;
+    const rid = (refId != null) ? String(refId).trim() : '';
+    if (!rid) { alert('⚠️ NICHT gelöscht: Referenz hat keine ID — Seite neu laden.'); return; }
+    try {
+        const r = await fetch(`${API_BASE}/api/gesichter/referenzen/${encodeURIComponent(name)}/${encodeURIComponent(rid)}`, { method: 'DELETE' });
+        let d = null;
+        try { d = await r.json(); } catch (_e) { d = null; }
+        if (r.ok && d && d.ok) { btn.textContent = '✓ gelöscht'; btn.disabled = true; btn.style.opacity = 0.5; }
+        else { alert('⚠️ NICHT gelöscht: ' + ((d && (d.detail || d.fehler)) || ('HTTP ' + r.status))); }
+    } catch (e) { alert('⚠️ NICHT gelöscht: ' + ((e && e.message) || 'Netzwerkfehler')); }
+}
+
+/** Öffnet die Referenzen EINER Person als scrollbares VOLLBILD-Overlay mit den
+ *  gespeicherten Gesichts-Ausschnitten (je Referenz Bild/Hinweis + ✕ löschen +
+ *  "Alle löschen"), statt als Chat-Blase (Wunsch des Betreibers 2026-09-10). */
+function zeigeReferenzenVollbild(name) {
+    let ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.92);z-index:99998;display:flex;flex-direction:column;animation:fadeIn 0.2s ease';
+    // Kopf
+    const kopf = document.createElement('div');
+    kopf.style.cssText = 'display:flex;align-items:center;gap:8px;padding:10px;color:#8f8;font-weight:700;font-size:1rem';
+    kopf.textContent = `👤 ${name} — Referenzen`;
+    ov.appendChild(kopf);
+    const schliess = document.createElement('div');
+    schliess.textContent = '✕';
+    schliess.style.cssText = 'position:fixed;top:12px;right:16px;z-index:99999;width:38px;height:38px;border-radius:50%;background:rgba(0,0,0,.5);color:#fff;font-size:20px;display:flex;align-items:center;justify-content:center;cursor:pointer';
+    schliess.addEventListener('click', () => { try { ov.remove(); } catch(_e){} });
+    ov.appendChild(schliess);
+    // scrollbare Liste
+    const liste = document.createElement('div');
+    liste.style.cssText = 'flex:1;overflow-y:auto;padding:12px';
+    liste.textContent = '… lade Referenzen …';
+    ov.appendChild(liste);
+    // "Alle löschen" (unten, warnend)
+    const footer = document.createElement('div');
+    footer.style.cssText = 'display:flex;gap:8px;padding:10px';
+    const alleBtn = document.createElement('button');
+    alleBtn.textContent = '🗑 Alle Referenzen löschen';
+    alleBtn.style.cssText = 'padding:8px 12px;border:1px solid #f88;border-radius:8px;background:#2a1515;color:#f88;cursor:pointer;font-size:0.9rem';
+    alleBtn.addEventListener('click', async () => {
+        if (typeof confirm === 'function' && !confirm(`Wirklich ALLE Referenzen von ${name} löschen? (Erkennung dieser Person geht verloren)`)) return;
+        const res = await fetch(`${API_BASE}/api/gesichter/referenzen`);
+        const d = await res.json();
+        const p = (d && d.personen || []).find(x => (x.name||'').trim().toLowerCase() === (name||'').trim().toLowerCase());
+        // Jede Referenz einzeln loeschen und die Antwort AUSWERTEN — sonst
+        // meldet die UI "alle geloescht", obwohl einzelne Aufrufe scheiterten.
+        let okCount = 0, fehlerCount = 0;
+        for (const r of (p && p.referenzen || [])) {
+            const rid = (r && r.ref_id != null) ? String(r.ref_id).trim() : '';
+            if (!rid) { fehlerCount++; continue; }   // nie "undefined" senden
+            try {
+                const resp = await fetch(`${API_BASE}/api/gesichter/referenzen/${encodeURIComponent(name)}/${encodeURIComponent(rid)}`, { method: 'DELETE' });
+                if (resp.ok) okCount++; else fehlerCount++;
+            } catch (_e) { fehlerCount++; }
+        }
+        liste.innerHTML = '';
+        const fertig = document.createElement('div');
+        fertig.style.cssText = (fehlerCount ? 'color:#f88;' : 'color:#9f9;') + 'font-size:0.9rem;padding:12px';
+        fertig.textContent = fehlerCount
+            ? `⚠️ ${okCount} Referenz(en) gelöscht, ${fehlerCount} NICHT gelöscht.`
+            : '✅ Alle Referenzen von ' + name + ' gelöscht.';
+        liste.appendChild(fertig);
+    });
+    footer.appendChild(alleBtn);
+    ov.appendChild(footer);
+    document.body.appendChild(ov);
+
+    // Laden + Rendern (erfolgt asynchron über die bestehende API).
+    // Als Funktion, damit die Liste nach dem Nachbearbeiten eines Rahmens
+    // (💾 Speichern im Vollbild-Editor) neu geladen werden kann.
+    async function ladeReferenzen() {
+        try {
+            const res = await fetch(`${API_BASE}/api/gesichter/referenzen`);
+            const d = await res.json();
+            const p = (d && d.personen || []).find(x => (x.name||'').trim().toLowerCase() === (name||'').trim().toLowerCase());
+            liste.innerHTML = '';
+            if (!p || !p.referenzen || !p.referenzen.length) {
+                const leer = document.createElement('div');
+                leer.style.cssText = 'color:#999;font-style:italic;padding:12px';
+                leer.textContent = '– keine Referenzen –';
+                liste.appendChild(leer);
+                return;
+            }
+            // Miniatur der Person als Header-Hinweis, falls vorhanden
+            if (p.miniatur) {
+                const m = document.createElement('img');
+                m.src = p.miniatur;
+                m.style.cssText = 'max-width:64px;max-height:64px;border-radius:50%;border:2px solid #2e8b57;vertical-align:middle;display:block;margin:4px auto';
+                liste.appendChild(m);
+            }
+            // keine Bilder in Referenzen -> Hinweis (Hauptproblem von der Betreiber)
+            const hinweis = document.createElement('div');
+            hinweis.style.cssText = 'font-size:0.78rem;color:#9a9;padding:6px;font-style:italic';
+            hinweis.textContent = `${p.referenzen.length} Referenz(en). Ausschnitt antippen → Originalbild mit Rahmen öffnen, verschieben/ziehen, 💾 Speichern. Ohne hinterlegtes Bild (alt gelernt) gibt es keinen Ausschnitt.`;
+            liste.appendChild(hinweis);
+            for (const r of p.referenzen) {
+                const z = document.createElement('div');
+                z.style.cssText = 'display:flex;align-items:center;gap:8px;margin:6px 0;padding:8px;border:1px solid #2e8b57;border-radius:10px;background:#0f1f14';
+                const jahrTxt = document.createElement('span');
+                jahrTxt.style.cssText = 'color:#eee;font-size:0.85rem';
+                jahrTxt.textContent = `#{${r.index}} · ${r.jahr || 'Jahr unbekannt'}`;
+                z.appendChild(jahrTxt);
+                // Bild, falls vorhanden (s. api/dateien/daten); sonst Platzhalter
+                if (r.bild_pfad) {
+                    try {
+                        const dr = await fetch(`${API_BASE}/api/dateien/daten?pfad=${encodeURIComponent(r.bild_pfad)}`);
+                        const dd = await dr.json();
+                        if (dd && dd.data_url) {
+                            // Ausschnitt (bbox) je Referenz anzeigen — sonst ganzer Pfad.
+                            const im = document.createElement('img');
+                            im.src = dd.data_url;
+                            im.style.cssText = 'max-width:72px;max-height:72px;border-radius:6px;border:1px solid #4a7;vertical-align:middle;object-fit:cover';
+                            // Tipp auf Ausschnitt -> Original im Vollbild-Editor öffnen,
+                            // damit man den Ausschnitt anpassen kann (Wunsch 2026-09-10)
+                            if (r.bbox && r.bbox.length >= 4) {
+                                try {
+                                    const cu = await erzeugeGesichtCrop(dd.data_url, r.bbox, 150);
+                                    if (cu) im.src = cu;
+                                } catch (_e) {}
+                            }
+                            // Tipp auf den Ausschnitt -> Originalbild im Vollbild-Editor
+                            // oeffnen MIT vorhandenem Rahmen; Speichern laeuft ueber die
+                            // STABILE ref_id zurueck an GENAU diese Referenz (Fix 2026-09-15).
+                            zeigeReferenzBearbeiten(name, r, dd.data_url, () => {
+                                try { liste.innerHTML = ''; ladeReferenzen(); } catch (_e) {}
+                            });
+                            z.appendChild(im);
+                        } else {
+                            const ph2 = document.createElement('span');
+                            ph2.style.cssText = 'color:#777;font-size:0.75rem';
+                            ph2.textContent = '(Bild fehlt)';
+                            z.appendChild(ph2);
+                        }
+                    } catch (_e) {
+                        const ph2 = document.createElement('span');
+                        ph2.style.cssText = 'color:#777;font-size:0.75rem';
+                        ph2.textContent = '(Bild fehlt)';
+                        z.appendChild(ph2);
+                    }
+                } else {
+                    const ph = document.createElement('span');
+                    ph.style.cssText = 'color:#777;font-size:0.75rem';
+                    ph.textContent = '(kein Bild gespeichert)';
+                    z.appendChild(ph);
+                }
+                // Kennzeichnen, WELCHE Referenz keinen Ausschnitt hat (alt
+                // gelernt / Originalbild weg): die Zeile bleibt sichtbar und
+                // ist einzeln loeschbar — nur der Hinweis steht dran.
+                if (!z.querySelector('img')) {
+                    const ohneBild = document.createElement('span');
+                    ohneBild.style.cssText = 'color:#c96;font-size:0.72rem;border:1px solid #c96;border-radius:6px;padding:1px 5px';
+                    ohneBild.textContent = '⚠️ ohne Bild';
+                    z.appendChild(ohneBild);
+                }
+                const del = document.createElement('button');
+                del.textContent = '✕ löschen';
+                del.style.cssText = 'padding:3px 9px;border:1px solid #f88;border-radius:6px;background:#2a1515;color:#f88;cursor:pointer;font-size:0.78rem;margin-left:auto';
+                // Sichtbare Rueckmeldung je Zeile. Ein Fehlschlag darf NIE als
+                // "✓ gelöscht" erscheinen (Befund der Betreiber 2026-09-20: "eins
+                // loeschen ging nicht, musste alles loeschen" — die Serverantwort
+                // wurde verworfen und der Erfolg nur vorgetaeuscht).
+                const delStatus = document.createElement('span');
+                delStatus.style.cssText = 'color:#f88;font-size:0.72rem;margin-left:4px;flex-basis:100%';
+                del.addEventListener('click', async () => {
+                    // NIE eine leere/undefined ID senden: sonst laeuft der
+                    // Aufruf als ".../undefined" ins Leere und wird verschluckt.
+                    const rid = (r && r.ref_id != null) ? String(r.ref_id).trim() : '';
+                    if (!rid) {
+                        delStatus.textContent = '⚠️ NICHT gelöscht: Referenz hat keine ID — Seite neu laden.';
+                        return;
+                    }
+                    if (typeof confirm === 'function' && !confirm(`Diese Referenz von ${name} wirklich löschen?`)) return;
+                    del.disabled = true;
+                    delStatus.textContent = '… lösche';
+                    try {
+                        const res = await fetch(`${API_BASE}/api/gesichter/referenzen/${encodeURIComponent(name)}/${encodeURIComponent(rid)}`, { method: 'DELETE' });
+                        let d = null;
+                        try { d = await res.json(); } catch (_e) { d = null; }
+                        if (res.ok && d && d.ok) {
+                            z.style.opacity = 0.35;
+                            del.textContent = '✓ gelöscht';
+                            delStatus.textContent = '';
+                        } else {
+                            del.disabled = false;   // ehrlich: NICHTS wurde geloescht
+                            delStatus.textContent = '⚠️ NICHT gelöscht: ' + ((d && (d.detail || d.fehler)) || ('HTTP ' + res.status));
+                        }
+                    } catch (e) {
+                        del.disabled = false;
+                        delStatus.textContent = '⚠️ NICHT gelöscht: ' + ((e && e.message) || 'Netzwerkfehler');
+                    }
+                });
+                z.appendChild(del);
+                z.appendChild(delStatus);
+                liste.appendChild(z);
+            }
+        } catch (e) {
+            liste.innerHTML = '';
+            const fehlt = document.createElement('div');
+            fehlt.style.cssText = 'color:#f88;padding:12px';
+            fehlt.textContent = '⚠️ Referenzen laden fehlgeschlagen: ' + (e && e.message);
+            liste.appendChild(fehlt);
+        }
+    }
+    ladeReferenzen();
+}
+
+// PERSONEN-ANPASSUNGSMODUL: Katalog deiner Wissensdatenbank durchsuchbar
+// anzeigen, Rolle/Beziehung/Zusatzinfos je Person zuweisen/ändern/löschen,
+// und mit "mehr laden" auch grosse Listen handhabbar halten. Bildet die
+// Grundlage fuer die spaetere Foto-Sortierung (pCloud): Jede Person traegt
+// ihren Kontext (Rolle, Beziehung, Beschreibung, Referenzbilder/Jahre).
+// Speichert ueber POST /api/gesichter (legt an oder aktualisiert nach Name)
+// bzw. DELETE /api/gesichter/{name}.
+let _personenKatalog = [];   // letzter geladener Katalog (fuer Suche/Paging)
+
+function zeigePersonenVerwaltung() {
+    _personenKatalog = [];
+    // VOLLBILD-Overlay statt Chat-Bubble (Wunsch des Betreibers 2026-09-10):
+    // über allem im Chat, schließbar per ✕.
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.95);z-index:99998;display:flex;flex-direction:column;overflow:hidden';
+    const kopf = document.createElement('div');
+    kopf.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #2e8b57;background:#0b1a12';
+    kopf.innerHTML = '<span style="color:#9f9;font-weight:700;font-size:1rem">🔎 Personen-Katalog</span>';
+    const x = document.createElement('div');
+    x.textContent = '✕';
+    x.title = 'Schließen';
+    x.style.cssText = 'width:34px;height:34px;border-radius:50%;background:rgba(0,0,0,.5);color:#fff;font-size:18px;display:flex;align-items:center;justify-content:center;cursor:pointer;border:1px solid #555';
+    x.addEventListener('click', () => { try { ov.remove(); } catch (_e) {} });
+    kopf.appendChild(x);
+    ov.appendChild(kopf);
+    // Statuszeile für Rückmeldungen (statt addMessage-Blase im Chat)
+    const status = document.createElement('div');
+    status.style.cssText = 'padding:4px 16px;font-size:0.8rem;color:#8f8;min-height:18px';
+    ov.appendChild(status);
+    const scroll = document.createElement('div');
+    scroll.style.cssText = 'flex:1;overflow-y:auto;padding:12px 16px';
+    ov.appendChild(scroll);
+    const panel = scroll;
+    // alte Status-Blase nachladen auf "lade …"
+    status.textContent = 'lade …';
+    document.body.appendChild(ov);
+    (async () => {
+        try {
+            const res = await fetch(`${API_BASE}/api/gesichter`);
+            const d = await res.json();
+            const personen = (d && d.personen) || [];
+            _personenKatalog = personen.slice();
+            panel.innerHTML = '';
+            if (!personen.length) {
+                panel.textContent = 'ℹ️ Noch keine Personen gespeichert. Sag „neue Person" im Quiz oder „neue person [Name]" im Chat.';
+                return;
+            }
+            // Suchfeld (filtert online ueber alle)
+            const suche = document.createElement('input');
+            suche.placeholder = '🔍 Person suchen …';
+            suche.style.cssText = 'width:100%;padding:8px;margin-bottom:6px;border:1px solid #2e8b57;border-radius:8px;background:#0e1a14;color:inherit;font-size:0.9rem';
+            panel.appendChild(suche);
+            const counter = document.createElement('div');
+            counter.style.cssText = 'font-size:0.75rem;color:#9f9;margin:2px 0 6px';
+            counter.textContent = `👥 ${personen.length} Personen im Katalog (Basis fürs Foto-Sortieren in der Cloud).`;
+            panel.appendChild(counter);
+
+            const liste = document.createElement('div');
+            liste.style.cssText = 'margin-top:4px';
+            panel.appendChild(liste);
+
+            const LIMIT = 5;   // zuerst nur die 5 wahrscheinlichsten/ersten
+            let angezeigt = 0;
+            let _maxAngezeigt = LIMIT;   // inkrementelles Paging (5, 10, 15, …)
+
+            function zeichenlöschen(name, karte) {
+                if (typeof confirm === 'function' && !confirm(`Person '${name}' wirklich löschen?`)) return;
+                fetch(`${API_BASE}/api/gesichter/${encodeURIComponent(name)}`, { method: 'DELETE' })
+                    .then(r => r.json())
+                    .then(dd => {
+                        status.textContent = dd && dd.status === 'deleted' ? `🗑 ${name} entfernt.` : `⚠️ ${(dd && dd.detail) || 'Fehler'}`;
+                        karte.style.opacity = '0.35';
+                    })
+                    .catch(e => status.textContent = '⚠️ Löschen fehlgeschlagen: ' + (e && e.message));
+            }
+
+            // Baut eine Personen-Karte mit Bearbeiten-Formular
+            function bauePersonKarte(p) {
+                const karte = document.createElement('div');
+                karte.style.cssText = 'margin:4px 0;padding:6px;border:1px solid #2e8b57;border-radius:8px;background:#0f1f14';
+                const name = (p.name || '').trim();
+                const head = document.createElement('div');
+                head.style.cssText = 'font-weight:700;font-size:0.9rem;color:#8f8';
+                head.textContent = `👤 ${name}` + (p.rolle ? ` · ${p.rolle}` : '') + (p.beziehung ? ` · ${p.beziehung}` : '');
+                karte.appendChild(head);
+                const meta = document.createElement('div');
+                meta.style.cssText = 'font-size:0.72rem;color:#888;margin-top:2px';
+                const jahre = (p.referenzen || []).filter(r => r && r.jahr).map(r => r.jahr).filter((v, i, a) => a.indexOf(v) === i).sort();
+                meta.textContent = (jahre.length ? `📅 ${jahre.join(', ')} · ` : '') + `${(p.referenzen || p.embedding || []).length} Referenz(en)`;
+                karte.appendChild(meta);
+
+                // Bearbeiten-Formular (Rolle/Beziehung/Beschreibung/Zusatzkontext)
+                const btn = macheQuizButton('✏️ Anpassen', 'akt', null);
+                const form = document.createElement('div');
+                form.style.display = 'none';
+                form.style.cssText = 'display:none;margin:6px 0;padding:8px;border:1px solid #2e8b57;border-radius:8px;background:#12251a';
+                const mk = (ph, val) => {
+                    const i = document.createElement('input');
+                    i.placeholder = ph; i.value = val || '';
+                    i.style.cssText = 'width:100%;padding:5px;margin-bottom:4px;border:1px solid #2e8b57;border-radius:6px;background:#0e1a14;color:inherit;font-size:0.8rem';
+                    return i;
+                };
+                const inpRolle = mk('Rolle / Beziehung (z. B. Bruder, Mutter)', p.rolle || '');
+                const inpBez = mk('Infos über die Person (Beziehung + alles, was du weißt)', p.beziehung || (p.beschreibung || ''));
+                const speichern = macheQuizButton('✅ Speichern', 'akt', async () => {
+                    try {
+                        const r = await fetch(`${API_BASE}/api/gesichter`, {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ name, rolle: inpRolle.value.trim(), beziehung: inpBez.value.trim(), beschreibung: (p.beschreibung || ''), referenz_bild_pfad: p.referenz_bild_pfad || '' }),
+                        });
+                        const dd = await r.json();
+                        status.textContent = dd && dd.person ? `✅ ${name} aktualisiert.` : `⚠️ ${(dd && dd.fehler) || "Fehler"}`;;
+                        form.style.display = 'none';
+                    } catch (e) { status.textContent = '⚠️ Speichern fehlgeschlagen: ' + (e && e.message); }
+                });
+                form.appendChild(inpRolle);
+                form.appendChild(inpBez);
+                form.appendChild(speichern);
+                btn.onclick = () => { form.style.display = form.style.display === 'none' ? 'block' : 'none'; };
+                karte.appendChild(btn);
+                karte.appendChild(form);
+                // Loeschen
+                karte.appendChild(macheQuizButton('🗑', 'neu', () => zeichenlöschen(name, karte)));
+                // Miniatur (falls vorhanden)
+                const mini = p.referenz_bild_miniatur || p.miniatur || '';
+                if (mini) {
+                    const m = document.createElement('img');
+                    m.src = mini;
+                    m.style.cssText = 'max-width:64px;max-height:64px;border-radius:50%;border:2px solid #2e8b57;vertical-align:middle;margin-left:6px';
+                    karte.appendChild(m);
+                }
+                // --- Referenz-Bilder ansehen / bearbeiten als VOLLBILD-Overlay (Wunsch
+                //     der Betreiber 2026-09-10): nicht mehr als Chat-Blase, sondern
+                //     scrollbares Vollbild mit Gesichter-Ausschnitten) ---
+                const refBtn = macheQuizButton('🖼 Referenzen ansehen / Rahmen anpassen', 'skip', () => zeigeReferenzenVollbild(name));
+                refBtn.style.cssText += ';margin-top:6px;width:100%;text-align:center';
+                karte.appendChild(refBtn);
+                // Klarer Wegweiser fuer die Referenz-Nachbearbeitung (Wunsch
+                // der Betreiber 2026-09-15): Katalog -> Referenz -> Bild -> Rahmen
+                // anpassen -> speichern.
+                const refHinweis = document.createElement('div');
+                refHinweis.style.cssText = 'font-size:0.72rem;color:#9a9;margin-top:2px;font-style:italic';
+                refHinweis.textContent = 'Tipp auf einen Gesichts-Ausschnitt → Originalbild öffnet mit Rahmen → verschieben/ziehen → 💾 Speichern.';
+                karte.appendChild(refHinweis);
+                return karte;
+            }
+
+            function rendereListe() {
+                liste.innerHTML = '';
+                const q = (suche.value || '').trim().toLowerCase();
+                const gefilert = _personenKatalog.filter(p => {
+                    if (!q) return true;
+                    const hay = `${p.name || ''} ${p.rolle || ''} ${p.beziehung || ''} ${p.beschreibung || ''}`.toLowerCase();
+                    return hay.indexOf(q) !== -1;
+                });
+                angezeigt = 0;
+                const show = gefilert.slice(0, _maxAngezeigt);
+                show.forEach(p => { liste.appendChild(bauePersonKarte(p)); angezeigt++; });
+                // "mehr laden"-Knopf: naechste 5, bis alle da sind
+                if (gefilert.length > angezeigt) {
+                    const mehr = document.createElement('button');
+                    mehr.textContent = `↓ weitere laden (${_maxAngezeigt}/${gefilert.length})`;
+                    mehr.style.cssText = 'display:block;width:100%;margin:4px 0;padding:6px;border:1px dashed #2e8b57;border-radius:8px;background:transparent;color:#8f8;cursor:pointer;font-size:0.8rem';
+                    mehr.onclick = () => { _maxAngezeigt += LIMIT; rendereListe(); };
+                    liste.appendChild(mehr);
+                }
+                if (!show.length) {
+                    const leer = document.createElement('div');
+                    leer.style.cssText = 'font-size:0.8rem;color:#888;margin-top:6px;font-style:italic';
+                    leer.textContent = '– keine Person gefunden –';
+                    liste.appendChild(leer);
+                }
+            }
+
+            suche.addEventListener('input', () => { _maxAngezeigt = LIMIT; rendereListe(); });
+            rendereListe();
+            status.textContent = '💡 Der Katalog speichert Referenzbilder + Aufnahmejahre. Nach dem Kontroll-Durchlauf kannst du Fotos in der Cloud sortieren.';
+        } catch (e) {
+            panel.textContent = '⚠️ Katalog konnte nicht geladen werden: ' + (e && e.message);
+        }
+    })();
+}
+
+async function sendMessage(text, ausWarteschlange = false, blaseSchonGezeigt = false, forceAgent = false, ziel = '') {
+    // QUIZ-KOMMANDO: "quiz starten", "anlernspiel", "lernspiel", "gesichtsspiel"
+    if (text && typeof text === 'string') {
+        const t = text.trim().toLowerCase();
+        // QUIZ FORTSETZEN: haengenden _quizAktiv-Zustand zuruecksetzen und an
+        // der letzten ungesehenen Frage weitermachen (quiz/start nutzt den
+        // persistenten Fortschritt).
+        if (t.indexOf('quiz fortsetzen') !== -1 || t.indexOf('quiz weiter') !== -1
+            || t.indexOf('quiz fortführen') !== -1 || t.indexOf('quiz wieder') !== -1
+            || t.indexOf('quiz weiter machen') !== -1 || t.indexOf('quiz wieder aufnehmen') !== -1) {
+            _quizAktiv = false;
+            quizFortsetzen();
+            return;
+        }
+        if (t.indexOf('quiz starten') !== -1 || t.indexOf('anlernspiel') !== -1
+            || t.indexOf('quiz start') !== -1 || t === 'quiz') {
+            quizStart();
+            return;
+        }
+        if (t.indexOf('quiz beenden') !== -1 || t.indexOf('quiz beenden') !== -1
+            || t.indexOf('quiz stoppen') !== -1 || t.indexOf('quiz aus') !== -1
+            || t.indexOf('quiz aufhören') !== -1 || t === 'stopp') {
+            // Sichtbare Quiz-Karte zaehlt als laufende Sitzung — auch wenn
+            // _quizAktiv durch einen Reload auf false stand. Dann beendet
+            // beendeQuizAktiv() die Sitzung RICHTIG (Karten + Bedienung weg),
+            // statt nur ein Flag zu setzen. Vorher blieb die Karte stehen und
+            // das Quiz liess sich so nicht beenden.
+            const quizSichtbar = document.querySelector('[data-quizkarte="1"], [data-quiz-karte="1"]');
+            if (_quizAktiv || quizSichtbar) {
+                beendeQuizAktiv();
+            } else {
+                addMessage('Es läuft gerade keine Quiz-Sitzung. Sag "quiz starten", um zu beginnen.', 'assistant');
+            }
+            return;
+        }
+        // Referenz-Management: "zeige referenzen" -> interaktive Liste zum Loeschen.
+        if (t.indexOf('zeige referenzen') !== -1 || t.indexOf('referenzen anzeigen') !== -1
+            || t === 'referenzen' || t.indexOf('referenz check') !== -1) {
+            zeigeReferenzen();
+            return;
+        }
+        // PERSONEN-VERWALTUNG: Rollen/Namen/Infos anlegen/aendern/loeschen.
+        if (t === 'personen' || t === 'personenliste'
+            || t.indexOf('personen verwalten') !== -1 || t.indexOf('personen bearbeiten') !== -1
+            || t.indexOf('personen anzeigen') !== -1 || t.indexOf('personen manager') !== -1
+            || t.indexOf('person ändern') !== -1 || t.indexOf('person aendern') !== -1) {
+            zeigePersonenVerwaltung();
+            return;
+        }
+        // BILDER-ANZEIGE (N13b): Der Stichwort-Abfang („zeig … Foto" -> feste
+        // pCloud-Galerie VOR dem Senden) ist seit 01.10.2026 aus — Werkzeuge
+        // sind immer an, das Modell entscheidet selbst (Handy-Dateien, Archiv,
+        // Fotos …). Er fing am 30.09. am Handy „Zeige mir das Foto, das ich heute
+        // aufgenommen habe" ab („Datei-Kennungen nicht gefunden"). Galerie und
+        // Erkennung (zeigeFotoGalerie, fotoFrageErkennen) bleiben fuer das
+        // geplante Stream-Ereignis `galerie` (Plan Foto-Gedaechtnis Schritt 4).
+    }
+
+    // Abbruch-Guard: Während eine Antwort läuft (state.abbruch) wird NUR dann
+    // eingereiht, wenn wir NICHT selbst eine Warteschlangen-Nachricht senden
+    // (ausWarteschlange=true), kein laufender Hermes-Auftrag existiert UND es
+    // kein Diktat ist, dessen Blase schon gezeigt wurde.
+    // - Hermes-Auftrag (Track C) läuft → sendMessage geht weiter an POST /eingabe
+    // - Normale Antwort läuft → in die Warteschlange (sichtbar)
+    // - ausWarteschlange=true → durchreichen (sendeUndArbeiteAb)
+    // - blaseSchonGezeigt=true (Diktat) → durchreichen, Blase ist schon da
+    if (state.abbruch && !ausWarteschlange && !blaseSchonGezeigt && !_laufenderAuftragKurz) {
+        if (!text.trim()) return;
+        const element = zeigeWartendeNachricht(text);
+        state.warteschlange.push({ text, element });
+        return;
+    }
+    if (!text.trim()) return;
+    // Sichtbar machen, WAS der Agent/Hermes gerade tut (Wunsch: nach jedem
+    // Absenden Blase/Status zeigt den Arbeitsschritt).
+    try {
+        const hermesModus = (typeof loopAktiv !== 'undefined' && loopAktiv) || _laufenderAuftragKurz;
+        const zielk = _zielAktuell || '';
+        // Coding-Interface: KEINE generische "Hermes bearbeitet deine Aufgabe…"
+        // Phrase. Stattdessen zeigt die untere Bubble den ECHTEN aktuellen
+        // Gedanken (wenn schon da) oder schweigt neutral (…).
+        setzeTutZeile(hermesModus
+            ? (_letzterHermesGedanke ? '🧠 ' + _letzterHermesGedanke : '…')
+            : '🔍 Agent liest deine Nachricht…');
+    } catch (_) {}
+    // Der Controller ist zugleich das Kennzeichen "hier laeuft etwas" und der
+    // Griff, an dem der Stopp-Knopf zieht.
+    const controller = new AbortController();
+    state.abbruch = controller;
+    // Merken, aus WELCHEM Chat diese Anfrage geht: Nur so kann ein später
+    // eintreffender Abschluss erkennen, ob er noch zum offenen Chat gehört.
+    _sendChatId = state.conversationId || null;
+    setLoading(true);
+    const userContentDiv = blaseSchonGezeigt ? null : addMessage(text, 'user');
+    // Dateivorschau in der Nachricht anzeigen, falls vorhanden.
+    // WICHTIG: Bei Diktat (blaseSchonGezeigt=true) ist userContentDiv null —
+    // die Blase wurde schon vorab erzeugt. Bei Dateien (z. B. Screenshot +
+    // Spracheingabe gleichzeitig) darf appendChild NICHT auf null laufen.
+    if (state.pendingFiles.length > 0 && userContentDiv) {
+        _zeigeDateienInNachricht(userContentDiv, state.pendingFiles);
+        // Sicherheitsnetz: War der Katalog beim Upload noch nicht geladen,
+        // kam die Warnung dort nicht – jetzt beim Senden nachholen.
+        _warneFallsModellKeinBild();
+    }
+
+    // Kommunikationskanal zur laufenden Hermes-Session: Solange ein
+    // Programmierauftrag von Hermes bearbeitet wird, geht die neue
+    // Nachricht als Kommentar direkt an die offene Session (POST /eingabe),
+    // statt einen neuen Auftrag zu starten. So kann man Hermes während
+    // der Arbeit steuern/zurufen.
+    // Ausnahme: In der Coding-/Hermes-Ansicht (conv_code) ist DIESE Session
+    // selbst der Kanal — der Kommentar/POST-/eingabe-Umweg ist dort
+    // ueberfluessig (Stand 2026-09-06, Auftrag der Betreiber). Nachrichten nehmen
+    // dort den normalen Sende-/Streamweg.
+    if (_laufenderAuftragKurz && state.conversationId !== 'conv_code') {
+        const eingabeText = text.trim();
+        let gesendet = false;
+        try {
+            const resE = await fetch(`${API_BASE}/api/auftraege/${_laufenderAuftragKurz}/eingabe`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: eingabeText }),
+            });
+            gesendet = resE.ok;
+        } catch (_) { gesendet = false; }
+        addMessage(
+            gesendet
+                ? '📨 **An den laufenden Hermes gesendet** (Kommentar zur Session)'
+                : '⚠️ Kommentar konnte nicht an die Session gesendet werden',
+            'assistant'
+        );
+        setLoading(false);
+        state.abbruch = null;
+        clearAntwortAuf(); // Zitat an einen laufenden Hermes-Kommentar ist wirkungslos
+        return;
+    }
+
+    // Leere Blase anlegen, die sich während des Streams füllt. KEINE eigene
+    // "Denke nach..."-Animation hier drin: der Lade-/Arbeitsschritt läuft in
+    // der unteren #loading-Bubble (setzeTutZeile → "Agent liest…" +
+    // setLoading). So gibt es statt zwei konkurrierender Ladeanzeigen nur
+    // EINE (Stand 2026-09-09, Auftrag der Betreiber).
+    const contentDiv = addMessage('', 'assistant');
+    // Die Blase BLEIBT UNSICHTBAR, bis wirklich Inhalt eintrifft (Wunsch
+    // der Betreiber 2026-09-15): Vorher stand direkt nach dem Senden ein leerer
+    // Kasten mit „…" im Chat, der erst beim ersten Text verschwand. Der
+    // Fortschritt gehört in die untere #loading-Bubble, nicht in die Antwort.
+    const _antwortBlase = contentDiv.closest('.message') || contentDiv.parentElement;
+    let _antwortBlaseSichtbar = false;
+    const zeigeAntwortBlase = () => {
+        if (!_antwortBlaseSichtbar && _antwortBlase) {
+            // Blase + Zeitstempel + aufgeschobene Datumspille (siehe
+            // zeigeBlaseMitText) — nichts davon war vor dem ersten Text da.
+            zeigeBlaseMitText(_antwortBlase, null, null);
+            _antwortBlaseSichtbar = true;
+        }
+    };
+    if (_antwortBlase) _antwortBlase.style.display = 'none';
+    // Abbrechen-Button: Für normale LLM-Antworten bewusst KEIN eigener
+    // '⏹ Abbrechen'-Button mehr (Stand 2026-08-30, Auftrag der Betreiber) — der
+    // Stream-Abbruch läuft über den Bearbeiten-Flow bzw. die leere-Eingabe-
+    // Abbruchlogik. Auch die Hermes-Zwischenmeldungen tragen seit 2026-09-06
+    // keinen eigenen Abbruch-Knopf mehr (schon vorhanden, brichAb deckt den
+    // laufenden Hermes-Auftrag ab).
+    const entry = state.messages[state.messages.length - 1];
+    _auftragStreckeDirekt = false;   // pro Nachricht neu entscheiden
+
+    let antwort = '';
+    let abschluss = null;
+    let letztesRendern = 0;   // Zeitbremse fürs Neuzeichnen während des Streams
+    let quellen = [];         // Fundstellen der Websuche, während sie eintreffen
+
+    // Gemeinsamer Zustand für den Vorleser – er muss auch aus dem Rückfallweg
+    // heraus erreichbar sein, deshalb ein Objekt statt einfacher Variablen.
+    const zustand = { text: '', fertig: false };
+
+    // Bedienung steht sofort bereit: Man kann das Vorlesen starten, während
+    // die Antwort noch geschrieben wird.
+    const vorleser = addSpeakControls(
+        contentDiv.parentElement.parentElement,
+        () => zustand.text,
+        () => zustand.fertig,
+    );
+
+    try {
+        // Loop-Modus (Hermes) aktiv: Nachricht ueber den aktiv-Kanal/Daemon
+        // (diese Hermes-Session) beantworten statt DeepSeek-Chat. Nicht
+        // streamend - Antwort kommt als fertiger reply.
+        // WICHTIG (2026-09-15, Wunsch des Betreibers): Der Coding-Chat (conv_code)
+        // darf NICHT in den blockierenden /api/hermes/chat-Zweig laufen. Der
+        // wartet erst den KOMPLETTEN Hermes-Lauf ab (list(...) ueber
+        // `hermes chat -q`) und tippt die fertige Antwort danach kuenstlich
+        // Zeichen fuer Zeichen nach — waehrend der Arbeit kommt KEIN
+        // Lebenszeichen, die Antwort erscheint "auf einmal".
+        // conv_code geht stattdessen IMMER ueber POST /api/chat/stream
+        // (Track C live): jeder Zwischengedanke kommt als eigene Blase
+        // (Daemon flusht alle 1,2s / 6 Zeilen, Backend pollt 1s), das
+        // Ergebnis am Ende — und alles wird in conversations['conv_code']
+        // persistiert, ist also nach Reload/Neustart wieder da.
+        if (typeof loopAktiv !== 'undefined' && loopAktiv
+                && state.conversationId !== 'conv_code') {
+            // Hermes-Modus aktiv (Wunsch des Betreibers): Die Nachricht geht an
+            // DIESE Termux-Session (/api/hermes/chat), deren Antwort als
+            // Blase erscheint + mit Hermes-Badge (denkt/antwortet).
+            hermesStreamBereit = true;
+            aktualisiereStatusAnzeige();
+            try {
+                const hres = await fetch(`${API_BASE}/api/hermes/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        nachricht: text,
+                        kontext: `Modell=${state.model || ''}, conversation=${state.conversationId || 'conv_main'}`,
+                    }),
+                    signal: controller.signal,
+                });
+                const hd = await hres.json().catch(() => ({}));
+                const reply = (hd && hd.reply) || '⚠️ Keine Antwort (Hermes).';
+                dom.filePreviewList.innerHTML = '';
+                dom.filePreview.classList.add('hidden');
+                _aktualisiereUploadKnopf();
+                zustand.text = reply;
+                zustand.fertig = true;
+                // Schoene Formatierung: Markdown sauber rendern und die
+                // Antwort zeichenweise im eingestellten Stream-Tempo
+                // (state.streamMs, Zahnrad) aufbauen - damit man die
+                // Geschwindigkeit sieht statt einen ploetzlichen Textblock.
+                (async () => {
+                    const ms = (typeof state.streamMs === 'number' && state.streamMs > 0)
+                        ? state.streamMs : 120;
+                    let sichtbar = '';
+                    // Haeppchenweise je ein paar Zeichen einfuegen.
+                    const anzeige = () => {
+                        contentDiv.innerHTML = (typeof parseMarkdownPartial === 'function')
+                            ? parseMarkdownPartial(sichtbar)
+                            : escapeHtml(sichtbar);
+                        if (isAtBottom()) scrollToBottom(true);
+                    };
+                    const chunk = Math.max(2, Math.round(3 * ms / 120));
+                    while (sichtbar.length < reply.length) {
+                        sichtbar = reply.slice(0, Math.min(reply.length, sichtbar.length + chunk));
+                        anzeige();
+                        await new Promise(r => setTimeout(r, ms));
+                    }
+                    anzeige();
+                })();
+            } finally {
+                hermesStreamBereit = false;
+                aktualisiereStatusAnzeige();
+                // Untere animierte "Denke nach..."-Bubble nach der
+                // Hermes-Antwort sicher ausblenden (dieser Zweig macht
+                // sonst `return`, ohne setLoading(false) zu rufen). Stand
+                // 2026-09-06: Bubble hing sonst im Hermes-/Loop-Modus fest.
+                setLoading(false);
+            }
+            return;
+        }
+        const res = await fetch(`${API_BASE}/api/chat/stream`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                message: text,
+                conversation_id: state.conversationId,
+                web_search: state.webSearch,
+                model: state.model,
+                force_agent: forceAgent === true,
+                ziel: ziel || undefined,
+                // Tool Use: kein Feld mehr - Werkzeuge sind am Server Standard an
+                // (settings.tool_use, seit 01.10.2026; der Knopf ist weg).
+                // Datenschutz-Riegel: fehlte bis 30.09.2026 im Stream-Weg (nur der
+                // Rückfallweg schickte ihn) - die Oberfläche sagte „fest an", das
+                // Backend bekam „aus". Laut OpenRouter-ZDR-Liste (30.09.) haben
+                // deepseek-v4.1-flash 27 und gemini-2.5-flash 4 passende Anbieter.
+                no_retention: state.noRetention,
+                // WhatsApp-artiges Antwort-Zitat (falls gesetzt)
+                antwort_auf: _antwortAuf ? _antwortAuf.text : undefined,
+                // Nur image/pdf senden (sonst 422 am ChatRequest-Literal["image","pdf"].
+                files: state.pendingFiles.length > 0
+                    ? state.pendingFiles
+                        .filter(f => f.type === 'image' || f.type === 'pdf')
+                        .map(f => ({
+                        id: f.id,
+                        filename: f.filename,
+                        type: f.type,
+                        url: f.url,
+                        mime: f.mime,
+                        data_url: f.data_url,
+                        text: f.text,
+                    }))
+                    : undefined,
+            }),
+            signal: controller.signal,
+        });
+        // NICHT sofort die Vorschau leeren — die Files müssen im Request
+        // bleiben, bis das done-Ereignis wirklich kam (siehe letzter Block).
+        // Nur die Chips entfernen, damit die nächste Nachricht vorbereitet
+        // werden kann; die Daten bleiben in pendingFiles bis zum Abschluss.
+        dom.filePreviewList.innerHTML = '';
+        dom.filePreview.classList.add('hidden');
+        _aktualisiereUploadKnopf();
+        if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let puffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            puffer += decoder.decode(value, { stream: true });
+
+            // Ereignisse sind durch eine Leerzeile getrennt; ein
+            // unvollständiger Rest bleibt für die nächste Runde liegen.
+            const bloecke = puffer.split('\n\n');
+            puffer = bloecke.pop();
+
+            for (const block of bloecke) {
+                const zeile = block.split('\n').find(z => z.startsWith('data: '));
+                if (!zeile) continue;
+                let daten;
+                try {
+                    daten = JSON.parse(zeile.slice(6));
+                } catch {
+                    continue;
+                }
+
+                if (daten.art === 'wahl') {
+                    // A/B-Wahl bei erkannten Hermes-Aufgaben im normalen Chat
+                    // (Wunsch des Betreibers 2026-09-07): Statt stiller Delegation
+                    // selbst entscheiden, ob die Aufgabe an den Coding-Chat
+                    // (A) oder als eigener paralleler Hermes-Thread hier (B)
+                    // geht. Die User-Runde hat das Backend schon persistiert;
+                    // die Buttons sind reine UI-Transporte (kein Eintrag).
+                    state._wahlAufgabe = daten.aufgabe || '';
+                    antwort = '🤔 **Wohin mit dieser Aufgabe?**';
+                    zustand.text = antwort;
+                    contentDiv.innerHTML = parseMarkdown(antwort);
+                    continue;
+                }
+
+                if (daten.message) {
+                    // Eigenständige Meldung (z. B. "Hermes-Aufgabe übergeben"):
+                    // EIGENE Blase mit frischem Zeitstempel + Umlenk-Buttons,
+                    // nicht in die Antwort-Blase gemischt. KEIN Ziel-Chip —
+                    // die Überschrift ("an den PC-Hermes übergeben") sagt das
+                    // Ziel schon; der Chip wäre redundant.
+                    // Umlenk-Meldung: EIGENE Blase mit frischem Zeitstempel.
+                    // Die untere animierte "Denke nach..."-Bubble (#loading)
+                    // bleibt bewusst stehen, bis der finale Abschluss (finally)
+                    // sie leert (Stand 2026-09-06: nicht verfrueht ausblenden).
+                    const div = addMessage(daten.message, 'assistant');
+                    // Kommunikationskanal merken, damit die Umlenk-Buttons
+                    // (lokal/Hermes) erscheinen + Eingaben als Kommentar gehen.
+                    if (daten.auftrag_id) {
+                        _laufenderAuftragKurz = daten.auftrag_id;
+                        aktualisiereStatusAnzeige();
+                    }
+                    continue;
+                }
+
+                if (daten.delta) {
+                    // Die untere animierte "Denke nach..."-Bubble bleibt bis zum
+                    // finalen Abschluss sichtbar (finally-Block), statt
+                    // schon beim ersten Textstueck zu verschwinden.
+                    // Track C (Hermes live): Beim ersten Event kommt die
+                    // auftrag_id mit → den Kommunikationskanal setzen, damit
+                    // Nachrichten während des Laufens als /eingabe-Kommentar
+                    // an Hermes gehen statt in eine Warteschlange zu rutschen.
+                    if (daten.auftrag_id && !_laufenderAuftragKurz) {
+                        _laufenderAuftragKurz = daten.auftrag_id;
+                        aktualisiereStatusAnzeige();
+                    }
+                    antwort += daten.delta;
+                    zustand.text = antwort;
+                    vorleser.neuerText();
+                    // Erster echter Inhalt → die bis dahin unsichtbare Antwort-
+                    // Blase einblenden (kein leerer Kasten direkt nach dem Senden).
+                    // NUR bei lesbarem Inhalt: ein führender Zeilenumbruch machte
+                    // die Blase sonst sichtbar und leer (Befund der Betreiber
+                    // 16.10.2026: „darüber erscheint eine leere Blase").
+                    if (antwort.trim()) zeigeAntwortBlase();
+                    // Nicht bei jedem Häppchen neu zeichnen – das Neuaufbauen
+                    // der Blase würde auf dem Handy ruckeln. Der endgültige
+                    // Aufbau passiert ohnehin in finishReply().
+                    const jetzt = performance.now();
+                    // Streaming-Geschwindigkeit einstellbar (Zahnrad): Die
+                    // Render-Frequenz des sichtbaren Texts folgt state.streamMs
+                    // (gross = langsamer, zum Mitlesen). Standard 120 ms.
+                    const renderIntervall = (typeof state.streamMs === 'number' && state.streamMs > 0)
+                        ? state.streamMs : 120;
+                    if (jetzt - letztesRendern > renderIntervall) {
+                        letztesRendern = jetzt;
+                        const untenGewesen = isAtBottom();
+                        contentDiv.innerHTML = parseMarkdownPartial(antwort);
+                        // Markdown-Rest ohne sichtbaren Text (z. B. „**" oder ein
+                        // offener Code-Block) → Blase bleibt unsichtbar.
+                        if (blaseHatLesbarenText(contentDiv)) zeigeAntwortBlase();
+                        if (untenGewesen) scrollToBottom(true);
+                        ueberlaufPruefen(contentDiv, 'stream');
+                    }
+                } else if (daten.art === 'gedanke' && daten.text) {
+                    // Live-Zwischenmeldung von Hermes (Track C): IMMER als
+                    // eigene Bubble mit Sekunden-Zeitstempel – nie in die
+                    // laufende Antwort-Blase haengen. Den [ISO]-Präfix aus der
+                    // Meldung entfernen (Zeit steht schon im Label darunter),
+                    // sonst steht der lange String doppelt in der Blase.
+                    const { text: htext, zeitIso } = zerlegeHermesMeldung(daten.text);
+                    fuegeGedankeMitAbbruchHinzu(
+                        htext || daten.text,
+                        zeitIso || new Date().toISOString()
+                    );
+                } else if (daten.status) {
+                    // Konkrete Arbeits-Zeile des Agenten (was er JETZT tut,
+                    // inklusive Argumenten wie Personenname/Suchbegriff —
+                    // der Betreiber 10.10.2026: "Das muss auf jeden Fall
+                    // konkreter sein, was er gerade macht"). Diese Ereignisse
+                    // kamen vom Backend schon immer, wurden hier aber
+                    // verworfen — es blieb nur "Agent liest deine Nachricht…"
+                    // stehen. Jetzt zeigt die untere Bubble den echten Schritt.
+                    try { setzeTutZeile(daten.status); } catch (_) {}
+                } else if (daten.done) {
+                    // WICHTIG: VOR `daten.sources` pruefen! Das done-Ereignis
+                    // traegt selbst sources UND bild_vorschau (Backend chat.py:
+                    // Quellen werden im done-Ereignis nochmals mitgeschickt).
+                    // Stand die Quellen-Abfrage vorher, schluckte sie das
+                    // done-Ereignis, `abschluss` blieb null und die
+                    // Bild-Vorschau (zeigeBildVorschau in finishReply) kam nie an.
+                    abschluss = daten;
+                    if (daten.sources) quellen = mergeQuellen(quellen, daten.sources);
+                    // Bild-Vorschau rendert finishReply (nach dem innerHTML).
+                    // Hier KEIN redundanter Aufruf — das würde doppelt/uberschrieben.
+                    // Der Stream hat die Strecke selbst bis zum Ende geführt
+                    // (Track C live) – der 3s-Poller ist dafür nicht nötig.
+                    if (daten.auftrag_strecke) {
+                        _auftragStreckeDirekt = true;
+                        // Auftrag beendet → Kommunikationskanal wieder frei,
+                        // damit spätere Nachrichten einen neuen Auftrag starten
+                        // statt an die geschlossene Session zu gehen.
+                        _laufenderAuftragKurz = null;
+                        aktualisiereStatusAnzeige();
+                    }
+                } else if (daten.sources) {
+                    // Können an jedem Häppchen hängen, deshalb laufend sammeln.
+                    quellen = mergeQuellen(quellen, daten.sources);
+                } else if (daten.error) {
+                    // Fehler (z. B. "Fehler im lokalen Hermes-Job"): Kanal
+                    // wieder freigeben + Stop-Button weg — sonst bleibt der
+                    // rote Stopp-Zustand hängen, obwohl nichts mehr läuft.
+                    _laufenderAuftragKurz = null;
+                    aktualisiereStatusAnzeige();
+                    updateSendButton();
+                    throw new Error(daten.error);
+                } else if (daten.done) {
+                    abschluss = daten;
+                    // Bild-Vorschau rendert finishReply (nach dem innerHTML).
+                    // Hier KEIN redundanter Aufruf — das würde doppelt/uberschrieben.
+                    // Der Stream hat die Strecke selbst bis zum Ende geführt
+                    // (Track C live) – der 3s-Poller ist dafür nicht nötig.
+                    if (daten.auftrag_strecke) {
+                        _auftragStreckeDirekt = true;
+                        // Auftrag beendet → Kommunikationskanal wieder frei,
+                        // damit spätere Nachrichten einen neuen Auftrag starten
+                        // statt an die geschlossene Session zu gehen.
+                        _laufenderAuftragKurz = null;
+                        aktualisiereStatusAnzeige();
+                    }
+                }
+            }
+        }
+
+        if (!antwort) throw new Error('Leere Antwort vom Server');
+        zustand.fertig = true;
+
+        // Hochgeladene Dateien aus der Vorschau entfernen – ABER nur, wenn
+        // der Abschluss wirklich sauber durchlief (ein done-Ereignis kam).
+        // Blieb der Stream stehen / wurde abgebrochen (kein done), behalten
+        // wir die Dateien in der Vorschau, damit der Nutzer sie nicht verliert.
+        if (abschluss) _raeumeDateiVorschau();
+
+        // Zwischendurch eingetroffene Quellen mit denen aus dem Abschluss
+        // zusammenführen – doppelte Adressen fallen dabei weg.
+        abschluss = Object.assign({}, abschluss, {
+            sources: mergeQuellen(quellen, abschluss && abschluss.sources),
+        });
+        // Der Stream selbst lieferte keine Textstücke (z. B. Track C, das die
+        // fertige Antwort als Ganzes schickt) → Blase erst jetzt zeigen, und
+        // nur wenn wirklich Inhalt da ist. Sonst bliebe ein leerer Kasten.
+        if ((antwort || '').trim()) zeigeAntwortBlase();
+        finishReply(contentDiv, entry, antwort, abschluss, vorleser);
+        // A/B-Wahl: Nach dem Markdown-Rebuild von finishReply die Wahl-
+        // Buttons wieder in die Blase einhängen (finishReply überschreibt
+        // contentDiv.innerHTML und würde sie sonst wegwerfen).
+        if (state._wahlAufgabe) {
+            bauWahlUi(contentDiv, state._wahlAufgabe);
+            state._wahlAufgabe = '';
+        }
+        return abschluss;
+
+    } catch (err) {
+        // Selbst abgebrochen: Das ist kein Fehler, sondern der ausdrückliche
+        // Wunsch. Kein Rückfallweg – der würde die Anfrage neu stellen und
+        // damit genau das tun, was gerade gestoppt werden sollte.
+        if (err.name === 'AbortError') {
+            zustand.fertig = true;
+            entry.content = antwort;
+            contentDiv.innerHTML = parseMarkdown(
+                (antwort ? antwort + '\n\n' : '') + '*Abgebrochen.*'
+            );
+            return null;
+        }
+
+        // WICHTIG (2026-09-15, Wunsch des Betreibers): Läuft noch ein Hermes-
+        // Auftrag, wird der Stream NICHT als Fehler behandelt und NICHT neu
+        // gesendet (das startete einen zweiten Auftrag). Stattdessen läuft die
+        // Live-Verfolgung per Status-Poll weiter: neue Zwischengedanken und das
+        // Endergebnis kommen nach — ohne F5/Neuladen. Der Auftrag selbst arbeitet
+        // im Hintergrund weiter (Inbox-Daemon/Server-Thread), nur die
+        // Browser-Verbindung war gerissen.
+        if (_laufenderAuftragKurz) {
+            console.warn('Stream gerissen — verfolge laufenden Auftrag per Status-Poll:', err);
+            zustand.fertig = true;
+            entry.content = antwort;
+            starteAuftragResumePoll(_laufenderAuftragKurz, contentDiv, entry, vorleser);
+            return null;
+        }
+
+        // Fehler (kein Abbruch): Kanal freigeben + Stop-Button zurücksetzen,
+        // damit nach einem Fehler (z. B. Hermes-Job) kein roter Zustand hängt.
+        _laufenderAuftragKurz = null;
+        aktualisiereStatusAnzeige();
+        updateSendButton();
+
+        // Kam schon Text an, ist der Stream mittendrin gerissen – dann steht
+        // das Bruchstück da und ein zweiter Anlauf würde doppelt abrechnen.
+        if (!antwort) {
+            console.warn('Streaming fehlgeschlagen, versuche Normalweg:', err);
+            try {
+                return await sendMessageFallback(text, contentDiv, entry, zustand, vorleser);
+            } catch (err2) {
+                err = err2;
+            }
+        }
+        zustand.fertig = true;   // Vorleser soll nicht ewig auf Nachschub warten
+        console.error('Chat error:', err);
+
+        // Lehnt OpenRouter das Modell ab, hilft eine Verbindungsfehler-Meldung
+        // nicht weiter – dann muss das Modell zurück, sonst scheitert auch die
+        // nächste Nachricht wieder.
+        const abgelehnt = /nicht nutzbar|allowed providers|Enterprise/i.test(err.message || '');
+        if (abgelehnt && state.model) {
+            const zurueck = state.modelVorher || null;
+            state.model = zurueck;
+            if (zurueck) localStorage.setItem('model', zurueck);
+            else localStorage.removeItem('model');
+            setModelLabel();
+            contentDiv.innerHTML = parseMarkdown(
+                `${err.message}\n\n*Zurückgewechselt auf ${kurzName(zurueck)}.*`
+            );
+        } else {
+            contentDiv.innerHTML = parseMarkdown(
+                (antwort ? antwort + '\n\n' : '')
+                + `⚠️ **Verbindungsfehler**\n\nKonnte den Agenten nicht erreichen.\n`
+                + `- URL: ${API_BASE}\n`
+                + `- Fehler: ${err.message}`
+            );
+        }
+        entry.content = antwort;
+    } finally {
+        // Tut-Zeile zuruecksetzen, sobald die Antwort abgeschlossen ist.
+        try { setzeTutZeile(''); } catch (_) {}
+        // Nur zuruecksetzen, wenn niemand zwischenzeitlich einen neuen Lauf
+        // gestartet hat (kein Stopp-Knopf mehr für normale Antworten).
+        if (state.abbruch === controller) state.abbruch = null;
+        setLoading(false);
+        // Leere Assistenten-Blase (ohne sichtbaren Inhalt) nach dem Stream
+        // entfernen — sonst bleibt die "leere Bubble mit Zeitstempel" stehen
+        // (Wunsch des Betreibers 2026-09-11).
+        try {
+            for (const m of Array.from(document.querySelectorAll('#messages .message.assistant, #messages .agent-zwischenmeldung'))) {
+                const cb = m.querySelector('.message-content, .gedanken-strom .message-content');
+                const inhalt = (cb ? (cb.textContent || '') : (m.textContent || '')).trim();
+                // Blase ohne Inhalt UND ohne echten Gedanken entfernen (eine
+                // "leere Bubble mit nur Zeitstempel" verschwindet damit).
+                if (!inhalt && !m.classList.contains('gedanken-strom')) { try { m.remove(); } catch (_e) {} }
+            }
+        } catch (_e) {}
+        // WhatsApp-Zitat nach dem Absenden weg (wie WhatsApp).
+        clearAntwortAuf();
+    }
+}
+
+/** Text in das Eingabefeld setzen — wie getippt: Höhe und Senden-Knopf folgen. */
+function setzeEingabe(text) {
+    dom.input.value = text;
+    dom.input.style.height = 'auto';
+    dom.input.style.height = Math.min(dom.input.scrollHeight, 120) + 'px';
+    updateSendButton();
+}
+
+async function sendAudioForTranscription(audioBlob) {
+    if (state.isTranscribing) return;
+    state.isTranscribing = true;
+    setMicStatus('transcribing');
+    try {
+        const formData = new FormData();
+        formData.append('file', audioBlob, 'audio.wav');
+        const res = await fetch(`${API_BASE}/api/sprache/transkript`, {
+            method: 'POST',
+            body: formData,
+        });
+        if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            throw new Error(errData.detail || `HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        // /critic #7: data.text muss ein String sein
+        if (typeof data.text === 'string' && data.text.trim()) {
+            const rohtext = data.text.trim();
+            const befehlAusgefuehrt = await window.appSprachbefehlAusfuehren?.(rohtext);
+            if (befehlAusgefuehrt) {
+                setMicStatus('✓ Ausgeführt');
+                setTimeout(() => setMicStatus(''), 2500);
+                return;
+            }
+            setMicStatus('polishing');
+            // Diktat SOFORT als echte User-Blase zeigen (wie beim Tippen) —
+            // egal ob es an den Agenten, in die Warteschlange oder an Hermes
+            // als Kommentar geht. Sonst wirkt es wie "verschluckt".
+            const diktat = data.text.trim();
+            // Diktat AN vorhandenen Text ANHÄNGEN statt ihn zu ersetzen:
+            // Wer vor der Aufnahme schon getippt (oder Dateien angehängt)
+            // hat, schickt beim Loslassen die GESAMTE Nachricht (Text +
+            // Diktat + Anhang) — die Dateien reisen in state.pendingFiles
+            // ohnehin mit dem Request mit.
+            const vorhanden = dom.input.value.trim();
+            const gesamt = (vorhanden ? vorhanden + ' ' : '') + diktat;
+            // Der erkannte Text landet SICHTBAR im Eingabefeld — an derselben
+            // Stelle wie getippter Text, mit derselben Höhe und demselben
+            // Senden-Knopf. Von dort geht er wie eine getippte Nachricht raus
+            // (das Diktat wird sofort gesendet: eine Zwischennachricht per
+            // Sprache muss auch während laufender Arbeit absendbar sein,
+            // Wunsch 2026-09-15).
+            setzeEingabe(gesamt);
+            addMessage(gesamt, 'user');
+            dom.input.value = '';
+            dom.input.style.height = 'auto';
+            await sendMessage(gesamt, false, true); // drittes Flag: Diktat (Blase schon gezeigt)
+        } else if (data.error) {
+            addMessage(`⚠️ **Spracherkennung fehlgeschlagen**\n\n${data.error}`, 'assistant');
+        }
+    } catch (err) {
+        console.error('Transcription error:', err);
+        addMessage(
+            `⚠️ **Transkriptionsfehler**\n\nKonnte Audio nicht verarbeiten.\n`
+            + `- Fehler: ${err.message}`,
+            'assistant'
+        );
+    } finally {
+        state.isTranscribing = false;
+        setMicStatus('');
+    }
+}
+
+// =========================================
+// KI-Sprachsteuerung & Live-Voice (31.10.2026, Stufe D)
+// =========================================
+
+async function appSprachbefehlAusfuehren(text) {
+    if (!text || typeof text !== 'string') return false;
+    let daten = null;
+    try {
+        const res = await fetch(`${API_BASE}/api/voice/befehl`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: text }),
+        });
+        if (res.ok) {
+            daten = await res.json();
+        }
+    } catch (e) {
+        console.warn('Sprachbefehl-Analyse fehlgeschlagen:', e);
+    }
+
+    if (!daten || !daten.ist_befehl) return false;
+
+    const aktionen = daten.aktionen && daten.aktionen.length > 0
+        ? daten.aktionen
+        : [{ aktion: daten.aktion, parameter: daten.parameter }];
+
+    for (const akt of aktionen) {
+        await appAktionAusfuehren(akt);
+    }
+
+    if (daten.antwort) {
+        const hinweis = `✓ ${daten.antwort}`;
+        setMicStatus(hinweis);
+        setTimeout(() => setMicStatus(''), 2500);
+    }
+    return true;
+}
+
+async function appAktionAusfuehren(akt) {
+    if (!akt || !akt.aktion) return;
+    const name = akt.aktion;
+    const p = akt.parameter || {};
+
+    if (name === 'quiz_oeffnen') {
+        const erzaehlSheet = document.getElementById('erzaehlen-sheet');
+        if (erzaehlSheet) erzaehlSheet.hidden = true;
+        const gruppenBtn = document.getElementById('gruppen-btn');
+        if (gruppenBtn) gruppenBtn.click();
+    } else if (name === 'erzaehlen_oeffnen') {
+        const erzaehlenBtn = document.getElementById('erzaehlen-btn');
+        if (erzaehlenBtn) erzaehlenBtn.click();
+    } else if (name === 'chat_oeffnen') {
+        ['erzaehlen-sheet', 'gruppen-sheet', 'model-sheet'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.hidden = true;
+        });
+        const inp = document.getElementById('message-input');
+        if (inp) inp.focus();
+    } else if (name === 'blaettern') {
+        const anzahl = Math.max(1, p.anzahl || 1);
+        const zurueck = p.richtung === 'zurueck';
+        for (let i = 0; i < anzahl; i++) {
+            const btnId = zurueck ? 'erzaehl-zurueck' : 'erzaehl-weiter';
+            const btn = document.getElementById(btnId);
+            if (btn && !btn.hidden) btn.click();
+        }
+    } else if (name === 'event_oeffnen') {
+        const erzaehlSheet = document.getElementById('erzaehlen-sheet');
+        if (erzaehlSheet && erzaehlSheet.hidden) {
+            const btn = document.getElementById('erzaehlen-btn');
+            if (btn) btn.click();
+        }
+        const idx = Math.max(0, p.index || 0);
+        const events = document.querySelectorAll('.erzaehl-ereignis');
+        if (events.length > 0) {
+            const target = events[idx] || events[0];
+            if (target) target.click();
+        }
+    } else if (name === 'bild_oeffnen') {
+        const idx = Math.max(0, p.index || 0);
+        const kacheln = document.querySelectorAll('.erzaehl-kachel');
+        if (kacheln.length > 0) {
+            const target = kacheln[idx] || kacheln[0];
+            if (target) target.click();
+        }
+    } else if (name === 'notiz_hinzufuegen') {
+        const erzaehlText = document.getElementById('erzaehl-text');
+        if (erzaehlText) {
+            const vorh = erzaehlText.value.trim();
+            const neu = p.text || '';
+            erzaehlText.value = vorh ? (vorh + ' ' + neu) : neu;
+            erzaehlText.focus();
+        } else {
+            const chatInput = document.getElementById('message-input');
+            if (chatInput) {
+                const vorh = chatInput.value.trim();
+                const neu = p.text || '';
+                chatInput.value = vorh ? (vorh + ' ' + neu) : neu;
+                chatInput.focus();
+            }
+        }
+    } else if (name === 'geschichte_erzaehlen') {
+        const btn = document.getElementById('erzaehl-ki-geschichte-btn');
+        if (btn && !btn.hidden) btn.click();
+    } else if (name === 'neu_vorsortieren') {
+        const btn = document.getElementById('gruppen-neu-vorsortieren-btn');
+        if (btn && !btn.hidden) btn.click();
+    } else if (name === 'speichern') {
+        const btn = document.getElementById('erzaehl-speichern-btn');
+        if (btn && !btn.hidden) btn.click();
+    }
+}
+
+class LiveVoiceClient {
+    constructor() {
+        this.ws = null;
+        this.sessionId = null;
+        this.isConnected = false;
+        this.onInterrupted = null;
+        this.onBefehl = null;
+    }
+
+    connect(sessionId) {
+        this.sessionId = sessionId || ('voice_' + Math.random().toString(36).substring(2, 10));
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const url = `${proto}//${location.host}/api/voice/stream/${this.sessionId}`;
+        try {
+            this.ws = new WebSocket(url);
+            this.ws.binaryType = 'arraybuffer';
+            this.ws.onopen = () => {
+                this.isConnected = true;
+            };
+            this.ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'interrupted') {
+                        if (window.speechSynthesis) window.speechSynthesis.cancel();
+                        if (this.onInterrupted) this.onInterrupted();
+                    } else if (msg.type === 'befehl_ergebnis' && msg.data) {
+                        if (this.onBefehl) this.onBefehl(msg.data);
+                        else window.appSprachbefehlAusfuehren?.(msg.data.rohtext);
+                    }
+                } catch (_e) {}
+            };
+            this.ws.onclose = () => {
+                this.isConnected = false;
+            };
+            this.ws.onerror = (err) => {
+                console.warn('Live-Voice WebSocket Fehler:', err);
+            };
+        } catch (e) {
+            console.warn('Konnte WebSocket nicht öffnen:', e);
+        }
+    }
+
+    sendAudioChunk(arrayBuffer) {
+        if (this.ws && this.isConnected && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(arrayBuffer);
+        }
+    }
+
+    sendInterrupt() {
+        if (this.ws && this.isConnected && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({ type: 'interrupt' }));
+        }
+    }
+
+    disconnect() {
+        if (this.ws) {
+            try { this.ws.close(); } catch (_) {}
+            this.ws = null;
+            this.isConnected = false;
+        }
+    }
+}
+
+window.appSprachbefehlAusfuehren = appSprachbefehlAusfuehren;
+window.appAktionAusfuehren = appAktionAusfuehren;
+window.liveVoiceClient = new LiveVoiceClient();
+
+// =========================================
+// TTS (Text-to-Speech)
+// =========================================
+/** Rückfall-Vorleser über die Browser-Stimme. Gibt zurück, ob es geklappt hat. */
+function speakResponse(text) {
+    if (!window.speechSynthesis) {
+        console.warn('Browser-Stimme nicht verfügbar.');
+        return false;
+    }
+    const plainText = tabellenImTextFuerStimme(text)
+        .replace(/```[\s\S]*?```/g, '')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/[*_#]/g, '')
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+        .replace(/\n+/g, ' ')
+        .trim();
+    // Obergrenze großzügig: Als Rückfall ist eine lange Vorlesung besser
+    // als gar keine. Vorher lag sie bei 500 Zeichen und hat den Rückfall
+    // bei fast jeder Antwort stillschweigend verschluckt.
+    if (!plainText) return false;
+    if (plainText.length > 3000) {
+        console.warn('Text zu lang für die Browser-Stimme (%d Zeichen).', plainText.length);
+        return false;
+    }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(plainText);
+    utterance.lang = 'de-DE';
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+    // Zustand sichtbar machen (Roadmap D3): Während die Browser-Stimme liest,
+    // steht „spricht" in der Statuszeile — danach wieder aus.
+    utterance.onstart = () => setMicStatus('spricht');
+    utterance.onend = () => setMicStatus('');
+    utterance.onerror = () => setMicStatus('');
+    const voices = window.speechSynthesis.getVoices();
+    const germanVoice = voices.find(v => v.lang.startsWith('de'));
+    if (germanVoice) utterance.voice = germanVoice;
+    window.speechSynthesis.speak(utterance);
+    return true;
+}
+
+if (window.speechSynthesis) {
+    window.speechSynthesis.getVoices();
+    window.speechSynthesis.onvoiceschanged = () => {
+        window.speechSynthesis.getVoices();
+    };
+}
+
+// =========================================
+// Spracheingabe – WAV-Aufnahme (wie TypeFREE)
+// =========================================
+// MediaRecorder liefert nur WebM/Opus; der Transkriptions-Anbieter lehnt das
+// mit HTTP 400 ab. WAV/PCM-16 geht zuverlässig durch – genau wie bei TypeFREE.
+// Deshalb greifen wir die rohen PCM-Blöcke über einen AudioWorklet ab und
+// bauen die WAV-Datei selbst. Mono, 16 Bit, native Abtastrate des Geräts.
+let audioContext = null;
+let workletNode = null;
+let sourceNode = null;
+let audioStream = null;
+let pcmChunks = [];
+
+function releaseAudioStream() {
+    if (workletNode) {
+        workletNode.port.onmessage = null;
+        workletNode.disconnect();
+        workletNode = null;
+    }
+    if (sourceNode) {
+        sourceNode.disconnect();
+        sourceNode = null;
+    }
+    if (audioContext) {
+        audioContext.close().catch(() => {});
+        audioContext = null;
+    }
+    if (audioStream) {
+        audioStream.getTracks().forEach(track => track.stop());
+        audioStream = null;
+    }
+}
+
+/** Float32-Blöcke [-1,1] → WAV-Datei (PCM 16 Bit, Mono). */
+function encodeWav(chunks, sampleRate) {
+    let samples = 0;
+    for (const chunk of chunks) samples += chunk.length;
+
+    const buffer = new ArrayBuffer(44 + samples * 2);
+    const view = new DataView(buffer);
+    const writeString = (offset, str) => {
+        for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    };
+
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + samples * 2, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);              // Länge des fmt-Blocks
+    view.setUint16(20, 1, true);               // Format: unkomprimiertes PCM
+    view.setUint16(22, 1, true);               // Kanäle: Mono
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);  // Bytes pro Sekunde
+    view.setUint16(32, 2, true);               // Bytes pro Sample-Frame
+    view.setUint16(34, 16, true);              // Bits pro Sample
+    writeString(36, 'data');
+    view.setUint32(40, samples * 2, true);
+
+    let offset = 44;
+    for (const chunk of chunks) {
+        for (let i = 0; i < chunk.length; i++) {
+            const s = Math.max(-1, Math.min(1, chunk[i]));
+            view.setInt16(offset, s * 0x7FFF, true);
+            offset += 2;
+        }
+    }
+    return new Blob([buffer], { type: 'audio/wav' });
+}
+
+async function startRecording() {
+    // Ohne sicheren Kontext (localhost oder HTTPS) entfernt der Browser die
+    // Mikrofon-Schnittstelle ersatzlos – sie fehlt dann, statt eine
+    // Berechtigung zu verweigern. Es gibt also nichts zu erlauben.
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        addMessage(
+            '⚠️ **Spracheingabe ist hier nicht möglich.**\n\n'
+            + 'Der Browser gibt das Mikrofon nur über `localhost` oder HTTPS frei. '
+            + `Diese Seite läuft über \`${location.origin}\`.\n\n`
+            + 'Zum Diktieren die App direkt am Handy öffnen: `http://localhost:8080`',
+            'assistant'
+        );
+        setMicStatus('');
+        return;
+    }
+
+    try {
+        audioStream = await navigator.mediaDevices.getUserMedia({
+            audio: { channelCount: 1 },
+        });
+
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        // Auf Android startet der Context oft angehalten.
+        if (audioContext.state === 'suspended') await audioContext.resume();
+        await audioContext.audioWorklet.addModule('pcm-recorder.js');
+
+        pcmChunks = [];
+        sourceNode = audioContext.createMediaStreamSource(audioStream);
+        workletNode = new AudioWorkletNode(audioContext, 'pcm-recorder');
+        workletNode.port.onmessage = (event) => {
+            pcmChunks.push(event.data);
+            // Erster Block da: Das Mikrofon liefert wirklich Daten. Erst jetzt
+            // ist „hört zu" wahr — vorher („Mikrofon offen") steht nur der
+            // Zugriff, es könnte noch still sein.
+            if (state.micStatus === 'recording') setMicStatus('hoert_zu');
+        };
+        sourceNode.connect(workletNode);
+        // Ohne Verbindung zur destination zieht die Audio-Engine keine Daten.
+        // Der Worklet schreibt nichts in seine Ausgänge – bleibt also stumm.
+        workletNode.connect(audioContext.destination);
+
+        state.isRecording = true;
+        setMicStatus('recording');
+        dom.input.placeholder = 'Aufnahme läuft – Senden beendet sie';
+        updateSendButton();
+    } catch (err) {
+        console.warn('Aufnahme konnte nicht gestartet werden:', err);
+        releaseAudioStream();
+        state.isRecording = false;
+        setMicStatus('');
+        dom.input.placeholder = 'Nachricht eingeben...';
+        addMessage(
+            '⚠️ **Mikrofon nicht verfügbar.**\n\n'
+            + 'Bitte erlaube den Mikrofon-Zugriff in den Browser-Einstellungen.\n'
+            + `- Fehler: ${err.message}`,
+            'assistant'
+        );
+    }
+}
+
+function stopRecording() {
+    if (!state.isRecording) return;
+
+    const sampleRate = audioContext ? audioContext.sampleRate : 48000;
+    const chunks = pcmChunks;
+    pcmChunks = [];
+
+    state.isRecording = false;
+    dom.input.placeholder = 'Nachricht eingeben...';
+    releaseAudioStream();
+    updateSendButton();
+
+    if (!chunks.length) {
+        setMicStatus('');
+        return;
+    }
+    sendAudioForTranscription(encodeWav(chunks, sampleRate));
+}
+
+// ── Spracheingabe fuer Formular-FELDER (Neue-Person-Zusatzkontext u. a.) ────
+// Wie die Chat-Zeile, aber unabhaengig: nimmt Audio auf und schreibt das
+// Transkript in das angegebene Text-Element (input/textarea). Nur EIN Feld kann
+// gleichzeitig aufnehmen; erneuter Tipp auf denselben Knopf stoppt.
+let _feldDiktatZiel = null;    // aktuell besprochenes Feld-Element
+let _feldDiktatBtn = null;     // dessen Mikrofon-Knopf
+async function starteFeldDiktat(zielElem, btn) {
+    if (_feldDiktatZiel) { stopFeldDiktat(); return; }   // laeuft schon -> stoppen
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        addMessage('⚠️ **Spracheingabe hier nicht möglich.** Mikrofon nur über `localhost` oder HTTPS. → App direkt auf `http://localhost:8080` öffnen.', 'assistant');
+        return;
+    }
+    try {
+        _feldDiktatZiel = zielElem;
+        _feldDiktatBtn = btn;
+        _feldDiktatPcm = [];
+        _feldDiktatAudioStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+        _feldDiktatCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (_feldDiktatCtx.state === 'suspended') await _feldDiktatCtx.resume();
+        await _feldDiktatCtx.audioWorklet.addModule('pcm-recorder.js');
+        const srcN = _feldDiktatCtx.createMediaStreamSource(_feldDiktatAudioStream);
+        const wk = new AudioWorkletNode(_feldDiktatCtx, 'pcm-recorder');
+        wk.port.onmessage = (event) => _feldDiktatPcm.push(event.data);
+        srcN.connect(wk);
+        wk.connect(_feldDiktatCtx.destination);
+        _feldDiktatTrackNode = wk;
+        if (btn) {
+            btn.style.background = '#c33'; btn.style.color = '#fff';
+            btn.textContent = '⬤ Aufnahme läuft…';
+        }
+    } catch (err) {
+        _feldDiktatRelease();
+        _feldDiktatZiel = null;
+        if (btn) { btn.textContent = '🎙'; btn.style.background = ''; }
+        addMessage('⚠️ **Mikrofon nicht verfügbar.** ' + (err && err.message ? err.message : ''), 'assistant');
+    }
+}
+let _feldDiktatPcm = [];
+let _feldDiktatAudioStream = null;
+let _feldDiktatCtx = null;
+let _feldDiktatTrackNode = null;
+function _feldDiktatRelease() {
+    try { if (_feldDiktatTrackNode) _feldDiktatTrackNode.disconnect(); } catch (e) {}
+    _feldDiktatTrackNode = null;
+    try { if (_feldDiktatAudioStream) _feldDiktatAudioStream.stop(); } catch (e) {}
+    _feldDiktatAudioStream = null;
+    try { if (_feldDiktatCtx) _feldDiktatCtx.close && _feldDiktatCtx.close(); } catch (e) {}
+    _feldDiktatCtx = null;
+}
+function stopFeldDiktat() {
+    const ziel = _feldDiktatZiel;
+    const btn = _feldDiktatBtn;
+    const sampleRate = _feldDiktatCtx ? _feldDiktatCtx.sampleRate : 48000;
+    const chunks = _feldDiktatPcm;
+    _feldDiktatPcm = [];
+    _feldDiktatRelease();
+    _feldDiktatZiel = null;
+    _feldDiktatBtn = null;
+    if (btn) { btn.textContent = '🎙'; btn.style.background = ''; }
+    if (!chunks.length || !ziel) return;
+    // Auf Transkription warten und ins ZIEL-Feld schreiben
+    transkribiereFeld(chunks, sampleRate, ziel);
+}
+async function transkribiereFeld(chunks, sampleRate, ziel) {
+    try {
+        const formData = new FormData();
+        formData.append('file', encodeWav(chunks, sampleRate), 'audio.wav');
+        const res = await fetch(`${API_BASE}/api/sprache/transkript`, { method: 'POST', body: formData });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        const txt = (typeof data.text === 'string' ? data.text.trim() : '');
+        if (txt && ziel) {
+            const alt = (ziel.value || '').trim();
+            ziel.value = alt ? alt + ' ' + txt : txt;   // ANHAENGEN an Bestehendes
+        }
+    } catch (e) {
+        addMessage('⚠️ **Feld-Spracherkennung fehlgeschlagen:** ' + (e && e.message), 'assistant');
+    }
+}
+// Kleiner Mikrofon-Knopf, der ein Textfeld zum Diktieren oeffnet (WhatsApp-artig).
+// Fuegt rechts neben dem Feld einen 🎙-Button hinzu.
+function fuegeFeldMikrofonHinzu(zielElem, container, mt) {
+    if (!zielElem || typeof navigator.mediaDevices === 'undefined') return;
+    const b = document.createElement('button');
+    b.textContent = '🎙';
+    b.title = mt || 'Diktieren';
+    b.type = 'button';
+    b.style.cssText = 'margin-left:4px;padding:2px 8px;border:1px solid #f88;border-radius:6px;background:#2a1515;color:#f88;cursor:pointer;font-size:0.8rem;vertical-align:middle';
+    b.addEventListener('click', () => starteFeldDiktat(zielElem, b));
+    (container || (zielElem.parentNode || null)).appendChild(b);
+}
+
+dom.webBtn.addEventListener('click', () => setWebSearch(naechsterWebModus()));
+
+dom.modelBtn.addEventListener('click', oeffneBlatt);
+dom.modelClose.addEventListener('click', schliesseBlatt);
+dom.modelSearch.addEventListener('input', zeichneListe);
+dom.privacyBtn.addEventListener('click', () => setPrivacy(!state.noRetention));
+
+// ── Streaming-Geschwindigkeit (Zahnrad oben rechts, Wunsch des Betreibers) ──
+// Die Verzoegerung zwischen SSE-delta-Haeppchen ist einstellbar (moeglichst
+// langsam, damit man mitlesen kann). Gespeichert in localStorage.
+state.streamMs = parseInt(localStorage.getItem('stream_ms') || '120', 10);
+dom.streamSettingsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    dom.streamMenu.hidden = !dom.streamMenu.hidden;
+});
+document.addEventListener('click', () => { if (dom.streamMenu && !dom.streamMenu.hidden) dom.streamMenu.hidden = true; });
+document.querySelectorAll('.stream-opt').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        state.streamMs = parseInt(btn.dataset.ms || '120', 10);
+        localStorage.setItem('stream_ms', String(state.streamMs));
+        dom.streamMenu.hidden = true;
+    });
+});
+
+// Loop-Button: startet/beendet manuell den lokalen Hermes-Loop (end-to-end).
+// An:   kein Auftrag noetig, nur aktivieren (Session wird bei Bedarf
+//       persistent in tmux erzeugt; im query-Kanal Subprozess je Auftrag).
+// Aus:  POST /api/hermes/beenden killt die (persistente) Session.
+// Loop-Zustand ueber Reload hinweg persistent halten (Wunsch des Betreibers:
+// ein Reload soll die Hermes-Aktivierung NICHT zuruecksetzen).
+let loopAktiv = localStorage.getItem('hermes_loop_aktiv') === 'true';
+function _setzeLoopZustand(aktiv) {
+    loopAktiv = aktiv;
+    localStorage.setItem('hermes_loop_aktiv', String(aktiv));
+    if (dom.loopBtn) dom.loopBtn.classList.toggle('active', aktiv);
+    if (dom.loopBtn) dom.loopBtn.setAttribute('aria-pressed', String(aktiv));
+    if (dom.loopLabel) dom.loopLabel.textContent = aktiv ? 'Hermes: an' : 'Hermes';
+}
+async function toggleLoop() {
+    const aktiv = !loopAktiv;
+    _setzeLoopZustand(aktiv);
+    try {
+        if (aktiv) {
+            const res = await fetch(`${API_BASE}/api/hermes/aktivieren`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    aufgabe: 'Bereit: verarbeite die naechsten Nachrichten als Aufgabe. Antworte nach jeder Eingabe kurz, was du tust.',
+                }),
+            });
+            const d = await res.json().catch(() => ({}));
+            addMessage(`🔁 **Hermes aktiviert**. Der lokale Hermes ist end-to-end verbunden.`, 'assistant');
+        } else {
+            const res = await fetch(`${API_BASE}/api/hermes/beenden`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({}),
+            });
+            const d = await res.json().catch(() => ({}));
+            addMessage(
+                `⬛ **Hermes gestoppt**.\n${d.hinweis || `(Session ${d.session || 'hermes_termux'} bleibt bestehen — du kannst weiter in Termux schreiben.)`}`,
+                'assistant'
+            );
+        }
+    } catch (err) {
+        // Bei Fehler Zustand zuruecksetzen.
+        _setzeLoopZustand(!loopAktiv);
+        addMessage(`⚠️ Hermes-Umschaltung fehlgeschlagen: ${err.message || err}`, 'assistant');
+    }
+}
+dom.loopBtn.addEventListener('click', toggleLoop);
+
+// Beim Laden den persistenten Hermes-Zustand sichtbar machen (Wunsch:
+// Reload setzt die Aktivierung nicht zurueck). Funktion, falls vorhanden.
+if (typeof _setzeLoopZustand === 'function') _setzeLoopZustand(loopAktiv);
+
+dom.modelFilters.addEventListener('click', (e) => {
+    const chip = e.target.closest('.filter-chip');
+    if (!chip) return;
+    const f = chip.dataset.filter;
+    if (state.filters.has(f)) state.filters.delete(f);
+    else state.filters.add(f);
+    chip.classList.toggle('on', state.filters.has(f));
+    zeichneListe();
+});
+
+// Tippen auf den abgedunkelten Hintergrund schließt – auf dem Handy die
+// natürlichste Geste, um ein Blatt wieder loszuwerden.
+dom.modelSheet.addEventListener('click', (e) => {
+    if (e.target === dom.modelSheet) schliesseBlatt();
+});
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !dom.modelSheet.hidden) schliesseBlatt();
+    if (e.key === 'Escape' && !dom.chatSheet.hidden) schliesseChatBlatt();
+    if (e.key === 'Escape' && dom.memorySheet && !dom.memorySheet.hidden) schliesseGedaechtnisBlatt();
+    if (e.key === 'Escape' && dom.selbsttestSheet && !dom.selbsttestSheet.hidden) schliesseSelbsttestBlatt();
+});
+
+dom.micBtn.addEventListener('click', () => {
+    if (state.isRecording) {
+        stopRecording();
+    } else {
+        startRecording();
+    }
+});
+
+// =========================================
+// Event Handlers
+// =========================================
+dom.input.addEventListener('input', () => {
+    dom.input.style.height = 'auto';
+    dom.input.style.height = Math.min(dom.input.scrollHeight, 120) + 'px';
+    updateSendButton();
+});
+
+dom.input.addEventListener('keydown', (e) => {
+    // Enter erzeugt eine neue Zeile (Standard des <textarea>), wie bei
+    // WhatsApp/Telegram. Gesendet wird nur über den Senden-Button — oder
+    // bequem per Strg+Enter (Cmd+Enter am Mac).
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        handleSubmit();
+    }
+});
+
+dom.sendBtn.addEventListener('click', handleSubmit);
+
+// =========================================
+// Kopfzeile bleibt sichtbar, wenn die Tastatur aufgeht
+// =========================================
+// Befund (am Handy, Wunsch des Betreibers 2026-09-25): Mit der Tastatur schrumpft
+// nur der SICHTBARE Ausschnitt (visualViewport) – das Layout bleibt 100vh
+// gross. Android schiebt dann die ganze Seite hoch, damit das Eingabefeld
+// sichtbar wird; die Kopfzeile wandert mit aus dem Bild.
+// Gegenmittel: Die App-Huelle (#app) bekommt Hoehe und Oberkante des sichtbaren
+// Ausschnitts als CSS-Variablen (--vv-hoehe/--vv-oben, siehe style.css). Der
+// Verlauf (#chat-container) ist der Scrollcontainer, die Kopfzeile steht
+// sticky/fest oben mit z-index – sie kann also nicht weggescrollt werden.
+// Ohne visualViewport (aeltere Browser) bleibt der dvh-Rueckfall im Stylesheet.
+function huelleAnSichtbareHoehe() {
+    const wurzel = document.documentElement;
+    const vv = window.visualViewport;
+    if (!vv) {                                  // Rueckfall: CSS nutzt 100dvh
+        wurzel.style.removeProperty('--vv-hoehe');
+        wurzel.style.removeProperty('--vv-oben');
+        return;
+    }
+    // Stand der Nutzer unten? Dann unten bleiben: Ohne das rutschte die letzte
+    // Nachricht unter das Eingabefeld, wenn die Tastatur die Flaeche verkleinert.
+    const warUnten = isAtBottom();
+    wurzel.style.setProperty('--vv-hoehe', Math.round(vv.height) + 'px');
+    wurzel.style.setProperty('--vv-oben', Math.round(vv.offsetTop || 0) + 'px');
+    if (warUnten) scrollToBottom(true);
+}
+
+// Sammelt alle Ausloeser (Tastatur auf/zu, Drehen, Adressleiste) in EINEM
+// Frame – sonst wuerde die Anpassung mehrfach je Sekunde laufen.
+let _huelleFrame = 0;
+function huelleNachziehen() {
+    if (_huelleFrame) return;
+    _huelleFrame = requestAnimationFrame(() => {
+        _huelleFrame = 0;
+        huelleAnSichtbareHoehe();
+    });
+}
+
+if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', huelleNachziehen);
+    window.visualViewport.addEventListener('scroll', huelleNachziehen);
+}
+window.addEventListener('resize', huelleNachziehen);
+window.addEventListener('orientationchange', huelleNachziehen);
+// focusin/focusout: Das ist das verlaesslichste Signal fuer „Tastatur auf/zu" –
+// beim Öffnen sofort, beim Schliessen mit kurzem Nachlauf (Android meldet die
+// neue Hoehe erst danach).
+document.addEventListener('focusin', huelleNachziehen);
+document.addEventListener('focusout', () => setTimeout(huelleNachziehen, 150));
+huelleAnSichtbareHoehe();
+
+// =========================================
+// Kontextmenü für Chat-Blasen: Kopieren & Bearbeiten
+// =========================================
+// Rechtsklick (am Handy: langes Drücken) auf eine Nachricht öffnet ein
+// kleines Menü. „Nachricht kopieren" gibt es für jede Blase, „Nachricht
+// bearbeiten" nur für User-Nachrichten (legt den Text zurück in die
+// Eingabe). Das Menü ist ein Mini-Element und bekommt nach Repo-Konvention
+// Inline-Stile statt style.css-Einträge.
+const kontextMenue = document.createElement('div');
+kontextMenue.style.cssText =
+    'position:fixed;z-index:1000;min-width:210px;background:#1e1e2e;'
+    + 'border:1px solid #444;border-radius:10px;'
+    + 'box-shadow:0 8px 24px rgba(0,0,0,.5);padding:6px;display:none;'
+    + 'font-size:13px;user-select:none';
+kontextMenue.innerHTML =
+    `<button type="button" data-aktion="kopieren" style="display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;background:none;border:none;border-radius:7px;color:#ddd;font:inherit;text-align:left;cursor:pointer">`
+        + `📋 Nachricht kopieren</button>`
+    + `<button type="button" data-aktion="teil_kopieren" style="display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;background:none;border:none;border-radius:7px;color:#ddd;font:inherit;text-align:left;cursor:pointer">`
+        + `✂️ Teil auswählen & kopieren</button>`
+    + `<button type="button" data-aktion="bearbeiten" style="display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;background:none;border:none;border-radius:7px;color:#ddd;font:inherit;text-align:left;cursor:pointer">`
+        + `✏️ Nachricht bearbeiten</button>`;
+document.body.appendChild(kontextMenue);
+
+let kontextZielText = '';
+let kontextZielBlase = null;   // die .message-Blasen, aus der das Menü geöffnet wurde
+let kontextKopierTimer = null;
+
+/** Liefert den kopierbaren Text einer Blase: User exakt wie getippt,
+ *  Assistant roh (Markdown) bzw. sichtbarer Text bei gestreamten Blasen. */
+function kontextTextAusBlase(blase) {
+    const roh = blase.dataset.klarText || '';
+    if (roh) return roh;
+    const inhalt = blase.querySelector('.message-content');
+    return inhalt && inhalt.innerText ? inhalt.innerText.trim() : '';
+}
+
+// ── Teil-Kopie: markierbare Blase + Kopier-Leiste ─────────────────────────
+// Quelle: eine bestehende .message-Blase (lang gedrückt) ODER ein roher Text.
+// Leerer/roher-Text-Fall: die Leiste kopiert dann die Textauswahl, falls der
+// Nutzer Text anderswo markiert hat.
+let teilKopieLeiste = null;
+let teilKopieBlase = null;
+
+function leisteTeilKopieAktivieren(quelle) {
+    if (teilKopieLeiste) teilKopieLeiste.remove();
+    teilKopieLeiste = document.createElement('div');
+    teilKopieLeiste.style.cssText =
+        'position:fixed;left:0;right:0;bottom:0;z-index:1100;'
+        + 'display:flex;justify-content:center;gap:10px;padding:12px 16px;'
+        + 'background:#1e1e2e;border-top:1px solid #444;'
+        + 'box-shadow:0 -4px 16px rgba(0,0,0,.4);font-size:14px';
+    const btnKopieren = document.createElement('button');
+    btnKopieren.type = 'button';
+    btnKopieren.textContent = '✂️ Auswahl kopieren';
+    btnKopieren.style.cssText = kopierLeisteBtnStyle(true);
+    const btnAbbrechen = document.createElement('button');
+    btnAbbrechen.type = 'button';
+    btnAbbrechen.textContent = 'Abbrechen';
+    btnAbbrechen.style.cssText = kopierLeisteBtnStyle(false);
+    teilKopieLeiste.appendChild(btnKopieren);
+    teilKopieLeiste.appendChild(btnAbbrechen);
+    document.body.appendChild(teilKopieLeiste);
+
+    // Blase markierbar machen (falls vorhanden), damit man den Teil wählen kann.
+    teilKopieBlase = (quelle && quelle.nodeType === 1) ? quelle : null;
+    const inhalt = teilKopieBlase ? teilKopieBlase.querySelector('.message-content') : null;
+    if (inhalt) {
+        inhalt.style.userSelect = 'text';
+        inhalt.style.webkitUserSelect = 'text';
+        inhalt.style.cursor = 'text';
+        teilKopieBlase.setAttribute('data-teilkopie', '1');
+    }
+
+    const schliessen = () => {
+        if (teilKopieBlase) {
+            const i = teilKopieBlase.querySelector('.message-content');
+            if (i) { i.style.userSelect = ''; i.style.webkitUserSelect = ''; i.style.cursor = ''; }
+            teilKopieBlase.removeAttribute('data-teilkopie');
+        }
+        teilKopieLeiste.remove();
+        teilKopieLeiste = null;
+        teilKopieBlase = null;
+    };
+
+    btnAbbrechen.addEventListener('click', schliessen);
+    btnKopieren.addEventListener('click', () => {
+        const sel = (window.getSelection && window.getSelection().toString()) || '';
+        const text = sel.trim() || teilKopieBlaseText(teilKopieBlase);
+        kopiereText(text).then(() => {
+            btnKopieren.textContent = '✓ Kopiert';
+            setTimeout(schliessen, 800);
+        }).catch(() => { btnKopieren.textContent = '⚠️ Fehler'; });
+    });
+
+    // Klick außerhalb schließt die Teil-Kopie-Leiste.
+    setTimeout(() => {
+        document.addEventListener('click', function teilkopieAussen(e) {
+            if (teilKopieLeiste && !teilKopieLeiste.contains(e.target)) {
+                schliessen();
+                document.removeEventListener('click', teilkopieAussen);
+            }
+        });
+    }, 0);
+    kontextMenueSchliessen();
+}
+
+function kopierLeisteBtnStyle(primär) {
+    return primär
+        ? 'padding:10px 18px;border:none;border-radius:9px;background:#4c6ef5;'
+          + 'color:#fff;font:inherit;font-weight:600;cursor:pointer'
+        : 'padding:10px 18px;border:none;border-radius:9px;background:#333;'
+          + 'color:#ccc;font:inherit;cursor:pointer';
+}
+
+function teilKopieBlaseText(blase) {
+    if (!blase) return '';
+    return kontextTextAusBlase(blase);
+}
+
+function kopiereText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text);
+    }
+    const helfer = document.createElement('textarea');
+    helfer.value = text;
+    helfer.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(helfer);
+    helfer.select();
+    try { document.execCommand('copy'); } catch (_) {}
+    helfer.remove();
+    return Promise.resolve();
+}
+
+function kontextMenueZeigen(x, y) {
+    kontextMenue.style.display = 'block';
+    // Nicht über den Bildschirmrand hinausragen lassen.
+    const rect = kontextMenue.getBoundingClientRect();
+    kontextMenue.style.left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 8)) + 'px';
+    kontextMenue.style.top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 8)) + 'px';
+}
+
+function kontextMenueSchliessen() {
+    kontextMenue.style.display = 'none';
+    // „Kopiert"-Rückmeldung zurücksetzen, falls noch sichtbar.
+    const kopiert = kontextMenue.querySelector('[data-aktion="kopieren"]');
+    if (kopiert.textContent !== '📋 Nachricht kopieren') {
+        clearTimeout(kontextKopierTimer);
+        kopiert.textContent = '📋 Nachricht kopieren';
+    }
+}
+
+kontextMenue.addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn || !kontextZielText) return;
+    if (btn.dataset.aktion === 'kopieren') {
+        const kopieren = () => {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                return navigator.clipboard.writeText(kontextZielText);
+            }
+            // Rückfall für ältere Browser/WebViews ohne Clipboard-API.
+            const helfer = document.createElement('textarea');
+            helfer.value = kontextZielText;
+            helfer.style.cssText = 'position:fixed;opacity:0';
+            document.body.appendChild(helfer);
+            helfer.select();
+            try { document.execCommand('copy'); } catch (_) {}
+            helfer.remove();
+            return Promise.resolve();
+        };
+        kopieren()
+            .then(() => {
+                btn.textContent = '✓ Kopiert';
+                clearTimeout(kontextKopierTimer);
+                kontextKopierTimer = setTimeout(() => {
+                    btn.textContent = '📋 Nachricht kopieren';
+                }, 1500);
+            })
+            .catch(() => { btn.textContent = '⚠️ Kopieren fehlgeschlagen'; });
+        kontextMenueSchliessen();
+    } else if (btn.dataset.aktion === 'teil_kopieren') {
+        // Teil-Kopie: Die Blase wird markierbar (Textauswahl), unten erscheint
+        // eine Leiste „✂️ Auswahl kopieren“ / „Abbrechen“. Kopiert wird genau
+        // der markierte Teil (window.getSelection) statt des ganzen Textes.
+        kontextMenueSchliessen();
+        leisteTeilKopieAktivieren(kontextZielBlase || kontextZielText);
+    } else if (btn.dataset.aktion === 'bearbeiten') {
+        // Bearbeiten-Flow: User-Nachricht zum Neu-Formulieren zurück in die
+        // Eingabe legen. Dabei wird (a) ein noch laufender Antwort-Stream
+        // gestoppt, (b) die bearbeitete User-Blase samt ihrer Antwort aus
+        // dem Verlauf/DOM entfernt und (c) die Runde serverseitig gelöscht —
+        // damit nach dem erneuten Absenden der neue Stream frisch startet und
+        // nach einem Reload keine alte Fassung wieder auftaucht.
+        // NUR den LLM-Stream stoppen; ein laufender Hermes-Auftrag bleibt
+        // davon unberührt (das Abbruch-Recht liegt beim Abbrechen-Button).
+        if (state.abbruch && state.abbruch.abort) {
+            state.abbruch.abort();
+            state.abbruch = null;
+        }
+        // Die bearbeitete Runde immer aus DOM + state.messages entfernen —
+        // egal ob ein Stream lief (dann wird auch die „Denke nach…"-Antwort-
+        // Blase entfernt) oder die Antwort schon fertig war.
+        entferneLetzteRundeAusDom();
+        // Die alte Runde (User + Antwort) dauerhaft aus dem Server-Verlauf
+        // löschen, damit nach Reload nichts Falsches steht.
+        try {
+            fetch(`${API_BASE}/api/chat/letzte-runde`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ conversation_id: state.conversationId || undefined }),
+            }).catch(() => {});
+        } catch (_) {}
+
+        // User-Nachricht zurück in die Eingabe legen (Cursor ans Ende).
+        dom.input.value = kontextZielText;
+        dom.input.style.height = 'auto';
+        dom.input.style.height = Math.min(dom.input.scrollHeight, 120) + 'px';
+        const ende = dom.input.value.length;
+        dom.input.setSelectionRange(ende, ende);
+        dom.input.focus();
+        updateSendButton();
+        kontextMenueSchliessen();
+        kontextZielBlase = null;
+    }
+});
+
+/** Entfernt die letzte Runde (letzte User-Blase + die direkt folgende
+ *  Assistant-Blase) aus dem DOM und aus `state.messages`. Dazu gehören auch
+ *  zwischenliegende Blasen einer laufenden Antwort (z. B. die leere
+ *  Antwort-Blase im „Denke nach…"-Zustand). Liefert true, wenn etwas entfernt
+ *  wurde. */
+function entferneLetzteRundeAusDom() {
+    // Letzte User-Blase im DOM finden.
+    const alle = Array.from(dom.messages.querySelectorAll('.message'));
+    let letzterUser = null;
+    let letzterUserIdx = -1;
+    for (let i = alle.length - 1; i >= 0; i--) {
+        if (alle[i].classList.contains('user')) { letzterUser = alle[i]; letzterUserIdx = i; break; }
+    }
+    if (!letzterUser) return false;
+
+    // User-Blase + alle folgenden Blasen bis zur nächsten User-Blase entfernen
+    // (das ist die Antwort-Runde; meist genau eine Assistant-Blase, bei
+    // gestreamten/mehrteiligen Antworten auch mehrere).
+    let entfernt = false;
+    for (let i = alle.length - 1; i >= letzterUserIdx; i--) {
+        alle[i].remove();
+        entfernt = true;
+    }
+    // state.messages entsprechend bereinigen: Einträge von hinten, deren Rolle
+    // zur entfernten Runde gehört (die letzte User-Nachricht + alles danach).
+    // Wir entfernen vom Ende bis einschließlich der letzten user-Nachricht.
+    if (state.messages.length) {
+        let start = state.messages.length - 1;
+        while (start >= 0 && state.messages[start].role !== 'user') start--;
+        if (start >= 0) {
+            // Sonderfall: Läuft gerade eine Antwort (letzer Eintrag ist eine
+            // nicht-user-Zeile), sind alle Einträge ab `start` die Runde.
+            state.messages.splice(start);
+        }
+    }
+    return entfernt;
+}
+
+// Rechtsklick (Desktop) bzw. langes Drücken (Handy) auf eine Nachricht.
+// WICHTIG (Wunsch des Betreibers 2026-09-25): Auf dem TEXT einer Blase wird NICHT
+// mehr preventDefault() gerufen — genau dieser Aufruf hat am Handy die native
+// Textauswahl (Griffe, Lupe, Kopieren-Menue) verhindert. Dort übernimmt jetzt
+// der Browser (Auswahl auch über mehrere Nachrichten hinweg, siehe style.css).
+// Das eigene Menue bleibt für die nicht auswählbaren Teile der Zeile:
+// Zeitstempel, Vorlese-Knopf und die leere Flaeche neben schmalen Blasen.
+dom.messages.addEventListener('contextmenu', (e) => {
+    const blase = e.target.closest('.message');
+    if (!blase || !dom.messages.contains(blase)) return;
+    // Blasentext/ Zwischenmeldung: Auswahl laufen lassen, eigenes Menue weg.
+    if (e.target.closest('.message-content, .gedanken-inhalt, .gedanken-kurz')) {
+        kontextMenueSchliessen();
+        return;   // bewusst KEIN e.preventDefault()
+    }
+    const text = kontextTextAusBlase(blase);
+    if (!text) return;   // z. B. noch leere Streaming-Blase
+    e.preventDefault();
+    kontextZielText = text;
+    kontextZielBlase = blase;
+    // Bearbeiten gibt es nur für User-Nachrichten.
+    const istUser = blase.classList.contains('user');
+    kontextMenue.querySelector('[data-aktion="bearbeiten"]').style.display = istUser ? '' : 'none';
+    // Label zurücksetzen (falls vorher „✓ Kopiert" angezeigt wurde).
+    const kopiert = kontextMenue.querySelector('[data-aktion="kopieren"]');
+    if (kopiert.textContent !== '📋 Nachricht kopieren') {
+        clearTimeout(kontextKopierTimer);
+        kopiert.textContent = '📋 Nachricht kopieren';
+    }
+    kontextMenueZeigen(e.clientX, e.clientY);
+});
+
+// Klick woanders, Escape oder Scrollen schließt das Menü wieder.
+document.addEventListener('click', () => kontextMenueSchliessen());
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') kontextMenueSchliessen();
+});
+window.addEventListener('scroll', () => kontextMenueSchliessen(), true);
+    // Ein-Chat: newChatBtn/chatsBtn existieren nicht mehr (Buttons entfernt).
+    // Guard, damit die Initialisierung nicht an null-Referenzen crasht.
+    if (dom.newChatBtn) dom.newChatBtn.addEventListener('click', neuesGespraech);
+    if (dom.chatsBtn) dom.chatsBtn.addEventListener('click', oeffneChatBlatt);
+    if (dom.chatsClose) dom.chatsClose.addEventListener('click', schliesseChatBlatt);
+    // Erinnerungs-Blatt: öffnen über den Text im Fuß („Gedächtnis aktiv" wird
+    // per updateFooterNote zur Zahl), schließen über ×, Hintergrund oder Esc.
+    if (dom.gedaechtnisBtn) dom.gedaechtnisBtn.addEventListener('click', oeffneGedaechtnisBlatt);
+    if (dom.memoryClose) dom.memoryClose.addEventListener('click', schliesseGedaechtnisBlatt);
+    if (dom.memorySheet) {
+        dom.memorySheet.addEventListener('click', (e) => {
+            if (e.target === dom.memorySheet) schliesseGedaechtnisBlatt();
+        });
+    }
+    // Checks-Blatt (ehem. Selbsttest): öffnen nur über das Roboter-Symbol (eigener Knopf
+    // entfiel 02.11.2026), schließen über ×, Hintergrund oder Esc, aktualisieren im Blatt.
+    // Roboter-Symbol (20.10.2026): zeigt den Serverzustand und oeffnet dasselbe
+    // Checks-Fenster — per Antippen, Enter oder Leertaste.
+    const agentGesicht = document.getElementById('agent-face');
+    if (agentGesicht) {
+        agentGesicht.addEventListener('click', oeffneSelbsttestBlatt);
+        agentGesicht.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                e.preventDefault();
+                oeffneSelbsttestBlatt();
+            }
+        });
+    }
+    if (dom.selbsttestClose) dom.selbsttestClose.addEventListener('click', schliesseSelbsttestBlatt);
+    if (dom.selbsttestReload) dom.selbsttestReload.addEventListener('click', ladeSelbsttest);
+    if (dom.selbsttestSheet) {
+        dom.selbsttestSheet.addEventListener('click', (e) => {
+            if (e.target === dom.selbsttestSheet) schliesseSelbsttestBlatt();
+        });
+    }
+    if (dom.systemUpdateBtn) {
+        dom.systemUpdateBtn.addEventListener('click', async () => {
+            const meldung = 'Stand wird geholt, Server startet neu — die Seite ist gleich wieder da.';
+            const status = dom.systemUpdateStatus;
+            dom.systemUpdateBtn.disabled = true;
+            if (status) {
+                status.hidden = false;
+                status.textContent = meldung;
+            }
+            try {
+                const res = await fetch(`${API_BASE}/api/system/update`, {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    cache: 'no-store',
+                });
+                const daten = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    if (status) status.textContent = 'Update/Neustart nicht gestartet: '
+                        + (daten.detail || `HTTP ${res.status}`);
+                    dom.systemUpdateBtn.disabled = false;
+                    return;
+                }
+                if (status) status.textContent = daten.message || meldung;
+                // Bei Annahme bleibt der Knopf gesperrt, damit kein zweiter Pull startet.
+            } catch (_fehler) {
+                if (status) status.textContent =
+                    'Keine Antwort vom Server. Prüfe später, ob er wieder erreichbar ist.';
+                dom.systemUpdateBtn.disabled = false;
+            }
+        });
+    }
+// Tippen auf den abgedunkelten Hintergrund schließt – auf dem Handy die
+// natürlichste Geste, um ein Blatt wieder loszuwerden.
+dom.chatSheet.addEventListener('click', (e) => {
+    if (e.target === dom.chatSheet) schliesseChatBlatt();
+});
+
+/**
+ * Legt eine Nachricht als graue Blase in den Verlauf, die noch nicht
+ * abgeschickt ist. Sie kommt bewusst nicht in state.messages – dort steht
+ * nur, was der Agent auch wirklich gesehen hat.
+ */
+function zeigeWartendeNachricht(text) {
+    const div = document.createElement('div');
+    div.className = 'message user queued';
+
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'message-content';
+    contentDiv.innerHTML = `<p>${escapeHtml(text)}</p>`;
+    div.appendChild(contentDiv);
+
+    const verwerfen = document.createElement('button');
+    verwerfen.type = 'button';
+    verwerfen.className = 'queued-note';
+    verwerfen.textContent = 'wartet – tippen zum Verwerfen';
+    verwerfen.addEventListener('click', () => {
+        state.warteschlange = state.warteschlange.filter(e => e.element !== div);
+        div.remove();
+    });
+    div.appendChild(verwerfen);
+
+    dom.messages.appendChild(div);
+    scrollToBottom(true);
+    return div;
+}
+
+/** Bricht die laufende Antwort ab und legt Wartendes zurück in die Eingabe.
+ *  Läuft dabei ein Hermes-Auftrag (Track C), wird er auch backend-seitig
+ *  beendet (POST /abbrechen: tmux-Session killen + Buch auf 'fehler') — sonst
+ *  arbeitet Hermes im Hintergrund weiter, auch wenn man ihn stoppen will. */
+function brichAb() {
+    // Stream abbrechen (falls einer läuft) — aber NICHT früh returnen,
+    // wenn nur ein Hermes-Auftrag ohne aktiven Stream läuft: der Auftrag
+    // muss trotzdem beendet werden (Stopp-Button bleibt verfügbar).
+    if (state.abbruch) state.abbruch.abort();
+
+    // Laufenden Hermes-Auftrag sauber beenden (auch bei offener Rückfrage).
+    if (_laufenderAuftragKurz) {
+        const id = _laufenderAuftragKurz;
+        _laufenderAuftragKurz = null;
+        aktualisiereStatusAnzeige();
+        fetch(`${API_BASE}/api/auftraege/${id}/abbrechen`, { method: 'POST' })
+            .then(() => addMessage('🛑 **Hermes-Aufgabe abgebrochen.**', 'assistant'))
+            .catch(() => addMessage('⚠️ Abbruch-Fehlschlag – Hermes arbeitet evtl. weiter.', 'assistant'));
+    }
+
+    // Was noch wartete, darf nicht stillschweigend verschwinden – es landet
+    // zurück im Eingabefeld, damit nichts Getipptes verloren geht.
+    if (state.warteschlange.length) {
+        const offen = state.warteschlange.map(e => e.text);
+        state.warteschlange.forEach(e => e.element.remove());
+        state.warteschlange = [];
+        const bestand = dom.input.value.trim();
+        dom.input.value = (bestand ? bestand + '\n' : '') + offen.join('\n');
+        dom.input.dispatchEvent(new Event('input'));
+    }
+}
+
+/** Schickt ab und arbeitet danach nach und nach ab, was sich angesammelt hat. */
+async function sendeUndArbeiteAb(text) {
+    await sendMessage(text);
+    while (state.warteschlange.length) {
+        const naechste = state.warteschlange.shift();
+        naechste.element.remove();
+        // ausWarteschlange=true → nicht erneut einreihen, sondern wirklich senden
+        // (auch wenn währenddessen wieder ein Stream läuft).
+        await sendMessage(naechste.text, true);
+    }
+}
+
+async function handleSubmit() {
+    // Läuft gerade eine Aufnahme, bedeutet Senden bzw. Enter: Aufnahme
+    // beenden. Transkription und Absenden laufen danach von selbst weiter.
+    if (state.isRecording) {
+        stopRecording();
+        return;
+    }
+    const text = dom.input.value.trim();
+
+    // Leere Eingabe bei laufender Antwort/Auftrag heißt: abbrechen.
+        if (!text) {
+            if (state.abbruch || _laufenderAuftragKurz) brichAb();
+            return;
+        }
+
+    dom.input.value = '';
+    dom.input.style.height = 'auto';
+
+    // Schreibt der Agent noch, wird angehängt statt dazwischenzufunken.
+    if (state.abbruch) {
+        // Läuft ein Hermes-Auftrag (Track C), geht die Nachricht sofort als
+        // Kommentar an die Session (sendMessage → POST /eingabe) — so kann man
+        // Hermes während der Arbeit direkt steuern/Zwischenfragen stellen.
+        // Sonst in die sichtbare Warteschlange legen (nach Stream-Ende senden).
+        if (_laufenderAuftragKurz) {
+            await sendMessage(text);
+        } else {
+            state.warteschlange.push({ text, element: zeigeWartendeNachricht(text) });
+            updateSendButton();
+        }
+        return;
+    }
+
+    updateSendButton();
+    await sendeUndArbeiteAb(text);
+}
+
+// =========================================
+// Periodic Health Check
+// =========================================
+let healthCheckInterval = null;
+let autoCloseTimer = null;
+let startupCloseTimer = null;    // eigener Timer fuer checkAndAutoClose
+
+/** Schließt den Tab automatisch, wenn der Server nach dem Laden nicht
+ *  erreichbar ist. Verhindert, dass sich beim erneuten Öffnen eines
+ *  Localhost-Tabs immer neue leere Fenster ansammeln. */
+async function checkAndAutoClose() {
+    try {
+        const res = await fetch(`${API_BASE}/api/health`);
+        if (res.ok) {
+            // Server erreichbar – Tab soll offen bleiben.
+            if (startupCloseTimer) {
+                clearTimeout(startupCloseTimer);
+                startupCloseTimer = null;
+            }
+            return;
+        }
+    } catch (_) {
+        // Server nicht erreichbar – Timeout starten/austicken lassen
+    }
+    if (!startupCloseTimer) {
+        startupCloseTimer = setTimeout(() => {
+            // Nur schließen, wenn der Server immer noch weg ist
+            fetch(`${API_BASE}/api/health`).catch(() => window.close());
+            startupCloseTimer = null;
+        }, 5000);
+    }
+}
+
+function startHealthChecks() {
+    checkAndAutoClose();
+    checkHealth();
+    healthCheckInterval = setInterval(checkHealth, 30000);
+}
+
+// =========================================
+// PWA: Register Service Worker
+// =========================================
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js')
+        .then(() => console.log('Service Worker registered'))
+        .catch(err => console.warn('Service Worker registration failed:', err));
+}
+
+// =========================================
+// Init
+// =========================================
+/**
+ * Holt das zuletzt geführte Gespräch zurück in die Oberfläche.
+ *
+ * Der Server hält den Verlauf seit Neuestem auf der Platte. Ohne diesen
+ * Schritt wäre er zwar gespeichert, aber unsichtbar – nach jedem Neustart
+ * stünde wieder ein leeres Fenster da.
+ */
+/**
+ * Beginnt ein neues Gespräch: Anzeige leeren, Verweis lösen.
+ *
+ * Das alte Gespräch bleibt auf der Platte liegen — hier wird nichts
+ * gelöscht, nur beiseitegelegt. Die neue Kennung vergibt der Server beim
+ * nächsten Absenden von allein.
+ */
+function neuesGespraech() {
+    // Ein-Chat-Modus (seit 2026-08): Es gibt genau EINE fortlaufende
+    // Conversation. Der '+'-Button ist ausgeblendet; sollte diese Funktion
+    // trotzdem erreicht werden (z. B. alte UI), tut sie NICHTS zerstörerisches —
+    // der laufende Thread bleibt erhalten (kein conversationId-Reset).
+    addMessage('ℹ️ Ein-Chat-Modus: Es gibt nur dieses eine Gespräch – es wird fortgeführt.', 'assistant');
+}
+
+/** Holt die Kennung des zuletzt geführten Gesprächs vom Server.
+ *
+ *  ACHTUNG (seit Fix 2026-09-25): Wird beim Start NICHT mehr als Rückfall
+ *  benutzt. Genau dieser Rückfall ließ nach einem Reload „auf einmal was ganz
+ *  anderes" erscheinen (je nach Lage der Programmier-Chat conv_code).
+ *  Für eine Auswahl steht holeGespraechsListe() + waehleStartChat() bereit. */
+async function letzteGespraechsId() {
+    try {
+        const res = await fetch(`${API_BASE}/api/conversations`);
+        if (!res.ok) return null;
+        const daten = await res.json();
+        const liste = daten.conversations || [];
+        // Der Server hängt neue Gespräche hinten an, das letzte ist das jüngste.
+        const letztes = liste.filter(c => c.message_count > 0).pop();
+        return letztes ? letztes.id : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Streamt einen von DIESER Session erzeugten Text zeichenweise ins Frontend
+ * und zeigt vorher das "Hermes denkt (Stream bereit)"-Badge. Wunsch des Betreibers:
+ * Hermes-Antworten live im Frontend, mit Denk-Status.
+ */
+async function streamHermesText(text, conversationId) {
+    if (!text) return;
+    hermesStreamBereit = true;
+    aktualisiereStatusAnzeige();
+    const contentDiv = addMessage('', 'assistant');
+    const entry = state.messages[state.messages.length - 1];
+    // KEINE leere Blase (Wunsch des Betreibers 2026-09-25): Die Blase bleibt
+    // verborgen, bis wirklich Text da ist — früher stand hier ein leerer
+    // Kasten mit „…" und Zeitstempel, bevor der erste Buchstabe kam.
+    const _hermesBlase = contentDiv.closest('.message') || contentDiv.parentElement;
+    let antwort = '';
+    try {
+        const res = await fetch(`${API_BASE}/api/hermes/stream`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                text: text,
+                conversation_id: conversationId || 'conv_main',
+                delay_ms: (typeof state.streamMs === 'number') ? state.streamMs : 120,
+            }),
+        });
+        if (!res.ok || !res.body) throw new Error('Hermes-Stream nicht verfügbar');
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let puffer = '';
+        let _einzuBlenden = '';   // noch nicht angezeigte (gepufferte) deltas
+        const _fps = typeof state.streamMs === 'number' && state.streamMs > 0 ? state.streamMs : 120;
+        // Zwischenpuffer-Renderer: zeigt den gepufferten Text in LESBAREN
+        // Bloecken (mehrere Zeichen je Frame) statt Zeichen-fuer-Zeichen -
+        // 'von alt zu neu in menschlicher Geschwindigkeit' (Wunsch des Betreibers).
+        const _zeigeEingeblendet = () => {
+            if (!_einzuBlenden) return;
+            // SERIELL (Wunsch des Betreibers 2026-09-15): Solange eine Gedanken-Blase
+            // noch tippt, NICHT parallel weiterblenden - sonst tippen zwei Blasen
+            // gleichzeitig ("zwei tippende Blasen"). Der Puffer wartet.
+            if (_gedankenTippWartend > 0) return;
+            const block = _einzuBlenden.slice(0, 8); // lesbarer Block je Frame
+            _einzuBlenden = _einzuBlenden.slice(8);
+            antwort += block;
+            // Erster Block → Blase (mit Zeitstempel) sichtbar machen. Vorher
+            // gibt es nichts zu sehen: keine leere Blase, kein leerer Kasten.
+            zeigeBlaseMitText(_hermesBlase, contentDiv, antwort);
+            if (isAtBottom()) scrollToBottom(true);
+        };
+        const _renderTimer = setInterval(() => { _zeigeEingeblendet(); }, Math.max(_fps, 40));
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            puffer += decoder.decode(value, { stream: true });
+            let idx;
+            while ((idx = puffer.indexOf('\n\n')) !== -1) {
+                const block = puffer.slice(0, idx);
+                puffer = puffer.slice(idx + 2);
+                const zeile = block.split('\n').find(z => z.startsWith('data: '));
+                if (!zeile) continue;
+                let daten;
+                try { daten = JSON.parse(zeile.slice(6)); } catch { continue; }
+                if (daten.delta) {
+                    _einzuBlenden += daten.delta;   // in den Puffer, nicht sofort anzeigen
+                } else if (daten.art === 'gedanke' && daten.text) {
+                    // Live-Zwischengedanken (Hermes/Track C) sofort in die eigene
+                    // fortlaufende Gedanken-Blase rendern — Wunsch des Betreibers:
+                    // "Nachrichten ohne Tab-Aktualisierung sichtbar".
+                    const { text: htext, zeitIso } = zerlegeHermesMeldung(daten.text);
+                    fuegeGedankeMitAbbruchHinzu(htext || daten.text, zeitIso || new Date().toISOString());
+                } else if (daten.done) {
+                    break;
+                }
+            }
+            if (puffer.includes('"done"')) break;
+        }
+        // Rest aus dem Puffer sofort (Stream-Ende) + Timer stoppen
+        while (_einzuBlenden) _zeigeEingeblendet();
+        clearInterval(_renderTimer);
+        // finalisieren
+        contentDiv.innerHTML = parseMarkdownPartial ? parseMarkdownPartial(antwort) : escapeHtml(antwort);
+        state.messages[state.messages.length - 1] = entry;
+        if (isAtBottom()) scrollToBottom(true);
+    } catch (err) {
+        contentDiv.textContent = antwort || '⚠️ Hermes-Stream fehlgeschlagen: ' + (err && err.message);
+    } finally {
+        hermesStreamBereit = false;
+        aktualisiereStatusAnzeige();
+        // Leere Assistenten-/Zwischenmeldungs-Blase ohne Inhalt entfernen
+        // (nach dem Coding-Chat-Stream) — Wunsch des Betreibers: KEINE leere Bubble.
+        try {
+            for (const m of Array.from(document.querySelectorAll('#messages .message.assistant, #messages .agent-zwischenmeldung'))) {
+                const cb = m.querySelector('.message-content');
+                const inhalt = (cb ? (cb.textContent || '') : (m.textContent || '')).trim();
+                if (!inhalt) { try { m.remove(); } catch (_e) {} }
+            }
+        } catch (_e) {}
+    }
+}
+
+/**
+ * Pollt alle paar Sekunden GET /api/hermes/letzte (die neueste Nachricht
+ * von DIESER Termux-Session). Ist eine NEUE id da, wird sie via
+ * streamHermesText mit Denk-Badge im Frontend angezeigt. Wunsch des Betreibers:
+ * "server kann von dir pollen" - einfacher/robuster als Skript pro Antwort.
+ */
+let _letzteHermesId = sessionStorage.getItem('hermes_letzte_id') || null;
+let _hermesPollAktiv = false;
+// Merk-Position der zuletzt angezeigten status_meldungen je Auftrag (für Live-Gedanken)
+let _statusMeldCnt = {};
+async function pollHermesLetzte() {
+    try {
+        const res = await fetch(`${API_BASE}/api/hermes/letzte`);
+        if (!res.ok) return;
+        const d = await res.json();
+        const id = d && d.id;
+        const text = d && d.text;
+        if (id && text && id !== _letzteHermesId) {
+            _letzteHermesId = id;
+            sessionStorage.setItem('hermes_letzte_id', id);
+            const conv = (typeof state !== 'undefined' && state.conversationId) || 'conv_main';
+            await streamHermesText(text, conv);
+        }
+    } catch (_) { /* Netzwerk/Poll-Fehler ignorieren */ }
+
+    // Live-Gedanken des laufenden Auftrags: neue status_meldungen seit letztem
+    // Poll als Gedanken anzeigen (Wunsch des Betreibers: ECHTES Feedback, ohne Reload).
+    // Das Backend persistiert die Gedanken weiterhin in status_meldungen; der
+    // Chat-Verlauf wird NICHT mehr damit befuellt (nur Endergebnis bleibt).
+    // Seit 2026-09-15 für JEDEN Chat (nicht nur conv_code): der Auftrag haengt
+    // an der auftrag_id, nicht am Gespraech — so bleibt das Live-Feedback auch
+    // im normalen Chat bestehen, wenn der Stream abreisst.
+    if (_laufenderAuftragKurz) {
+        try {
+            const st = await fetch(`${API_BASE}/api/hermes/status/${_laufenderAuftragKurz}`);
+            if (st.ok) {
+                const sd = await st.json();
+                const meld = (sd && sd.status_meldungen) || [];
+                const seen = _statusMeldCnt[_laufenderAuftragKurz] || 0;
+                const neu = meld.slice(seen);
+                if (neu.length) {
+                    _statusMeldCnt[_laufenderAuftragKurz] = meld.length;
+                    for (const z of neu) {
+                        // status_meldungen sind "[zeit] text" – in Gedanken-Blase zeigen
+                        const ohneZeit = String(z || '').replace(/^\[[^\]]*\]\s*/, '');
+                        if (ohneZeit && ohneZeit.trim()) {
+                            fuegeGedankeMitAbbruchHinzu(ohneZeit, '');
+                        }
+                    }
+                }
+            }
+        } catch (_) {}
+    }
+}
+
+/** Verfolgt einen bereits LAUFENDEN Hermes-Auftrag per Status-Poll weiter.
+ *
+ *  Wunsch des Betreibers (2026-09-15): Reißt die Browser-Verbindung zum SSE-Stream
+ *  ab ("es hat irgendwann aufgehört, ich musste neu laden"), läuft der Auftrag
+ *  im Hintergrund trotzdem weiter. Diese Funktion pollt den Auftragsstand,
+ *  zeigt neue Zwischengedanken als Blasen und schreibt das Endergebnis in den
+ *  Chat — ganz ohne Reload. Sie endet, sobald der Auftrag fertig/fehlerhaft
+ *  ist, und gibt danach den Kanal wieder frei.
+ */
+let _resumeTimer = null;
+function starteAuftragResumePoll(aidKurz, contentDiv, entry, vorleser) {
+    if (!aidKurz) return;
+    if (_resumeTimer) { clearInterval(_resumeTimer); _resumeTimer = null; }
+    let ergebnisGezeigt = false;
+    const tick = async () => {
+        if (!aidKurz) return;
+        try {
+            const res = await fetch(`${API_BASE}/api/hermes/status/${aidKurz}`);
+            if (!res.ok) return;
+            const sd = await res.json();
+            const meld = (sd && sd.status_meldungen) || [];
+            const seen = _statusMeldCnt[aidKurz] || 0;
+            const neu = meld.slice(seen);
+            if (neu.length) {
+                _statusMeldCnt[aidKurz] = meld.length;
+                for (const z of neu) {
+                    const ohneZeit = String(z || '').replace(/^\[[^\]]*\]\s*/, '');
+                    if (ohneZeit && ohneZeit.trim()) {
+                        fuegeGedankeMitAbbruchHinzu(ohneZeit, '');
+                    }
+                }
+            }
+            const status = sd && sd.status;
+            if (status === 'fertig' || status === 'fehler') {
+                if (_resumeTimer) { clearInterval(_resumeTimer); _resumeTimer = null; }
+                _laufenderAuftragKurz = null;
+                aktualisiereStatusAnzeige();
+                updateSendButton();
+                setLoading(false);
+                const ergebnis = (sd && sd.ergebnis) || '';
+                if (ergebnis && !ergebnisGezeigt) {
+                    ergebnisGezeigt = true;
+                    const kopf = (status === 'fertig') ? '✅ **Ergebnis:**\n' : '❌ **Fehler:**\n';
+                    const text = kopf + ergebnis;
+                    // Neue Blase: die urspruengliche kann im finally-Aufraeumen
+                    // (leere Blasen entfernen) bereits aus dem DOM genommen sein.
+                    const zielDiv = addMessage('', 'assistant');
+                    try {
+                        finishReply(zielDiv, { content: '' }, text, {
+                            done: true, conversation_id: state.conversationId,
+                            sources: [], ziel: 'handy',
+                        }, vorleser);
+                    } catch (_e) {
+                        zielDiv.innerHTML = parseMarkdown(text);
+                    }
+                }
+            }
+        } catch (_e) { /* Netzwerkfehler: naechster Tick */ }
+    };
+    tick();
+    _resumeTimer = setInterval(tick, 4000);
+}
+function starteHermesPoll() {
+    if (_hermesPollAktiv) return;
+    _hermesPollAktiv = true;
+    // Initial einmal pruefen, dann alle 4s.
+    pollHermesLetzte();
+    setInterval(pollHermesLetzte, 4000);
+}
+
+/** Zeigt die Nachrichten eines Gesprächs an. True, wenn es sie gab. */
+// Rekonstruiert nach Reload eine persistierte, noch offene Quiz-Frage:
+// rendert die Antwort-Auswahl (Personen + Neue Person + Keine Person) in die
+// bereits angezeigte Blase (mit bild_pfad), damit man auch nach Neustart
+// weiter antworten kann. Optionen frisch von /api/gesichter.
+// Zeichnet den gelben bbox-Rahmen um die Person im Bild einer wiederhergestellten
+// Quiz-Nachricht (nutzt die im ui-Block persistierte 'gesichter'-bbox). Findet
+// das Bild im Container und legt den absolut positionierten Rahmen darueber.
+function quizRahmenFuerBild(root, ui) {
+    try {
+        const img = root && root.querySelector('img');
+        if (!img) return;
+        const gs = (ui && ui.gesichter) || [];
+        if (!gs.length) return;
+        // gemeinsamer Helfer: positioniert gegen Naturgroesse, zeichnet gelben bbox
+        markiereGesichtImBild(img, gs, 0);
+    } catch (_) {}
+}
+
+async function wiederherstellenQuizAntworten(contentDiv, pfad, ui) {
+    if (!contentDiv || !pfad) return;
+    try {
+        const res = await fetch(`${API_BASE}/api/gesichter`);
+        const d = await res.json();
+        const optionen = (d && d.personen || []).map(p => p.name).filter(Boolean);
+        const uiV = (ui && ui.typ === 'quiz') ? ui : null;
+        // Eine Auswahl, in Reihenfolge der Vermutung: die vermutete Person zuerst,
+        // Rest danach. Keine doppelte Vermutungs-Box + volle Liste mehr (sonst
+        // redurndant). Die vermutete Person wird als erster Button hervorgehoben.
+        const vermutPerson = (uiV && uiV.vermutung && uiV.vermutung.person) || null;
+        let optionenGeordnet = (d && d.personen || []).map(p => p.name).filter(Boolean);
+        if (vermutPerson) {
+            // vermutete Person nach vorn ziehen (falls im Katalog vorhanden)
+            const index = optionenGeordnet.indexOf(vermutPerson);
+            if (index > 0) {
+                const [v] = optionenGeordnet.splice(index, 1);
+                optionenGeordnet.unshift(v);
+            }
+        }
+        const leiste = document.createElement('div');
+        leiste.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-top:8px';
+        // Erst NUR die Vermutung als Ja/Nein-Frage; die restliche Auswahl
+        // erscheint erst nach "Nein" (der Betreiber: vermutete zuerst, Rest versteckt).
+        const auswahl = document.createElement('div');
+        auswahl.style.cssText = 'display:none;flex-wrap:wrap;gap:6px;margin-top:6px';
+        if (vermutPerson) {
+            const box = document.createElement('div');
+            box.style.cssText = 'padding:8px;border:1px solid #2e8b57;border-radius:9px;background:#12251a;flex-wrap:wrap;display:flex;gap:6px';
+            const txt = document.createElement('div');
+            txt.style.cssText = 'color:#8f8;font-size:0.85rem;font-weight:600';
+            txt.textContent = `🔎 Ist das ${vermutPerson}?`;
+            box.appendChild(txt);
+            // Ja -> direkt vermuten; Nein -> Auswahl zeigen
+            const ja = document.createElement('button');
+            ja.textContent = '✅ Ja';
+            ja.style.cssText = 'padding:6px 12px;border:1px solid #2e8b57;border-radius:8px;background:#2a5338;color:#9f9;cursor:pointer;font-size:0.82rem;font-weight:600';
+            ja.onclick = () => quizBeantworten(pfad, vermutPerson, false, '');
+            const nein = document.createElement('button');
+            nein.textContent = '❌ Nein';
+            nein.style.cssText = 'padding:6px 12px;border:1px solid #f88;border-radius:8px;background:#2a1515;color:#f88;cursor:pointer;font-size:0.82rem;font-weight:600';
+            nein.onclick = () => {
+                box.style.display = 'none';
+                auswahl.style.display = 'flex';
+            };
+            box.appendChild(ja);
+            box.appendChild(nein);
+            // "Keine Person drauf" auch direkt in der ersten Ja/Nein-Ansicht,
+            // damit man ohne Umweg ueberspringen kann.
+            const keinPers = document.createElement('button');
+            keinPers.textContent = '🚫 Keine Person drauf';
+            keinPers.style.cssText = 'padding:5px 10px;border:1px solid #888;border-radius:8px;background:#333;color:#ccc;cursor:pointer;font-size:0.8rem';
+            keinPers.onclick = () => quizUeberspringen(pfad);
+            box.appendChild(keinPers);
+            leiste.appendChild(box);
+        }
+        // Die geordnete Auswahl (ohne die vermutete Person, die war ja die Frage) —
+        // anfangs versteckt, erscheint erst nach "Nein".
+        const frage = document.createElement('div');
+        frage.textContent = 'Person wählen:';
+        frage.style.cssText = 'font-size:0.82rem;color:#8f8;margin-bottom:4px';
+        auswahl.appendChild(frage);
+        (vermutPerson ? optionenGeordnet.filter(o => o !== vermutPerson) : optionenGeordnet).forEach(o => {
+            const b = document.createElement('button');
+            b.textContent = o;
+            b.style.cssText = 'padding:6px 10px;border:1px solid #4a7;border-radius:8px;background:#1f3a2a;color:#8f8;cursor:pointer;font-size:0.82rem';
+            b.onclick = () => quizBeantworten(pfad, o, false, '');
+            auswahl.appendChild(b);
+        });
+        leiste.appendChild(auswahl);
+        // "Andere Person" (fehlt in der Rekonstruktion des Screenshots) + eingebettetes Formular.
+        const andere = document.createElement('button');
+        andere.textContent = '➕ Andere Person';
+        andere.style.cssText = 'padding:6px 10px;border:1px solid #f88;border-radius:8px;background:#2a1515;color:#f88;cursor:pointer;font-size:0.82rem';
+        const form = document.createElement('div');
+        form.style.display = 'none';
+        form.style.cssText = 'display:none;margin-top:6px;padding:6px;border:1px solid #f88;border-radius:6px;background:#1a0d0d';
+        const inp = document.createElement('input');
+        inp.placeholder = 'Name der Person auf diesem Bild';
+        inp.style.cssText = 'width:100%;padding:5px;border:1px solid #f88;border-radius:6px;background:#1a0d0d;color:inherit;font-size:0.8rem';
+        const speichern = document.createElement('button');
+        speichern.textContent = '✅ Person speichern';
+        speichern.style.cssText = 'padding:5px 9px;border:1px solid #f88;border-radius:6px;background:#2a1515;color:#f88;cursor:pointer;font-size:0.8rem;margin-top:5px;width:100%';
+        speichern.onclick = () => {
+            const n = (inp.value || '').trim();
+            if (!n) { inp.style.borderColor = '#f55'; return; }
+            quizBeantworten(pfad, n, true, '');
+        };
+        form.appendChild(inp);
+        form.appendChild(speichern);
+        andere.onclick = () => { form.style.display = form.style.display === 'none' ? 'block' : 'none'; };
+        auswahl.appendChild(andere);
+        auswahl.appendChild(form);
+        const skip = document.createElement('button');
+        skip.textContent = '🚫 Keine Person drauf';
+        skip.style.cssText = 'padding:6px 10px;border:1px solid #888;border-radius:8px;background:#333;color:#ccc;cursor:pointer;font-size:0.82rem';
+        skip.onclick = () => quizUeberspringen(pfad);
+        auswahl.appendChild(skip);
+        contentDiv.appendChild(leiste);
+    } catch (_) { /* Rekonstruktion nicht moeglich: Text bleibt */ }
+}
+
+// Setzt die Optik/Zustand des CodeChat-Buttons je nach aktuellem Chat.
+function setzeChatButtonStatus() {
+    const btn = document.getElementById('codechat-btn');
+    if (!btn) return;
+    const imCode = (state.conversationId === 'conv_code');
+    btn.setAttribute('aria-pressed', imCode ? 'true' : 'false');
+    btn.title = imCode
+        ? 'Im Programmier-/Hermes-Chat (conv_code) – klick: zum Haupt-Chat'
+        : 'Im Haupt-Chat – klick: zum Programmier-/Hermes-Chat (</>) wechseln';
+    btn.style.background = imCode ? '#1f3a2a' : '';
+    btn.style.color = imCode ? '#8f8' : '';
+    btn.style.borderColor = imCode ? '#4a7' : '';
+    // Symbol je nach aktuellem Chat: Coding-Chat -> Sprechblase, Haupt-Chat -> </>
+    const spr = document.getElementById('sym-sprech');
+    const cod = document.getElementById('sym-code');
+    if (spr) spr.style.display = imCode ? 'inline' : 'none';
+    if (cod) cod.style.display = imCode ? 'none' : 'inline';
+    // Hermes-/Loop-Button unten im Coding-Chat ausblenden (conv_code ist
+    // ohnehin immer an Hermes; der Toggle wäre dort irreführend).
+    const lb = document.getElementById('loop-btn');
+    if (lb) lb.style.display = imCode ? 'none' : '';
+    // Web- und Modell-Tools im Coding-Chat ausblenden: conv_code beantwortet
+    // alles ueber die lokale Hermes-CLI (eigenes, festes LLM), Web-Suche und
+    // Chat-Modellwahl sind dort wirkungslos/irrefuehrend.
+    const wb = document.getElementById('web-btn');
+    if (wb) wb.style.display = imCode ? 'none' : '';
+    const mb = document.getElementById('model-btn');
+    if (mb) mb.style.display = imCode ? 'none' : '';
+}
+
+// Wechselt zwischen Haupt-Chat (conv_main) und Coding-/Hermes-Chat (conv_code).
+function chatWechseln(target) {
+    const g = (target === 'conv_code') ? 'conv_code' : 'conv_main';
+    // Der flüchtige Bild-Cache (10 Min, RAM im Backend) gilt nur INNERHALB
+    // einer Conversation. Beim Verlassen wird er verworfen — sonst könnte ein
+    // Bild aus dem verlassenen Chat in eine neue Frage rutschen.
+    verwerfeBildCache(state.conversationId || undefined);
+    state.conversationId = g;
+    localStorage.setItem('conversation_id', g);
+    // Zahlen/Zeit des verlassenen Chats NICHT stehen lassen (sie gehörten zu
+    // einem anderen Verlauf) — zeigeGespraech setzt die echten Werte gleich.
+    state.chatAnzahl = undefined;
+    state.chatZeit = '';
+    setzeChatButtonStatus();
+    setzeChatAnzeige(g);
+    zeigeGespraech(g);
+}
+
+// Laedt das Bild einer Nachricht erst, wenn sie (naeherungsweise) sichtbar
+// ist - reduziert die Initiallast beim Chat-Wechsel (Ruckler, wenn alle Bilder
+// auf einmal per fetch nachgeladen werden). Fallback: nach kurzem Verzug laden.
+let _lazyBildObs = null;
+function ladeBildLazy(contentDiv, pfad) {
+    let geladen = false;
+    const wirdSichtbar = () => {
+        if (geladen) return;
+        geladen = true;
+        (async () => {
+            try {
+                const res = await fetch(`${API_BASE}/api/dateien/daten?pfad=${encodeURIComponent(pfad)}`);
+                const daten = await res.json();
+                if (daten.data_url) {
+                    zeigeBildVorschau(contentDiv, daten.data_url, pfad);
+                } else {
+                    const fehlt = document.createElement('div');
+                    fehlt.style.cssText = 'font-size:0.78rem;color:#999;font-style:italic;margin-top:4px';
+                    fehlt.textContent = '🖼 Bild nicht (mehr) vorhanden – gelöscht oder verschoben.';
+                    contentDiv.appendChild(fehlt);
+                }
+            } catch (_) {
+                const fehlt = document.createElement('div');
+                fehlt.style.cssText = 'font-size:0.78rem;color:#999;font-style:italic;margin-top:4px';
+                fehlt.textContent = '🖼 Bild nicht ladbar – gelöscht oder verschoben.';
+                contentDiv.appendChild(fehlt);
+            }
+        })();
+    };
+    try {
+        if (!_lazyBildObs) {
+            if ('IntersectionObserver' in window) {
+                _lazyBildObs = new IntersectionObserver((entries) => {
+                    entries.forEach(e => { if (e.isIntersecting) wirdSichtbar(); });
+                }, { root: dom.messages, rootMargin: '600px' });
+            }
+        }
+        if (_lazyBildObs) {
+            _lazyBildObs.observe(contentDiv);
+            return;
+        }
+    } catch (_) {}
+    setTimeout(wirdSichtbar, 300); // Fallback ohne Observer
+}
+
+// ── Sichtbare Chat-Kennzeichnung + ehrlicher Umgang mit unbekannten Chats ──
+// Fix 2026-09-25 (der Betreiber: „…dann kam wieder was ganz anderes").
+// Grundsätze:
+//   1. Es wird NUR der Chat gezeigt, dessen Kennung angefragt wurde.
+//   2. Gibt es ihn nicht, erscheint eine klare Meldung + Angebot — niemals
+//      stillschweigend ein fremder Verlauf.
+//   3. Welcher Chat offen ist, steht sichtbar über dem Verlauf.
+
+// Reentranz-Marke für das Laden eines Verlaufs (siehe zeigeGespraech).
+let _gespraechToken = 0;
+
+// Chat, aus dem die gerade laufende Anfrage gesendet wurde. Damit erkennt
+// finishReply, ob ein Abschluss noch zum offenen Chat gehört (siehe dort).
+let _sendChatId = null;
+
+/** Zeichnet die Chat-Anzeige anhand des echten Server-Stands neu
+ *  (Nachrichten-Zahl + letzte Aktivität). Ein kleiner Abruf je Antwort. */
+async function aktualisiereChatAnzeigeVomServer() {
+    const cid = state.conversationId;
+    if (!cid) return;
+    try {
+        const res = await fetch(`${API_BASE}/api/conversations`);
+        if (!res.ok) return;
+        const liste = (await res.json()).conversations || [];
+        const eintrag = liste.find(c => c.id === cid);
+        if (!eintrag) return;
+        // Nur anzeigen, wenn derselbe Chat noch offen ist (keine Umschaltung).
+        if (state.conversationId !== cid) return;
+        await holeGespraechsZeit(cid, eintrag.message_count);
+    } catch (_) { /* Anzeige darf nie stören */ }
+}
+
+/** Holt die letzte Aktivität eines Chats und schreibt die Anzeige. */
+async function holeGespraechsZeit(cid, anzahl) {
+    try {
+        const res = await fetch(`${API_BASE}/api/conversations/${encodeURIComponent(cid)}`);
+        if (!res.ok) return;
+        const msgs = (await res.json()).messages || [];
+        if (state.conversationId !== cid) return;
+        setzeChatAnzeige(cid, typeof anzahl === 'number' ? anzahl : msgs.length,
+            msgs.length ? (msgs[msgs.length - 1].zeit || '') : '');
+    } catch (_) { /* Anzeige darf nie stören */ }
+}
+
+/** Zeigt an, WELCHER Chat gerade offen ist (Name/Kennung + Stand). */
+function setzeChatAnzeige(id, anzahl, letzteZeit, hinweis) {
+    if (typeof anzahl === 'number') state.chatAnzahl = anzahl;
+    if (letzteZeit) state.chatZeit = letzteZeit;
+    const el = document.getElementById('chat-aktuell');
+    if (!el) return;
+    if (!id) {
+        el.textContent = '💬 Kein Chat geöffnet – ein Chat lässt sich hier öffnen.';
+        return;
+    }
+    const name = (id === 'conv_code')
+        ? 'Programmier-/Hermes-Chat (conv_code)'
+        : (id === 'conv_main' ? 'Haupt-Chat (conv_main)' : id);
+    let txt = `💬 ${name}`;
+    if (typeof state.chatAnzahl === 'number') txt += ` · ${state.chatAnzahl} Nachrichten`;
+    if (state.chatZeit) txt += ` · zuletzt ${formatUhrzeit(state.chatZeit)}`;
+    if (hinweis) txt += ` · ${hinweis}`;
+    el.textContent = txt;
+}
+
+/** Holt die Chat-Liste (Kennung, Anzahl, letzte Nachricht). */
+async function holeGespraechsListe() {
+    try {
+        const res = await fetch(`${API_BASE}/api/conversations`);
+        if (!res.ok) return [];
+        const liste = (await res.json()).conversations || [];
+        return liste.filter(c => c.message_count > 0);
+    } catch (_) {
+        return [];
+    }
+}
+
+/** Wählt beim Start OHNE gemerkte Kennung den nächstliegenden Chat.
+ *  conv_main zuerst (das ist der Haupt-Chat), sonst der mit den meisten
+ *  Nachrichten. Bewusst nicht „irgendein" Chat — und die Oberfläche sagt
+ *  anschließend sichtbar, dass sie diesen Chat geöffnet hat. */
+function waehleStartChat(liste) {
+    if (!liste || !liste.length) return null;
+    const haupt = liste.find(c => c.id === 'conv_main');
+    if (haupt) return haupt;
+    return liste.slice().sort((a, b) => b.message_count - a.message_count)[0];
+}
+
+/** Verwirft den flüchtigen Bild-Cache (10-Minuten-RAM im Backend).
+ *  Er gilt nur INNERHALB einer Conversation — beim Wechsel/Start weg. */
+function verwerfeBildCache(conversationId) {
+    try {
+        fetch(`${API_BASE}/api/chat/bild-cache/verwerfen`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(
+                conversationId ? { conversation_id: conversationId } : {}
+            ),
+        }).catch(() => {});
+    } catch (_) { /* Cache-Verwerfen darf nie stören */ }
+}
+
+/** Klare Meldung statt fremdem Verlauf: Die angefragte Kennung gibt es nicht. */
+async function zeigeChatNichtGefunden(id, res) {
+    let bekannte = [];
+    try {
+        const daten = await res.json();
+        const detail = (daten && daten.detail) || {};
+        bekannte = detail.bekannte_chats || daten.bekannte_chats || [];
+    } catch (_) { /* Antwort ohne JSON-Körper: Meldung bleibt trotzdem klar */ }
+
+    dom.messages.innerHTML = '';
+    zuruecksetzenDatumBanner();
+    state.messages = [];
+    state.conversationId = null;
+    state.chatAnzahl = undefined;
+    state.chatZeit = '';
+    // Die tote Kennung NICHT weiter mitschleppen: sonst ginge die nächste
+    // Nachricht an einen Chat, der laut Anzeige gar nicht offen ist.
+    try { localStorage.removeItem('conversation_id'); } catch (_) {}
+    setzeChatButtonStatus();
+    setzeChatAnzeige(null);
+
+    const box = document.createElement('div');
+    box.className = 'message assistant';
+    const inhalt = document.createElement('div');
+    inhalt.className = 'message-content';
+    inhalt.innerHTML =
+        '<p>⚠️ <strong>Dieser Chat ist leer bzw. nicht gefunden.</strong></p>'
+        + `<p>Die gemerkte Chat-Kennung <code>${escapeHtml(String(id))}</code> `
+        + 'gibt es auf dem Server nicht. Es wird bewusst <em>kein anderer</em> '
+        + 'Verlauf angezeigt.</p>';
+    box.appendChild(inhalt);
+
+    if (bekannte.length) {
+        const p = document.createElement('p');
+        p.textContent = 'Diese Chats gibt es:';
+        inhalt.appendChild(p);
+        for (const c of bekannte) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'chat-row';
+            b.textContent = `${c.id} · ${c.message_count} Nachrichten`;
+            b.style.cssText =
+                'display:block;margin:4px 0;padding:6px 10px;border:1px solid #555;'
+                + 'border-radius:8px;background:#2a2a2a;color:inherit;cursor:pointer;'
+                + 'font-size:0.82rem;text-align:left';
+            b.addEventListener('click', async () => { await zeigeGespraech(c.id); });
+            inhalt.appendChild(b);
+        }
+    }
+    dom.messages.appendChild(box);
+    return true;
+}
+
+/** Verlauf konnte nicht geladen werden (Server weg) — gemerkte Kennung
+ *  BEHALTEN und ehrlich melden, statt einen anderen Chat zu zeigen. */
+function zeigeVerlaufLadefehler(id) {
+    dom.messages.innerHTML = '';
+    zuruecksetzenDatumBanner();
+    state.messages = [];
+    // Keine Zahlen/Zeiten aus einem anderen Ladevorgang stehen lassen.
+    state.chatAnzahl = undefined;
+    state.chatZeit = '';
+    setzeChatAnzeige(id, undefined, undefined, 'nicht geladen (Server nicht erreichbar)');
+    const box = document.createElement('div');
+    box.className = 'message assistant';
+    const inhalt = document.createElement('div');
+    inhalt.className = 'message-content';
+    inhalt.innerHTML =
+        '<p>⚠️ <strong>Verlauf gerade nicht ladbar.</strong></p>'
+        + `<p>Der Chat <code>${escapeHtml(String(id))}</code> bleibt gemerkt — `
+        + 'sobald der Server antwortet, erscheint genau dieser Verlauf wieder.</p>';
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = '🔄 Erneut versuchen';
+    b.style.cssText =
+        'margin-top:6px;padding:6px 10px;border:1px solid #555;border-radius:8px;'
+        + 'background:#2a2a2a;color:inherit;cursor:pointer;font-size:0.82rem';
+    b.addEventListener('click', () => { zeigeGespraech(id); });
+    inhalt.appendChild(b);
+    box.appendChild(inhalt);
+    dom.messages.appendChild(box);
+}
+
+async function zeigeGespraech(id) {
+    // Reentranz-Schutz: Nur der JÜNGSTE Ladevorgang darf die Anzeige bauen.
+    // Sonst konnten sich zwei Aufrufe (Schnellwechsel + Reload) beim
+    // Leeren/Aufbauen von #messages überholen und den Verlauf doppelt zeigen.
+    const token = ++_gespraechToken;
+    try {
+        const res = await fetch(`${API_BASE}/api/conversations/${encodeURIComponent(id)}`);
+        if (token !== _gespraechToken) return 'ueberholt';  // neuerer Ladevorgang gewinnt
+        if (res.status === 404) {
+            // Unbekannte Kennung: klare Meldung, KEIN fremder Verlauf.
+            await zeigeChatNichtGefunden(id, res);
+            return 'nicht_gefunden';
+        }
+        if (!res.ok) return false;
+        const daten = await res.json();
+        if (token !== _gespraechToken) return 'ueberholt';
+        // Die Kennung, die der SERVER aufgelöst hat, ist die Wahrheit — nicht
+        // die angefragte. Vorher wurde die angefragte gemerkt, während der
+        // Server (per stillem Fallback) einen anderen Chat lieferte; Anzeige,
+        // gemerkte Kennung und nächste Nachricht konnten so auseinanderlaufen.
+        const idServer = daten.id || id;
+        const nachrichten = daten.messages || [];
+        if (!nachrichten.length) {
+            // Gültiger, (noch) leerer bekannter Chat (conv_main/conv_code): leeren
+            // Kanal anzeigen statt auf false/alten Inhalt zurückzufallen.
+            dom.messages.innerHTML = '';
+            const willkommen2 = document.getElementById('welcome');
+            if (willkommen2) dom.messages.appendChild(willkommen2);
+            state.messages = [];
+            state.conversationId = idServer;
+            localStorage.setItem('conversation_id', idServer);
+            setzeChatButtonStatus();
+            setzeChatAnzeige(idServer, 0);
+            return true;
+        }
+
+        const willkommen = document.getElementById('welcome');
+        dom.messages.innerHTML = '';
+        if (willkommen) dom.messages.appendChild(willkommen);
+        state.messages = [];
+        zuruecksetzenDatumBanner();
+
+        // Indizes aller persistenten, noch offenen Quiz-Fragen: NUR die letzte
+        // soll bedienbar sein; aeltere nur als Historie (Bild+Text).
+        const offeneQuiz = [];
+        for (let i = 0; i < nachrichten.length; i++) {
+            if ((nachrichten[i].content || '').indexOf('[QUIZ-OFFEN]') !== -1) offeneQuiz.push(i);
+        }
+        const letzteOffene = offeneQuiz.length ? offeneQuiz[offeneQuiz.length - 1] : -1;
+
+        // Nur die letzten MAX_VERLAUF Nachrichten sofort rendern -> der Wechsel
+        // zum Coding-/Haupt-Chat wird flüssig (kein Synchron-Aufbau von
+        // tausenden Blasen + kein Sprung durch Dauer-Scroll). Ältere werden
+        // über einen Knopf chunkweise nachgeladen (prepend).
+        const MAX_VERLAUF = 60;
+        const anzahl = nachrichten.length;
+        let _geladenBis = Math.max(0, anzahl - MAX_VERLAUF); // Index-Bereich davor bleibt ausstehend
+
+        /** Baut EINE Nachrichtenblase für die Chronik; rendert sämtliche
+         *  Nebeneffekte (Bild lazy, offene Quiz-Karte) wie zuvor. */
+        function _baueChronikBlase(mi, m, istLetzteOffene) {
+            const role = m.role === 'user' ? 'user' : 'assistant';
+            // silent: während des Bündelns NICHT scrollen/pushen (s. addMessage)
+            const contentDiv = addMessage(m.content || '', role, m.zeit || null, m.bild_pfad || undefined, { silent: true });
+            const istOffeneQuizFrage = (m.content || '').indexOf('[QUIZ-OFFEN]') !== -1 && m.bild_pfad;
+
+            // Die LETZTE offene Quiz-Frage wird NACH dem Aufbau mit der echten,
+            // sauberen Quiz-Karte versehen (proportionales Bild + gelber Rahmen in
+            // imgWrap). Das ist robuster als der ladeBildLazy-Wege, der das Bild
+            // in einen flachen rahmen-Div ohne relative Position steckt und dort
+            // den gelben bbox-Rahmen verrutschen liess / teils kein Bild zeigt.
+            const alsOffeneQuizKarte = istOffeneQuizFrage && istLetzteOffene;
+
+            if (m.bild_pfad && (role === 'assistant' || role === 'user') && !alsOffeneQuizKarte) {
+                ladeBildLazy(contentDiv, m.bild_pfad);
+            }
+
+            // Ergebnis einer bereits abgeschlossenen Quiz-Runde: nicht nur den
+            // nackten Text zeigen, sondern die SCHÖNE Bildunterschrift-Karte
+            // (Bild + "… das ist Person") rekonstruieren (Wunsch des Betreibers:
+            // nach Reload den Quiz-Verlauf mit Bildern sehen).
+            if (m.ui && m.ui.typ === 'quiz_ergebnis' && m.bild_pfad) {
+                _baueQuizErgebnisKarte(contentDiv, m);
+            }
+
+            if (istOffeneQuizFrage) {
+                if (alsOffeneQuizKarte) {
+                    // Fix 29.09.2026: Beim Öffnen der App startet das Quiz NICHT
+                    // mehr von selbst. Früher wurde hier die letzte offene Frage als
+                    // laufende Quiz-Karte nachgebaut (_quizAktiv = true) — eine nie
+                    // beantwortete Frage „ging“ so bei jedem Öffnen wieder los.
+                    // Jetzt: Bild als normale Historie + Knopf zum Weitermachen.
+                    ladeBildLazy(contentDiv, m.bild_pfad);
+                    _quizFortsetzenKnopf(contentDiv);
+                }
+            }
+            return contentDiv;
+        }
+
+        /** Knopf unter einer offenen Quiz-Frage aus dem Verlauf: das Quiz geht
+         *  erst weiter, wenn der Nutzer es will (quizFortsetzen). */
+        function _quizFortsetzenKnopf(contentDiv) {
+            const knopf = document.createElement('button');
+            knopf.type = 'button';
+            knopf.className = 'quiz-fortsetzen-btn';
+            knopf.textContent = '▶ Quiz fortsetzen';
+            knopf.style.cssText = 'margin-top:8px;padding:6px 12px;border-radius:8px;'
+                + 'border:1px solid var(--border);background:transparent;color:inherit;cursor:pointer';
+            knopf.addEventListener('click', () => { knopf.remove(); quizFortsetzen(); });
+            contentDiv.appendChild(knopf);
+        }
+
+        /** Rekonstruiert eine abgeschlossene Quiz-Runde als schöne Bildunterschrift-
+         *  Karte: Bild + grüner Rahmen "… das ist Person" (statt nacktem Text).
+         *  Ruft sich auf Basis des persistierten ui-Felds (typ:"quiz_ergebnis"). */
+        async function _baueQuizErgebnisKarte(contentDiv, m) {
+            try {
+                const ui = m.ui || {};
+                const person = ui.person || '';
+                const pfad = m.bild_pfad;
+                if (!pfad) return;
+                const dr = await fetch(`${API_BASE}/api/dateien/daten?pfad=${encodeURIComponent(pfad)}`);
+                const dd = await dr.json();
+                const dataUrl = (dd && dd.data_url) || '';
+                if (!dataUrl) {
+                    const fehlt = document.createElement('div');
+                    fehlt.style.cssText = 'font-size:0.78rem;color:#999;font-style:italic;margin-top:4px';
+                    fehlt.textContent = '🖼 Bild nicht (mehr) ladbar (gelöscht/verschoben).';
+                    contentDiv.appendChild(fehlt);
+                    return;
+                }
+                // Text-Blase durch die Bildunterschrift-Karte ersetzen
+                contentDiv.innerHTML = '';
+                const zeile = document.createElement('div');
+                zeile.style.cssText = 'padding:8px;border:1px solid #2e8b57;border-radius:10px;background:#0f1f14;font-weight:600;color:#8f8';
+                zeile.textContent = `✅ **${person}** gelernt` + (ui.jahr ? ` · ${ui.jahr}` : '');
+                contentDiv.appendChild(zeile);
+                const cap = document.createElement('div');
+                cap.style.cssText = 'margin-top:6px;padding:6px;border:1px solid #4a7;border-radius:8px;background:#0f1f14';
+                const capImg = document.createElement('img');
+                capImg.src = dataUrl;
+                capImg.alt = 'Quiz-Bild';
+                capImg.style.cssText = 'display:block;max-width:100%;max-height:200px;border-radius:8px;border:1px solid #4a7';
+                cap.appendChild(capImg);
+                const capTxt = document.createElement('div');
+                capTxt.style.cssText = 'color:#8f8;font-size:0.85rem;font-weight:600;margin-top:4px';
+                capTxt.textContent = '… das ist ' + (person || '?');
+                cap.appendChild(capTxt);
+                contentDiv.appendChild(cap);
+                macheBildAntippbar(capImg, []);
+            } catch (e) {
+                const fehlt = document.createElement('div');
+                fehlt.style.cssText = 'font-size:0.78rem;color:#999;font-style:italic;margin-top:4px';
+                fehlt.textContent = '🖼 Quiz-Ergebnis-Bild nicht ladbar.';
+                contentDiv.appendChild(fehlt);
+            }
+        }
+
+        /** Hängt den „Ältere Nachrichten laden“-Knopf ganz oben ein (falls
+         *  noch ältere ausstehen) und verbindet ihn mit dem aeltesten DOM-Knoten. */
+        function _ergaenzeAeltereKnopf() {
+            if (_geladenBis <= 0) return;
+            const knopf = document.createElement('button');
+            knopf.className = 'aeltere-laden';
+            knopf.textContent = '↑ Ältere Nachrichten laden…';
+            knopf.style.cssText =
+                'display:block;width:100%;margin:6px auto;padding:8px;border:1px dashed #555;' +
+                'border-radius:10px;background:transparent;color:#9aa;cursor:pointer;font-size:0.75rem';
+            knopf.addEventListener('click', () => {
+                knopf.disabled = true;
+                knopf.textContent = '… lade ältere Nachrichten';
+                const bis = _geladenBis;
+                const von = Math.max(0, bis - MAX_VERLAUF);
+                const frag = document.createDocumentFragment();
+                for (let mi = von; mi < bis; mi++) {
+                    _baueChronikBlase(mi, nachrichten[mi], mi === letzteOffene);
+                }
+                // vor den ältesten bereits gerenderten Knoten einschieben
+                const erste = dom.messages.querySelector('.message');
+                dom.messages.insertBefore(frag, erste);
+                _geladenBis = von;
+                knopf.remove();
+                // Die nachgeladenen (älteren) Blasen sind neu — sie wurden noch
+                // nie gemessen. Zweite Phase, damit ihr Merker frei bleibt.
+                setTimeout(() => ueberlaufAllePruefen('verlauf_aelter'), 300);
+                _ergaenzeAeltereKnopf.call(this); // neu einsetzen, falls weitere ausstehen
+            });
+            dom.messages.insertBefore(knopf, dom.messages.querySelector('.message'));
+        }
+
+        // Weg 1: leer -> Willkommen (schon oben erledigt).
+        if (anzahl > 0) {
+            _ergaenzeAeltereKnopf();          // Knopf nur bei > MAX_VERLAUF (geladenBis>0)
+            const frag = document.createDocumentFragment();
+            for (let mi = _geladenBis; mi < anzahl; mi++) {
+                _baueChronikBlase(mi, nachrichten[mi], mi === letzteOffene);
+            }
+            dom.messages.appendChild(frag);
+        }
+        state.conversationId = idServer;
+        setzeChatButtonStatus();
+        localStorage.setItem('conversation_id', idServer);
+        // Sichtbar machen, welcher Chat offen ist (+ Anzahl + letzte Aktivität).
+        setzeChatAnzeige(idServer, anzahl, nachrichten[nachrichten.length - 1].zeit || '');
+        scrollToBottom(true);
+        // Überlauf-Wächter auch für den VERLAUF (nicht nur für frisch
+        // gestreamte Antworten): des Betreibers kaputte Blase kam aus dem Verlauf
+        // (nach App-Start geladen) und wurde deshalb nie vermessen. Hier werden
+        // die frisch aufgebauten Blasen gemessen — kurz nach dem Aufbau und
+        // noch einmal später, weil Bilder/Quellen/Knöpfe die Breite erst nach
+        // dem Einfügen verändern. Je Blase und Phase höchstens eine Meldung
+        // (dataset-Merker in ueberlaufPruefen).
+        setTimeout(() => ueberlaufAllePruefen('verlauf'), 300);
+        setTimeout(() => ueberlaufAllePruefen('verlauf_spaeter'), 2000);
+        return true;
+    } catch (err) {
+        console.warn('Gespräch nicht abrufbar:', err);
+        return false;
+    }
+}
+
+/** Füllt das Blatt mit den gespeicherten Gesprächen, jüngstes zuerst. */
+async function zeichneGespraeche() {
+    dom.chatList.innerHTML = '';
+    dom.chatHint.textContent = '';
+    try {
+        const res = await fetch(`${API_BASE}/api/conversations`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const liste = (await res.json()).conversations || [];
+        const mitInhalt = liste.filter(c => c.message_count > 0).reverse();
+
+        if (!mitInhalt.length) {
+            dom.chatHint.textContent = 'Noch keine gespeicherten Gespräche.';
+            return;
+        }
+
+        for (const c of mitInhalt) {
+            const knopf = document.createElement('button');
+            knopf.type = 'button';
+            knopf.className = 'chat-row' + (c.id === state.conversationId ? ' aktiv' : '');
+            knopf.innerHTML =
+                `<strong>${escapeHtml(c.id)}</strong> · ${Number(c.message_count) || 0} Nachrichten`
+                + `<span class="chat-vorschau">${escapeHtml(c.last_message || '')}</span>`;
+            knopf.addEventListener('click', async () => {
+                if (await zeigeGespraech(c.id)) schliesseChatBlatt();
+            });
+            dom.chatList.appendChild(knopf);
+        }
+    } catch (err) {
+        dom.chatHint.textContent = 'Gespräche nicht abrufbar – läuft der Server?';
+        console.warn('Gesprächsliste:', err);
+    }
+}
+
+function oeffneChatBlatt() {
+    dom.chatSheet.hidden = false;
+    zeichneGespraeche();
+}
+
+function schliesseChatBlatt() {
+    dom.chatSheet.hidden = true;
+}
+
+// =========================================
+// Erinnerungen (Gedächtnis)
+// =========================================
+// Befund 2026-09-25 (der Betreiber): „Ich habe einfach nur nix für Erinnerungen."
+// Der Agent lernte zwar mit (auf dem Handy standen 175 Einträge), aber die
+// Oberfläche zeigte davon nur eine Zahl im Fuß – kein einziger Eintrag war
+// sichtbar, keiner löschbar. Genau das holt dieses Blatt nach: Liste aus
+// GET /api/memory, Einzel-Löschen über DELETE /api/memory/{id}.
+//
+// Bewusst KEIN „Alle löschen" hier: ein Fehlgriff wäre nicht rücknehmbar.
+// Ein Eintrag, der falsch ist (erfundene Vorliebe), läßt sich jetzt gezielt
+// wegnehmen, ohne dass die richtigen mitgehen.
+
+/** Echte Gesamtzahl aus /api/memory/count.
+ *
+ *  Notwendig, weil die Liste gedeckelt abgeholt wird (?limit=200) und `total`
+ *  in der Antwort die Zahl der GELIEFERTEN Einträge ist, nicht die des
+ *  Bestands. Ohne diesen zweiten Aufruf behauptete die Anzeige bei mehr als
+ *  200 Einträgen eine zu kleine Zahl. null = nicht ermittelbar (Server weg). */
+async function erinnerungenZahl() {
+    try {
+        const res = await fetch(`${API_BASE}/api/memory/count`);
+        if (!res.ok) return null;
+        const daten = await res.json();
+        return typeof daten.count === 'number' ? daten.count : null;
+    } catch (err) {
+        console.warn('Erinnerungszahl nicht abrufbar:', err);
+        return null;
+    }
+}
+
+/** Zeichnet die Liste der gespeicherten Erinnerungen, jüngste zuerst. */
+async function zeichneErinnerungen() {
+    dom.memoryList.innerHTML = '';
+    dom.memoryHint.textContent = 'Lade Erinnerungen …';
+    try {
+        const res = await fetch(`${API_BASE}/api/memory?limit=200`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const daten = await res.json();
+        const liste = daten.memories || [];
+        const gesamt = await erinnerungenZahl();
+        // Der Zähler im Fuß wird gleich mitgezogen – sonst hinkte er nach
+        // einem Löschen bis zum nächsten Health-Check hinterher.
+        updateFooterNote(gesamt !== null ? gesamt : liste.length);
+
+        if (!liste.length) {
+            dom.memoryHint.textContent =
+                'Noch keine Erinnerungen gespeichert. Der Agent legt sie an, '
+                + 'wenn du im Chat etwas über dich erzählst.';
+            return;
+        }
+
+        dom.memoryHint.textContent =
+            (gesamt !== null && gesamt > liste.length)
+                ? `${gesamt} Erinnerungen · hier die ${liste.length} jüngsten`
+                : `${liste.length} Erinnerungen`;
+
+        // Der Server liefert den Bestand in Speicherreihenfolge (älteste
+        // zuerst). Für den Blick von oben nach unten ist das Neueste oben
+        // richtig – was zuletzt gelernt wurde, interessiert zuerst.
+        for (const m of liste.slice().reverse()) {
+            const zeile = document.createElement('div');
+            zeile.className = 'memory-row';
+
+            const text = document.createElement('div');
+            text.className = 'memory-text';
+            text.innerHTML = escapeHtml(m.content || '');
+            zeile.appendChild(text);
+
+            const kopf = document.createElement('div');
+            kopf.className = 'memory-meta';
+            const teile = [];
+            const art = { fact: 'Fakt', preference: 'Vorliebe', context: 'Zusammenhang', project: 'Vorhaben' };
+            if (m.category) teile.push(art[m.category] || m.category);
+            if (m.timestamp) teile.push(String(m.timestamp).slice(0, 10));
+            const wichtig = Number(m.importance || 0);
+            if (wichtig >= 4) teile.push('wichtig');
+            kopf.innerHTML = escapeHtml(teile.join(' · '));
+            zeile.appendChild(kopf);
+
+            const weg = document.createElement('button');
+            weg.type = 'button';
+            weg.className = 'memory-del';
+            weg.textContent = 'Entfernen';
+            weg.title = 'Diesen Eintrag aus dem Gedächtnis löschen';
+            weg.addEventListener('click', () => loescheErinnerung(m.id, weg));
+            zeile.appendChild(weg);
+
+            dom.memoryList.appendChild(zeile);
+        }
+    } catch (err) {
+        // Ein Fehlschlag muss sichtbar sein – sonst hielte man ein leeres
+        // Blatt für ein leeres Gedächtnis.
+        dom.memoryHint.textContent = 'Erinnerungen nicht abrufbar – läuft der Server?';
+        console.warn('Erinnerungen laden:', err);
+    }
+}
+
+/** Löscht einen Eintrag. Meldet einen Fehlschlag sichtbar (nie stiller Erfolg). */
+async function loescheErinnerung(id, knopf) {
+    if (!id) return;                       // nie eine leere Kennung senden
+    if (!window.confirm('Diesen Eintrag wirklich aus dem Gedächtnis entfernen?')) return;
+    knopf.disabled = true;
+    try {
+        const res = await fetch(`${API_BASE}/api/memory/${encodeURIComponent(id)}`,
+                                { method: 'DELETE' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        await zeichneErinnerungen();
+    } catch (err) {
+        knopf.disabled = false;
+        dom.memoryHint.textContent =
+            `Entfernen fehlgeschlagen (${err.message}) – der Eintrag ist noch da.`;
+        console.warn('Erinnerung löschen:', err);
+    }
+}
+
+function oeffneGedaechtnisBlatt() {
+    dom.memorySheet.hidden = false;
+    zeichneErinnerungen();
+}
+
+function schliesseGedaechtnisBlatt() {
+    dom.memorySheet.hidden = true;
+}
+
+async function stelleVerlaufWiederHer() {
+    // 1) ZUERST der gemerkte Chat (localStorage). Er bestimmt, was zu sehen
+    //    ist — nach jedem Neuladen derselbe Inhalt, dieselbe Reihenfolge.
+    //
+    // WICHTIG (Fix 2026-08): Bei einem Netzwerk-Fehlschlag wird die gemerkte
+    // Kennung NICHT gelöscht (sonst entstand eine neue leere Conversation).
+    //
+    // WICHTIG (Fix 2026-09-25): KEIN stiller Rückfall auf „irgendeinen"
+    // Verlauf mehr. Vorher wurde bei jedem Fehlschlag das JÜNGSTE Gespräch
+    // geladen — und das war je nach Lage conv_code (der Programmier-Chat).
+    // Genau so kam „auf einmal was ganz anderes".
+    if (state.conversationId) {
+        const ergebnis = await zeigeGespraech(state.conversationId);
+        if (ergebnis === true) { setzeChatButtonStatus(); return; }
+        if (ergebnis === 'nicht_gefunden' || ergebnis === 'ueberholt') return;
+        // Server nicht erreichbar o. Ä.: ehrlich melden, Kennung behalten.
+        zeigeVerlaufLadefehler(state.conversationId);
+        return;
+    }
+
+    // 2) Kein Chat gemerkt (neues Gerät / geleerter Browserspeicher): den
+    //    nächstliegenden Chat öffnen — und SICHTBAR sagen, dass das passiert.
+    const liste = await holeGespraechsListe();
+    const start = waehleStartChat(liste);
+    if (!start) { setzeChatAnzeige(null, 0); return; }
+    if (await zeigeGespraech(start.id) === true) {
+        setzeChatAnzeige(start.id, undefined, undefined,
+            'automatisch geöffnet (kein Chat gemerkt)');
+    }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    setWebSearch(state.webSearch);   // gespeicherten Wunsch wiederherstellen
+    setModelLabel();                 // zeigt vorerst die gespeicherte Wahl
+    setPrivacy(state.noRetention);   // Riegel-Zustand wiederherstellen
+    startHealthChecks();
+    // Frischer Start = frischer Chat-Zustand: Der flüchtige Bild-Cache
+    // (10-Minuten-RAM im Backend) wird verworfen, damit kein Bild aus einer
+    // früheren Sitzung in die erste Frage rutscht (Fix 2026-09-25).
+    verwerfeBildCache();
+    stelleVerlaufWiederHer();
+    if (typeof starteHermesPoll === 'function') starteHermesPoll();
+    aktualisiereStatusAnzeige();
+    // Status-Badge beim Start zuruecksetzen: das hartkodierte „🟢 Agent“ im
+    // HTML (falls ueberhaupt geladen) wird durch den echten Zustand ersetzt
+    // bzw. im Ruhezustand ausgeblendet. (Fix: vorher blieb ein gruener
+    // „Agent“ stehen, obwohl Hermes arbeitete.)
+    dom.input.focus();
+    updateSendButton();
+    // Katalog im Hintergrund holen: Danach steht der richtige Anzeigename am
+    // Knopf, und das Blatt geht beim ersten Antippen ohne Wartezeit auf.
+    ladeKatalog();
+});
+// =========================================
+// Selbsttest – Zustand des Systems ohne Kabel ablesbar
+// =========================================
+// Der Nutzer läuft auf dem Handy in Termux und hat unterwegs kein ADB. Er
+// sieht nur, was die App selbst zeigt. Dieses Blatt holt GET /api/selbsttest
+// und zeigt das JSON als deutsche Klartext-Zeilen mit ✓/⚠/✗ — so lässt sich
+// der Zustand als Bildschirmfoto per Telegram teilen.
+//
+// Bewusst KEIN Auto-Polling: Der Selbsttest lädt beim Öffnen und danach nur
+// auf Knopfdruck (Aktualisieren). Er prüft lokal (git, Dateien, Prozesse) und
+// seit dem 27.09.2026 zusätzlich LESEND den pCloud-Zugang (Konto maskiert,
+// Quota/Belegung über das Backend) — kein Sprachmodell, kein Anbieter, kein
+// Schreibzugriff auf die Cloud.
+
+/** Reine Umwandlung Selbsttest-JSON -> Klartext (ohne DOM, damit testbar).
+ *
+ *  Jede Zeile beginnt mit ✓ (in Ordnung), ⚠ (auffällig / nicht feststellbar)
+ *  oder ✗ (Fehler / fehlt). Fehlende Felder lösen KEINEN Absturz aus: Was
+ *  nicht da ist, wird als ✗- oder ⚠-Zeile ausgewiesen. Rückgabe ist ein
+ *  String mit Zeilenumbrüchen (für ein <pre>).
+ */
+function selbsttestText(daten) {
+    const d = (daten && typeof daten === 'object') ? daten : {};
+    const zeilen = [];
+    // t(): null/undefined/'' -> '', sonst Text. zahl(): fehlende Zahl -> '?'.
+    const t = (v) => (v === null || v === undefined || v === '') ? '' : String(v);
+    const zahl = (v) => (v === null || v === undefined) ? '?' : String(v);
+
+    // Kopfzeile: Serverzeit (für die Prüfung der Zeitstempel).
+    const uhr = d.uhrzeit || {};
+    zeilen.push('Selbsttest · Serverzeit: ' + (t(uhr.lokal) || 'unbekannt')
+        + (t(uhr.zeitzone) ? ' (' + t(uhr.zeitzone) + ')' : ''));
+
+    // Letzter Commit im Repo.
+    const c = d.commit || {};
+    if (c.ok && t(c.zeile)) zeilen.push('✓ Commit: ' + t(c.zeile));
+    else zeilen.push('✗ Commit: ' + (t(c.error) || 'nicht ermittelbar'));
+
+    // Archiv-Index: Größe und Zähler; Zählfehler nur ein Warnzeichen.
+    const i = d.index || {};
+    if (i.existiert) {
+        const text = 'Archiv-Index: ' + zahl(i.groesse_mb) + ' MB · '
+            + zahl(i.nachrichten) + ' Nachrichten · ' + zahl(i.chunks) + ' Abschnitte';
+        zeilen.push((i.error ? '⚠ ' : '✓ ') + text + (i.error ? ' · ' + t(i.error) : ''));
+    } else {
+        zeilen.push('✗ Archiv-Index: ' + (t(i.error) || 'fehlt'));
+    }
+
+    // Inbox-Daemon: läuft / läuft NICHT / nicht feststellbar, plus Log-Kennzahlen.
+    const dm = d.daemon || {};
+    const dmText = 'Inbox-Daemon: ' + (dm.laeuft === true ? 'läuft'
+        : (dm.laeuft === false ? 'läuft NICHT' : 'nicht feststellbar'));
+    const dmZusatz = [];
+    if (dm.log_groesse_bytes !== null && dm.log_groesse_bytes !== undefined) {
+        dmZusatz.push('Log ' + Math.round(Number(dm.log_groesse_bytes) / 1024) + ' KB');
+    }
+    if (dm.log_alter_s !== null && dm.log_alter_s !== undefined) {
+        dmZusatz.push('zuletzt vor ' + Math.round(Number(dm.log_alter_s)) + ' s');
+    }
+    const dmZeilen = Array.isArray(dm.log_letzte_zeilen) ? dm.log_letzte_zeilen : [];
+    if (dmZeilen.length) {
+        dmZusatz.push('letzte Zeile: ' + t(dmZeilen[dmZeilen.length - 1]));
+    }
+    zeilen.push((dm.laeuft === true ? '✓ ' : '⚠ ') + dmText
+        + (dmZusatz.length ? ' · ' + dmZusatz.join(' · ') : '')
+        + (dm.error ? ' · ' + t(dm.error) : ''));
+
+    // Letzte Antwort/Status: Länge + bewusst gekürzter Auszug.
+    const la = d.letzte_antwort || {};
+    for (const eintrag of [['antworten', 'antworten.jsonl'], ['status', 'status.jsonl']]) {
+        const b = la[eintrag[0]] || {};
+        if (b.existiert) {
+            zeilen.push((b.error ? '⚠' : '✓') + ' Letzte ' + eintrag[1] + ': '
+                + zahl(b.zeilen) + ' Zeilen · ' + zahl(b.laenge) + ' Zeichen'
+                + (b.error ? ' · ' + t(b.error) : '')
+                + (t(b.auszug) ? '\n   „' + t(b.auszug) + '“' : ''));
+        } else {
+            zeilen.push('✗ Letzte ' + eintrag[1] + ': ' + (t(b.error) || 'fehlt'));
+        }
+    }
+
+    // Erinnerungen (Gedächtnis) – derselbe Zählwert wie /api/memory/count.
+    const g = d.gedaechtnis || {};
+    zeilen.push((g.error ? '✗ ' : '✓ ') + 'Erinnerungen: ' + zahl(g.anzahl)
+        + (g.error ? ' · ' + t(g.error) : ''));
+
+    // Sprache: Kette der Erkennungsmodelle und ob die Wege registriert sind.
+    const sp = d.sprache || {};
+    const modelle = Array.isArray(sp.modelle) ? sp.modelle : [];
+    const kette = modelle.length ? modelle.join(' → ') : 'keine Modelle gemeldet';
+    const wege = (sp.transcribe_registriert ? 'Erkennung ✓' : 'Erkennung ✗')
+        + ', ' + (sp.speak_registriert ? 'Sprachausgabe ✓' : 'Sprachausgabe ✗');
+    zeilen.push((sp.error ? '⚠ ' : '✓ ') + 'Sprache: ' + kette + ' · ' + wege
+        + (sp.error ? ' · ' + t(sp.error) : ''));
+
+    // pCloud (nur lesend): Ist ein Schlüssel hinterlegt, und antwortet das
+    // Konto? Der Schlüssel selbst erscheint NIE im Text — vom Konto nur die
+    // Maske (erste 2 + letzte 4 Zeichen, kommt schon maskiert vom Server).
+    const pc = d.pcloud || {};
+    if (!pc.konfiguriert) {
+        zeilen.push('⚠ pCloud: nicht eingerichtet (kein PCLOUD_TOKEN hinterlegt)');
+    } else if (t(pc.error)) {
+        zeilen.push('⚠ pCloud: ' + t(pc.error));
+    } else {
+        const konto = t(pc.konto);
+        zeilen.push('✓ pCloud verbunden (' + (konto ? 'Konto ' + konto + ', ' : '')
+            + zahl(pc.quota_gb) + ' GB, belegt ' + zahl(pc.belegt_gb) + ' GB)');
+    }
+
+    // Fotos-Übersicht (N11): Zahlen und Stand aus einer kleinen lokalen Datei —
+    // der einzige Ort, an dem die Sortier-Zahlen auch am Handy ablesbar sind.
+    // Fehlt die Datei, steht der Grund als ✗ da; Teilangaben sind ⚠, nie NaN.
+    const fo = d.fotos || {};
+    if (!fo.existiert) {
+        zeilen.push('✗ Fotos: ' + (t(fo.error) || 'fehlt'));
+    } else {
+        const foTeile = [];
+        if (fo.anlaesse !== null && fo.anlaesse !== undefined) foTeile.push(zahl(fo.anlaesse) + ' Anlässe');
+        if (fo.events !== null && fo.events !== undefined) foTeile.push(zahl(fo.events) + ' Events');
+        if (fo.dateien !== null && fo.dateien !== undefined) foTeile.push(zahl(fo.dateien) + ' Dateien');
+        if (fo.jahre !== null && fo.jahre !== undefined) foTeile.push(zahl(fo.jahre) + ' Jahre');
+        const foZusatz = [];
+        if (t(fo.stand)) foZusatz.push('Stand ' + t(fo.stand));
+        if (t(fo.quelle)) foZusatz.push('Quelle ' + t(fo.quelle));
+        const foVollstaendig = foTeile.length === 4 && !t(fo.error);
+        zeilen.push((foVollstaendig ? '✓ ' : '⚠ ') + 'Fotos: '
+            + (foTeile.length ? foTeile.join(' · ') : 'keine Zahlen gemeldet')
+            + (foZusatz.length ? ' (' + foZusatz.join(', ') + ')' : '')
+            + (t(fo.error) ? ' · ' + t(fo.error) : ''));
+    }
+
+    // Abgewiesene Anfragen seit dem Start (P0): fremde Webseiten (cross-site,
+    // same-site, origin) oder ein Host-Name, der nicht freigegeben ist (host).
+    // Fehlt das Feld (älteres Backend), entfällt die Zeile.
+    const ab = d.abgewiesen;
+    if (ab && typeof ab === 'object') {
+        const abTeile = Object.keys(ab).sort().map((g) => g + ' ' + zahl(ab[g]));
+        zeilen.push(abTeile.length
+            ? '⚠ Abgewiesen seit Start: ' + abTeile.join(' · ')
+            : '✓ Abgewiesen seit Start: keine');
+    }
+
+    // Tagesimport (C3): Schalter, letzter Lauf. Fehlt das Feld (aelteres Backend), entfaellt die Zeile.
+    const tl = d.tageslauf;
+    if (tl && typeof tl === 'object') {
+        if (t(tl.error)) {
+            zeilen.push('⚠ Tagesimport: ' + t(tl.error));
+        } else if (tl.an !== true) {
+            zeilen.push('✓ Tagesimport: aus' + (tl.einstellungen_lesbar === false ? ' (Einstellungen nicht lesbar)' : ''));
+        } else {
+            const tlTeile = ['an'];
+            tlTeile.push(tl.heute_gelaufen === true ? 'heute gelaufen' : 'heute noch nicht gelaufen');
+            if (t(tl.letzter_lauf)) tlTeile.push('letzter Lauf ' + t(tl.letzter_lauf)
+                + (tl.letzter_exit !== null && tl.letzter_exit !== undefined ? ' (Exit ' + t(tl.letzter_exit) + ')' : ''));
+            if (tl.kamera_gesetzt !== true) tlTeile.push('Kamera-Ordner nicht eingerichtet');
+            const tlGut = tl.heute_gelaufen === true && tl.letzter_exit === 0 && tl.bericht_veraltet !== true;
+            zeilen.push((tlGut ? '✓ ' : '⚠ ') + 'Tagesimport: ' + tlTeile.join(' · '));
+        }
+    }
+
+    return zeilen.join('\n');
+}
+
+/** Schreibt den fertigen Text in das Blatt (reine Anzeige, kein HTML). */
+function zeigeSelbsttest(klartext) {
+    if (dom.selbsttestText) dom.selbsttestText.textContent = klartext;
+}
+
+/** Holt GET /api/selbsttest und zeigt ihn als Klartext. Nur auf Knopfdruck/beim Öffnen. */
+async function ladeSelbsttest() {
+    ladeTageslauf();
+    if (!dom.selbsttestText) return;
+    dom.selbsttestText.textContent = 'Prüfe …';
+    if (dom.selbsttestHint) {
+        dom.selbsttestHint.textContent =
+            'Prüft lokal (git, Dateien, Prozesse) und das pCloud-Konto (nur lesend).';
+    }
+    try {
+        const res = await fetch(`${API_BASE}/api/selbsttest`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const daten = await res.json();
+        zeigeSelbsttest(selbsttestText(daten));
+    } catch (err) {
+        // Ehrlich melden statt leer lassen – sonst hielte man ein leeres Blatt
+        // für einen gesunden Zustand.
+        zeigeSelbsttest('✗ Selbsttest nicht abrufbar – läuft der Server?\n   ' + err.message);
+        console.warn('Selbsttest:', err);
+    }
+}
+
+function oeffneSelbsttestBlatt() {
+    if (!dom.selbsttestSheet) return;
+    dom.selbsttestSheet.hidden = false;
+    ladeSelbsttest();
+}
+
+function schliesseSelbsttestBlatt() {
+    if (dom.selbsttestSheet) dom.selbsttestSheet.hidden = true;
+}
+
+// ── Hermes Live-Status (unabhängiger Poller, zeigt Hermes-Gedanken live) ──
+// REINE Auswahl (28.09.2026): Welcher Auftrag gehört in den Balken?
+// Vorher: jeder je "offen" gebliebene Auftrag stand für immer oben, und es
+// wurde der ÄLTESTE gezeigt (Liste kommt neueste-zuerst). Jetzt: nur offen/
+// laufend, zuletzt aktiv innerhalb von `maxAlterMs`, nicht weggeklickt, und
+// davon der NEUESTE. Letzte Aktivität = Zeit der letzten Statusmeldung, sonst
+// `erstellt`.
+function hermesLiveJobWaehlen(jobs, jetztMs, ausgeblendet, maxAlterMs) {
+    const grenze = typeof maxAlterMs === 'number' ? maxAlterMs : 30 * 60 * 1000;
+    const weg = ausgeblendet || [];
+    function aktivMs(job) {
+        const meldungen = Array.isArray(job.status_meldungen) ? job.status_meldungen : [];
+        let zeit = job.erstellt || '';
+        if (meldungen.length) {
+            const letzte = meldungen[meldungen.length - 1];
+            const m = (typeof letzte === 'string') ? letzte.match(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?([+-]\d{2}:\d{2}|Z)?/) : null;
+            if (m) zeit = m[0];
+        }
+        const ms = Date.parse(String(zeit).replace(' ', 'T'));
+        return isNaN(ms) ? 0 : ms;
+    }
+    const kandidaten = (Array.isArray(jobs) ? jobs : []).filter(j =>
+        j && (j.status === 'offen' || j.status === 'laeuft')
+        && weg.indexOf(j.id) === -1
+        && (jetztMs - aktivMs(j)) <= grenze);
+    if (!kandidaten.length) return null;
+    return kandidaten.reduce((a, b) => (aktivMs(b) > aktivMs(a) ? b : a));
+}
+
+// REINE Beschriftung des Live-Balkens (S7b, 18.10.2026).
+// Befund der Betreiber: Der Balken stand ewig auf „wartet" und behauptete damit
+// eine Bearbeitung, die es nicht gab. Der Zustand des Auftrags sagt die
+// Wahrheit, also nennt die Beschriftung genau ihn: 'laeuft' = es arbeitet
+// gerade jemand daran, 'offen' = die Aufgabe liegt bereit und gerade arbeitet
+// niemand. Unbekannte Zustände werden NICHT als "arbeitet" ausgegeben.
+// Ohne DOM testbar (frontend/tests/test_live_status_indikator.js).
+function hermesLiveIndikator(status) {
+    if (status === 'laeuft') return '⚡ arbeitet';
+    if (status === 'fertig') return '✅ fertig';
+    if (status === 'fehler') return '❌ fehler';
+    return '⏳ liegt bereit';
+}
+
+(function() {
+    const container = document.getElementById('hermes-live-status');
+    const msgDiv = document.getElementById('hermes-live-msg');
+    const meldungenDiv = document.getElementById('hermes-live-meldungen');
+    const indicator = document.getElementById('hermes-live-indicator');
+    if (!container) return;
+
+    let letzteId = '';
+    let letzteAnzahl = 0;
+    let aktuelleJobId = '';
+    const WEG_SCHLUESSEL = 'hermesLiveAusgeblendet';
+    function ausgeblendetLesen() {
+        try { return JSON.parse(localStorage.getItem(WEG_SCHLUESSEL) || '[]'); } catch (_) { return []; }
+    }
+    // × zum Wegklicken: merkt sich die Auftrags-Kennung (nur dieser Browser).
+    const wegBtn = document.createElement('button');
+    wegBtn.id = 'hermes-live-schliessen';
+    wegBtn.type = 'button';
+    wegBtn.title = 'Ausblenden';
+    wegBtn.setAttribute('aria-label', 'Hermes-Status ausblenden');
+    wegBtn.textContent = '×';
+    wegBtn.style.cssText = 'margin-left:8px;background:none;border:none;color:#8f8;font-size:18px;cursor:pointer;line-height:1';
+    if (indicator && indicator.parentNode) indicator.parentNode.appendChild(wegBtn);
+    wegBtn.addEventListener('click', () => {
+        const weg = ausgeblendetLesen();
+        if (aktuelleJobId && weg.indexOf(aktuelleJobId) === -1) weg.push(aktuelleJobId);
+        try { localStorage.setItem(WEG_SCHLUESSEL, JSON.stringify(weg.slice(-50))); } catch (_) { /* egal */ }
+        container.style.display = 'none';
+    });
+
+    async function pollHermes() {
+        try {
+            const res = await fetch('/api/auftraege');
+            if (!res.ok) { container.style.display = 'none'; _setzeHermesAussen(false); return; }
+            const data = await res.json();
+            const jobs = data.auftraege || [];
+            const job = hermesLiveJobWaehlen(jobs, Date.now(), ausgeblendetLesen());
+            if (!job) {
+                container.style.display = 'none';
+                _setzeHermesAussen(false);
+                return;
+            }
+            _setzeHermesAussen(true);
+            aktuelleJobId = job.id;
+            const id = job.id.substring(0, 8);
+            const meldungen = job.status_meldungen || [];
+            const status = job.status;
+
+            container.style.display = 'block';
+            indicator.textContent = hermesLiveIndikator(status);
+
+            if (id !== letzteId || meldungen.length > letzteAnzahl) {
+                if (id !== letzteId) {
+                    letzteAnzahl = 0;
+                    meldungenDiv.innerHTML = '';
+                }
+                // Neue Meldungen seit letztem Check
+                for (let i = letzteAnzahl; i < meldungen.length; i++) {
+                    const div = document.createElement('div');
+                    div.style.cssText = 'padding:4px 6px;margin:2px 0;background:#222;border-radius:4px;font-size:12px;white-space:pre-wrap;border-left:2px solid #0f0';
+                    const { text: htext, zeitIso } = zerlegeHermesMeldung(meldungen[i]);
+                    div.textContent = htext;
+                    if (zeitIso) {
+                        const z = document.createElement('span');
+                        z.style.cssText = 'display:block;font-size:0.65rem;color:#9a9a9a;margin-top:2px';
+                        z.textContent = formatZeit(zeitIso);
+                        div.appendChild(z);
+                    }
+                    meldungenDiv.appendChild(div);
+                }
+                letzteAnzahl = meldungen.length;
+                letzteId = id;
+
+                // Scroll to bottom
+                if (typeof scrollToBottom === 'function') scrollToBottom(true);
+            }
+
+            if (status === 'fertig' || status === 'fehler') {
+                indicator.textContent = hermesLiveIndikator(status);
+                setTimeout(() => { container.style.display = 'none'; }, 30000);
+            }
+        } catch(_) { /* Server kurz weg */ _setzeHermesAussen(false); }
+    }
+
+    // Alle 3s polln
+    pollHermes();
+    setInterval(pollHermes, 3000);
+})();
+
+// ── Hintergrund-Leiste (10.10.2026) ─────────────────────────────────────────
+// Statuszeile (index.html #hintergrund-leiste), seit 20.10.2026 (Wunsch
+// der Betreiber: "alles unter Checks im Menue verstecken") im Fenster "Checks"
+// (#selbsttest-sheet) statt am oberen Rand; der Takt laeuft auch bei
+// geschlossenem Fenster weiter. Zeigt, welche Hintergrundarbeit laeuft — Name, seit wann,
+// antippbar fuer Einzelheiten; ohne Arbeit "Keine Hintergrundarbeit".
+// Quelle: GET /api/laeuft (backend/app/router/laeuft.py; angemeldete
+// Backend-Arbeiten, laufende Auftraege, Protokolldateien). Deutsch, ohne
+// Symbole. Die reinen Text-Funktionen sind ohne DOM testbar
+// (frontend/tests/test_hintergrund_leiste.js).
+const HINTERGRUND_TAKT_MS = 15000;
+
+/** Dauer als Klartext: "weniger als eine Minute", "5 Minuten", "1 Stunde 20 Minuten". */
+function hintergrundDauerText(sekunden) {
+    const gesamt = Math.max(0, Math.floor(Number(sekunden) || 0));
+    if (gesamt < 60) return 'weniger als eine Minute';
+    const minuten = Math.floor(gesamt / 60);
+    if (minuten < 60) return minuten + (minuten === 1 ? ' Minute' : ' Minuten');
+    const stunden = Math.floor(minuten / 60);
+    const rest = minuten % 60;
+    return stunden + (stunden === 1 ? ' Stunde' : ' Stunden')
+        + (rest ? ' ' + rest + (rest === 1 ? ' Minute' : ' Minuten') : '');
+}
+
+/** Startzeit kurz: "14:03 Uhr" fuer heute, sonst "10.10. 14:03 Uhr". */
+function hintergrundZeitText(iso) {
+    const ms = Date.parse(String(iso || ''));
+    if (isNaN(ms)) return '';
+    const d = new Date(ms);
+    const zwei = (n) => (n < 10 ? '0' + n : '' + n);
+    const jetzt = new Date();
+    const gleichTag = d.getFullYear() === jetzt.getFullYear()
+        && d.getMonth() === jetzt.getMonth() && d.getDate() === jetzt.getDate();
+    const zeit = zwei(d.getHours()) + ':' + zwei(d.getMinutes()) + ' Uhr';
+    return gleichTag ? zeit : zwei(d.getDate()) + '.' + zwei(d.getMonth() + 1) + '. ' + zeit;
+}
+
+/** Kopfzeile: "Es läuft: <Name> seit <Dauer>" bzw. "Keine Hintergrundarbeit".
+ *  Gezählt werden NUR wirklich laufende Einträge (zustand 'laeuft') —
+ *  alte/stehende Protokolle dürfen nicht als "läuft" erscheinen; sie stehen
+ *  in den Einzelheiten. */
+function hintergrundKurzText(daten, jetztMs) {
+    const arbeiten = (daten && Array.isArray(daten.arbeiten)) ? daten.arbeiten : [];
+    const laufende = arbeiten.filter((a) => a && a.zustand === 'laeuft');
+    if (!laufende.length) return 'Keine Hintergrundarbeit';
+    const erste = laufende[0] || {};
+    const name = String(erste.name || 'Hintergrundarbeit');
+    let seit = '';
+    if (typeof erste.dauer_sekunden === 'number') {
+        seit = ' seit ' + hintergrundDauerText(erste.dauer_sekunden);
+    } else if (erste.seit) {
+        const ms = Date.parse(String(erste.seit));
+        if (!isNaN(ms) && typeof jetztMs === 'number') {
+            seit = ' seit ' + hintergrundDauerText((jetztMs - ms) / 1000);
+        }
+    }
+    if (laufende.length === 1) return 'Es läuft: ' + name + seit;
+    return 'Es laufen ' + laufende.length + ' Arbeiten: ' + name + seit;
+}
+
+/** Zustand als Klartext (englische Werte des Backends uebersetzt). */
+function hintergrundZustandText(zustand) {
+    if (zustand === 'laeuft') return 'läuft';
+    if (zustand === 'steht') return 'steht (keine neuen Zeilen)';
+    if (zustand === 'leer') return 'leer';
+    return String(zustand || 'unbekannt');
+}
+
+/** Einzelheiten (antippbar): je Arbeit Name, Zustand, Start, Dauer, Fortschritt, letzte Zeile.
+ *  Laufende zuerst, stehende danach (der Zustand steht in der Klammer). */
+function hintergrundEinzelheitenText(daten) {
+    const arbeiten = (daten && Array.isArray(daten.arbeiten)) ? daten.arbeiten : [];
+    if (!arbeiten.length) return '';
+    const sortiert = arbeiten.slice().sort((a, b) => {
+        const aLaeuft = a && a.zustand === 'laeuft' ? 0 : 1;
+        const bLaeuft = b && b.zustand === 'laeuft' ? 0 : 1;
+        return aLaeuft - bLaeuft;
+    });
+    const bloecke = sortiert.map((eintrag) => {
+        const e = eintrag || {};
+        const zeilen = [String(e.name || 'Hintergrundarbeit')
+            + ' (' + hintergrundZustandText(e.zustand) + ')'];
+        const start = hintergrundZeitText(e.seit);
+        if (start) zeilen.push('Start: ' + start);
+        if (typeof e.dauer_sekunden === 'number') {
+            zeilen.push('Dauer: ' + hintergrundDauerText(e.dauer_sekunden));
+        }
+        if (e.fortschritt) zeilen.push('Fortschritt: ' + String(e.fortschritt));
+        if (e.letzte_zeile) zeilen.push('Letzte Zeile: ' + String(e.letzte_zeile));
+        return zeilen.join('\n');
+    });
+    return bloecke.join('\n\n');
+}
+
+(function () {
+    const leiste = document.getElementById('hintergrund-leiste');
+    if (!leiste) return;
+    const textEl = document.getElementById('hintergrund-text');
+    const einzelheitenEl = document.getElementById('hintergrund-einzelheiten');
+    const kopfBtn = document.getElementById('hintergrund-kopf');
+    let offen = false;
+
+    function zeichnen(daten) {
+        const arbeiten = (daten && Array.isArray(daten.arbeiten)) ? daten.arbeiten : [];
+        const laufende = arbeiten.filter((a) => a && a.zustand === 'laeuft');
+        leiste.setAttribute('data-zustand', laufende.length ? 'arbeit' : 'ruhe');
+        if (textEl) textEl.textContent = hintergrundKurzText(daten, Date.now());
+        if (einzelheitenEl) einzelheitenEl.textContent = hintergrundEinzelheitenText(daten);
+    }
+
+    async function laden() {
+        try {
+            const res = await fetch(`${API_BASE}/api/laeuft`);
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            zeichnen(await res.json());
+        } catch (_) {
+            // Server kurz weg: ehrlich zeigen statt alte Angaben stehen zu
+            // lassen. Der naechste Takt versucht es wieder.
+            if (textEl) textEl.textContent = 'Hintergrund-Status gerade nicht abrufbar';
+            leiste.setAttribute('data-zustand', 'ruhe');
+        }
+    }
+
+    if (kopfBtn) {
+        kopfBtn.addEventListener('click', function () {
+            offen = !offen;
+            kopfBtn.setAttribute('aria-expanded', offen ? 'true' : 'false');
+            if (einzelheitenEl) einzelheitenEl.hidden = !offen;
+        });
+    }
+
+    // Sofort laden und dann regelmaessig selbst erneuern; beim Zurueckkommen
+    // in die App (Reiter war inaktiv) ebenfalls sofort.
+    laden();
+    setInterval(laden, HINTERGRUND_TAKT_MS);
+    document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) laden();
+    });
+})();
+
+// ── Server-Zustand (18.10.2026, To-do Punkt 12) ─────────────────────────────
+// Kleine Anzeige (index.html #server-zustand), seit 20.10.2026 (Wunsch
+// der Betreiber) im Fenster "Checks" (#selbsttest-sheet); der Zustand steckt
+// zusaetzlich im Roboter-Symbol im Kopf (#agent-face, zeichneAgentGesicht).
+// Der Takt laeuft auch bei geschlossenem Fenster weiter. Zeigt: laeuft der
+// Server, ist das Modell geladen, wie viele Erinnerungen gibt es, welcher
+// Stand laeuft. Quelle: GET /api/health
+// (backend/app/main.py, ausdruecklich von der Anmeldung ausgenommen).
+// Befund der Betreiber: "Kann ich gar nicht mehr ueberpruefen, ob der Server
+// laeuft." Ohne Haekchen-/Statussymbole: der Punkt traegt den Zustand, der Text
+// sagt ihn im Klartext. Die reinen Funktionen sind ohne DOM testbar
+// (frontend/tests/test_server_zustand.js).
+const SERVER_ZUSTAND_TAKT_MS = 5000;
+
+/** Zustand des Punktes: 'ok' (Server laeuft, Modell bereit), 'kein-modell'
+ *  (Server laeuft, Modell nicht geladen), 'weg' (keine brauchbare Antwort). */
+function serverZustandPunkt(daten) {
+    if (!daten || typeof daten !== 'object' || daten.status !== 'ok') return 'weg';
+    return daten.llm_configured ? 'ok' : 'kein-modell';
+}
+
+/** Klartext-Zeile: Server, Modell, Erinnerungen, Stand — ohne Symbole. */
+function serverZustandText(daten) {
+    if (!daten || typeof daten !== 'object' || daten.status !== 'ok') {
+        return 'Server nicht erreichbar';
+    }
+    const teile = ['Server läuft',
+        daten.llm_configured ? 'Modell bereit' : 'Modell nicht geladen'];
+    const roh = daten.memory_count;
+    if (typeof roh === 'number' && Number.isFinite(roh) && roh >= 0) {
+        teile.push(roh + (roh === 1 ? ' Erinnerung' : ' Erinnerungen'));
+    }
+    if (daten.version) teile.push('Stand ' + String(daten.version));
+    return teile.join(' · ');
+}
+
+(function () {
+    const kasten = document.getElementById('server-zustand');
+    if (!kasten) return;
+    const textEl = document.getElementById('server-zustand-text');
+
+    function zeichnen(daten) {
+        const zustand = serverZustandPunkt(daten);
+        kasten.setAttribute('data-zustand', zustand);
+        if (textEl) textEl.textContent = serverZustandText(daten);
+        // Roboter-Symbol im Kopf (20.10.2026): derselbe Zustand, auch bei
+        // geschlossenem Checks-Fenster; letzten Detailzustand fuer setOnline merken.
+        letzterServerDetail = zustand;
+        zeichneAgentGesicht(zustand);
+    }
+
+    async function laden() {
+        try {
+            const res = await fetch(`${API_BASE}/api/health`);
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            zeichnen(await res.json());
+        } catch (_) {
+            // Server weg oder Antwort unbrauchbar: ehrlich zeigen statt alte
+            // Angaben stehen zu lassen. Der naechste Takt versucht es wieder.
+            zeichnen(null);
+        }
+    }
+
+    laden();
+    setInterval(laden, SERVER_ZUSTAND_TAKT_MS);
+    document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) laden();
+    });
+})();
+
+// ── Server-Protokoll (18.10.2026, To-do Punkt 16) ────────────────────────────
+// Wunsch des Betreibers: „Früher war es so, dass in Termux der Server gesteuert
+// wurde und ich den Verlauf sehen konnte — die Prompts, eine Liste mit
+// Verbindungen, so ein Log. Das ist nicht mehr möglich." Ursache: der Server
+// läuft abgekoppelt, seine Ausgaben landeten nirgends. Jetzt schreibt er in ein
+// Protokoll (Startweg: termux/server-protokoll.sh → AGENT_SERVER_PROTOKOLL);
+// hier stehen die letzten Zeilen, dazu die Angaben aus /api/health und die
+// Knöpfe „Aktualisieren" und „Neu starten". Zugeklappt, damit der Chat Platz
+// behält; geladen wird nur, solange der Bereich offen ist.
+// Die reinen Funktionen sind ohne DOM testbar
+// (frontend/tests/test_server_protokoll.js). Geschrieben wird mit textContent
+// (nie innerHTML) — Protokollzeilen sind Fremdtext.
+const SERVER_PROTOKOLL_TAKT_MS = 5000;
+const SERVER_PROTOKOLL_ZEILEN = 200;
+const SERVER_PROTOKOLL_NEUSTART_MELDUNG =
+    'Stand wird geholt, Server startet neu — die Seite ist gleich wieder da.';
+
+/** Kopfzeile des Bereichs: Datei, Größe, Zahl der Zeilen — ehrlich, ohne Schmuck. */
+function serverProtokollStand(antwort) {
+    if (!antwort || typeof antwort !== 'object' || antwort.ok !== true) {
+        return 'Protokoll nicht abrufbar.';
+    }
+    const teile = [];
+    if (typeof antwort.pfad === 'string' && antwort.pfad) teile.push(antwort.pfad);
+    if (typeof antwort.groesse === 'number' && Number.isFinite(antwort.groesse) && antwort.groesse >= 0) {
+        const kb = antwort.groesse / 1024;
+        teile.push(kb.toFixed(1).replace('.', ',') + ' kB');
+    }
+    const anzahl = Array.isArray(antwort.zeilen) ? antwort.zeilen.length : 0;
+    teile.push(anzahl === 1 ? '1 Zeile' : anzahl + ' Zeilen');
+    if (antwort.gekappt) teile.push('nur das Dateiende gelesen');
+    if (antwort.eingeschaltet === false) teile.push('in diesem Start nicht eingeschaltet');
+    if (typeof antwort.hinweis === 'string' && antwort.hinweis) teile.push(antwort.hinweis);
+    return teile.join(' · ') || 'Keine Angaben zum Protokoll.';
+}
+
+/** Die anzuzeigenden Zeilen; ohne Inhalt steht der ehrliche Grund da. */
+function serverProtokollZeilenText(antwort) {
+    if (!antwort || typeof antwort !== 'object' || antwort.ok !== true) {
+        return ['Protokoll nicht abrufbar.'];
+    }
+    const zeilen = Array.isArray(antwort.zeilen)
+        ? antwort.zeilen.filter((z) => typeof z === 'string' && z.trim() !== '')
+        : [];
+    if (zeilen.length) return zeilen;
+    if (typeof antwort.hinweis === 'string' && antwort.hinweis) return [antwort.hinweis];
+    return ['Das Protokoll ist leer — der Server hat noch nichts geschrieben.'];
+}
+
+(function () {
+    const bereich = document.getElementById('server-protokoll');
+    const knopf = document.getElementById('server-protokoll-btn');
+    if (!bereich || !knopf) return;
+    const zeilenEl = document.getElementById('server-protokoll-zeilen');
+    const standEl = document.getElementById('server-protokoll-stand');
+    const statusEl = document.getElementById('server-protokoll-status');
+    const aktualisierenBtn = document.getElementById('server-protokoll-aktualisieren');
+    const neustartBtn = document.getElementById('server-protokoll-neustart');
+    let takt = null;
+
+    function zeichnen(daten) {
+        if (standEl) standEl.textContent = serverProtokollStand(daten);
+        if (zeilenEl) {
+            zeilenEl.textContent = serverProtokollZeilenText(daten).join('\n');
+            zeilenEl.scrollTop = zeilenEl.scrollHeight;
+        }
+    }
+
+    async function laden() {
+        try {
+            const res = await fetch(
+                `${API_BASE}/api/system/protokoll?zeilen=${SERVER_PROTOKOLL_ZEILEN}`,
+                { credentials: 'same-origin', cache: 'no-store' });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            zeichnen(await res.json());
+        } catch (_) {
+            zeichnen(null);
+        }
+    }
+
+    function taktStarten() {
+        if (!takt) takt = setInterval(laden, SERVER_PROTOKOLL_TAKT_MS);
+    }
+
+    function taktStoppen() {
+        if (takt) { clearInterval(takt); takt = null; }
+    }
+
+    function umschalten(offen) {
+        bereich.hidden = !offen;
+        knopf.setAttribute('aria-expanded', offen ? 'true' : 'false');
+        if (offen) { laden(); taktStarten(); } else { taktStoppen(); }
+    }
+
+    async function neuStarten() {
+        if (!neustartBtn) return;
+        neustartBtn.disabled = true;
+        if (statusEl) {
+            statusEl.hidden = false;
+            statusEl.textContent = SERVER_PROTOKOLL_NEUSTART_MELDUNG;
+        }
+        try {
+            const res = await fetch(`${API_BASE}/api/system/update`, {
+                method: 'POST', credentials: 'same-origin', cache: 'no-store' });
+            const daten = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                if (statusEl) {
+                    statusEl.textContent = 'Neustart nicht gestartet: '
+                        + (daten.detail || ('HTTP ' + res.status));
+                }
+                neustartBtn.disabled = false;
+                return;
+            }
+            if (statusEl) statusEl.textContent = daten.message || SERVER_PROTOKOLL_NEUSTART_MELDUNG;
+            // Bei Annahme bleibt der Knopf gesperrt: sonst startet ein zweiter
+            // Pull/Neustart, während der erste noch läuft.
+        } catch (_) {
+            if (statusEl) {
+                statusEl.textContent = 'Keine Antwort vom Server. '
+                    + 'Später nachsehen, ob er wieder erreichbar ist.';
+            }
+            neustartBtn.disabled = false;
+        }
+    }
+
+    knopf.addEventListener('click', () => umschalten(bereich.hidden));
+    if (aktualisierenBtn) aktualisierenBtn.addEventListener('click', laden);
+    if (neustartBtn) neustartBtn.addEventListener('click', neuStarten);
+    document.addEventListener('visibilitychange', function () {
+        if (!document.hidden && !bereich.hidden) laden();
+    });
+})();
+
+// ── Datenstand der Fotoquellen (18.10.2026, gesamtplan T0) ───────────────────
+// Auftrag: „Fotoquellen wirklich bis zum Handy nachweisen" — Ergebnis für
+// der Betreiber ist eine Statuszeile je Quelle: entpackt → Bildindex →
+// Gesichtserkennung → Gruppenbestand → auf diesem Handy. Gemessen wird vom
+// Server auf DIESEM Gerät (/api/datenstand/fotoquellen →
+// app/services/import_status.py); ein voller Lauf liest rund 250 MB, deshalb
+// gilt ein Stand für eine Weile und „Neu messen" misst ausdrücklich frisch.
+// Nur Zahlen und Klartext, keine Symbole; geschrieben wird mit
+// textContent/createElement (nie innerHTML). Die reinen Funktionen sind ohne
+// DOM testbar (frontend/tests/test_datenstand.js).
+const DATENSTAND_QUELLEN_NAMEN = {
+    fotos: 'Fotos',
+    bilder_und_videos: 'Bilder und Videos',
+    papas_album: 'Papas Album',
+    neuausrichtung: 'Neuausrichtung',
+    fotobuch: 'Fotobuch',
+};
+
+/** Eine Zahl für die Anzeige — ein fehlender Messwert heißt „nicht gemessen". */
+function datenstandZahl(wert) {
+    if (typeof wert !== 'number' || !Number.isFinite(wert)) return 'nicht gemessen';
+    return wert.toLocaleString('de-DE');
+}
+
+/** Kopfzeile: Stand, Dauer und woher der Wert kommt — ehrlich, ohne Schmuck. */
+function datenstandStand(antwort) {
+    if (!antwort || typeof antwort !== 'object' || antwort.ok !== true) {
+        return 'Datenstand nicht abrufbar.';
+    }
+    const teile = [];
+    if (typeof antwort.gelesen_am === 'string' && antwort.gelesen_am) {
+        teile.push('Stand ' + antwort.gelesen_am.replace('T', ' ').slice(0, 16));
+    }
+    if (typeof antwort.dauer_sekunden === 'number' && Number.isFinite(antwort.dauer_sekunden)) {
+        teile.push('Messung ' + antwort.dauer_sekunden.toFixed(1).replace('.', ',') + ' s');
+    }
+    teile.push(antwort.aus_cache ? 'aus dem Speicher' : 'gerade frisch gemessen');
+    if (typeof antwort.hinweis === 'string' && antwort.hinweis) teile.push(antwort.hinweis);
+    return teile.join(' · ');
+}
+
+/** Die anzuzeigenden Zeilen, je Quelle vier: Name und drei Zahlenzeilen. */
+function datenstandZeilen(antwort) {
+    if (!antwort || typeof antwort !== 'object' || antwort.ok !== true) {
+        return ['Datenstand nicht abrufbar.'];
+    }
+    const quellen = Array.isArray(antwort.quellen) ? antwort.quellen : [];
+    if (!quellen.length) return ['Keine Quelle gemeldet.'];
+    const zeilen = [];
+    quellen.forEach((q) => {
+        const quelle = (q && typeof q === 'object') ? q : {};
+        const typ = typeof quelle.quelle_typ === 'string' ? quelle.quelle_typ : '';
+        zeilen.push(DATENSTAND_QUELLEN_NAMEN[typ] || typ || 'Unbenannte Quelle');
+        zeilen.push('  im Plan ' + datenstandZahl(quelle.bilder_im_plan)
+            + ' · im Bildindex ' + datenstandZahl(quelle.bilder_im_index)
+            + ' · mit Gesichtslauf ' + datenstandZahl(quelle.bilder_mit_gesichtslauf));
+        zeilen.push('  erkannte Gesichter ' + datenstandZahl(quelle.erkannte_gesichter)
+            + ' · im Gruppenbestand ' + datenstandZahl(quelle.gesichter_im_gruppenbestand));
+        zeilen.push('  auf diesem Gerät geprüft: '
+            + (quelle.handy_stand_geprueft === true ? 'ja' : 'nein'));
+    });
+    const gruppen = antwort.gruppenbestand;
+    if (gruppen && typeof gruppen === 'object') {
+        zeilen.push('Gruppenbestand: ' + datenstandZahl(gruppen.gruppen) + ' Gruppen · '
+            + datenstandZahl(gruppen.benannt) + ' benannt · '
+            + datenstandZahl(gruppen.gesichter) + ' Gesichter');
+    }
+    const fehlend = Array.isArray(antwort.fehlende_werte)
+        ? antwort.fehlende_werte.filter((w) => typeof w === 'string' && w.trim() !== '')
+        : [];
+    if (fehlend.length) {
+        zeilen.push('Nicht gemessen: ' + fehlend.length
+            + (fehlend.length === 1 ? ' Wert' : ' Werte') + ' — ' + fehlend.slice(0, 6).join(', ')
+            + (fehlend.length > 6 ? ' …' : ''));
+    }
+    return zeilen;
+}
+
+(function () {
+    const bereich = document.getElementById('datenstand');
+    const knopf = document.getElementById('datenstand-btn');
+    if (!bereich || !knopf) return;
+    const standEl = document.getElementById('datenstand-stand');
+    const listeEl = document.getElementById('datenstand-liste');
+    const statusEl = document.getElementById('datenstand-status');
+    const neuBtn = document.getElementById('datenstand-neu');
+
+    function zeichnen(daten) {
+        if (standEl) standEl.textContent = datenstandStand(daten);
+        if (!listeEl) return;
+        listeEl.replaceChildren();
+        datenstandZeilen(daten).forEach((zeile) => {
+            const div = document.createElement('div');
+            div.textContent = zeile;
+            div.className = 'datenstand-zeile'
+                + (zeile.startsWith('  ') ? ' datenstand-wert' : ' datenstand-quelle');
+            listeEl.appendChild(div);
+        });
+    }
+
+    async function laden(frisch) {
+        if (statusEl) {
+            statusEl.hidden = false;
+            statusEl.textContent = frisch
+                ? 'Wird frisch gemessen — eine volle Messung kann dauern.'
+                : 'Wird geladen …';
+        }
+        if (neuBtn) neuBtn.disabled = true;
+        try {
+            const res = await fetch(
+                `${API_BASE}/api/datenstand/fotoquellen${frisch ? '?neu=true' : ''}`,
+                { credentials: 'same-origin', cache: 'no-store' });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            zeichnen(await res.json());
+            if (statusEl) statusEl.hidden = true;
+        } catch (_) {
+            zeichnen(null);
+            if (statusEl) {
+                statusEl.hidden = false;
+                statusEl.textContent = 'Keine Antwort vom Server.';
+            }
+        } finally {
+            if (neuBtn) neuBtn.disabled = false;
+        }
+    }
+
+    function umschalten(offen) {
+        bereich.hidden = !offen;
+        knopf.setAttribute('aria-expanded', offen ? 'true' : 'false');
+        if (offen) laden(false);
+    }
+
+    knopf.addEventListener('click', () => umschalten(bereich.hidden));
+    if (neuBtn) neuBtn.addEventListener('click', () => laden(true));
+})();
+
+// =========================================================================
+// Tagesimport im Checks-Fenster (26.10.2026, Schritt C3)
+// Das Werkzeug tools/handy/tageslauf.py holt einmal am Tag alles Lokale nach
+// (Standard AUS). Hier: Stand anzeigen, ein- und ausschalten, Kamera-Ordner
+// setzen, "Gemini-Export heute erledigt". Quelle: GET /api/tageslauf, Schreiben
+// ueber POST /api/tageslauf/einstellungen. Klartext ohne Symbole, Anzeige nur per
+// textContent. Der reine Teil (bis zur Marke unten) ist ohne DOM testbar:
+// frontend/tests/test_tageslauf_anzeige.js.
+// =========================================================================
+
+/** Kurznamen der Bausteine; der Gemini-Baustein des Berichts entfaellt in der
+ *  Anzeige, weil die Gemini-Zeile vom aktuellen Stand kommt (nicht vom letzten Lauf). */
+const TAGESLAUF_BAUSTEIN_NAMEN = { gemini: 'Gemini' };
+
+/** REINE Umwandlung Antwort von GET /api/tageslauf -> Klartext (Zeilen mit \n). */
+function tageslaufText(daten) {
+    if (!daten || typeof daten !== 'object' || daten.ok !== true) {
+        return 'Tagesimport nicht abrufbar.';
+    }
+    const zeilen = [];
+    const lesbar = daten.einstellungen_lesbar !== false;
+    zeilen.push('Tagesimport: ' + (daten.an === true ? 'an' : 'aus')
+        + (lesbar ? '' : ' (Einstellungen nicht lesbar)'));
+    const ordner = (daten.kamera_ordner && typeof daten.kamera_ordner === 'object') ? daten.kamera_ordner : {};
+    zeilen.push('Kamera-Ordner: ' + (ordner.gesetzt === true && typeof ordner.wert === 'string' && ordner.wert
+        ? ordner.wert : 'nicht eingerichtet'));
+    if (daten.an === true) {
+        zeilen.push('Heute: ' + (daten.heute_gelaufen === true ? 'schon gelaufen' : 'noch nicht gelaufen'));
+    }
+    const bericht = (daten.bericht && typeof daten.bericht === 'object') ? daten.bericht : null;
+    if (!bericht) {
+        zeilen.push('Letzter Lauf: noch keiner');
+    } else {
+        let kopf = 'Letzter Lauf: ' + (typeof bericht.datum === 'string' && bericht.datum ? bericht.datum : 'Datum unbekannt');
+        if (daten.bericht_veraltet === true) kopf += ' (nicht von heute)';
+        if (typeof bericht.exit === 'number') kopf += bericht.exit === 0 ? ' · in Ordnung' : ' · Exit ' + bericht.exit;
+        zeilen.push(kopf);
+        const liste = Array.isArray(bericht.bausteine) ? bericht.bausteine : [];
+        liste.forEach((b) => {
+            if (!b || typeof b !== 'object') return;
+            if (b.name === 'gemini') return;
+            const text = (typeof b.text === 'string' && b.text) ? b.text : (typeof b.name === 'string' ? b.name : '');
+            if (text) zeilen.push('  ' + text);
+        });
+    }
+    const gemini = (daten.gemini && typeof daten.gemini === 'object') ? daten.gemini : {};
+    if (gemini.faellig === false && typeof gemini.tage_seit_export === 'number') {
+        zeilen.push(TAGESLAUF_BAUSTEIN_NAMEN.gemini + ': letzter Export vor ' + gemini.tage_seit_export
+            + (gemini.tage_seit_export === 1 ? ' Tag' : ' Tagen'));
+    } else {
+        zeilen.push(TAGESLAUF_BAUSTEIN_NAMEN.gemini + ': Takeout-Export fällig (alle 2 Monate)');
+    }
+    return zeilen.join('\n');
+}
+
+/** REINE Beschriftung des Schalter-Knopfs. */
+function tageslaufSchalterText(daten) {
+    return (daten && typeof daten === 'object' && daten.an === true)
+        ? 'Tagesimport ausschalten' : 'Tagesimport einschalten';
+}
+
+/** REINE Rueckmeldung nach erfolgreichem Speichern (`was` = gesendetes Feld). */
+function tageslaufGespeichertText(was, daten) {
+    const d = (daten && typeof daten === 'object') ? daten : null;
+    if (d && was === 'an') return 'Gespeichert: Tagesimport ist jetzt ' + (d.an === true ? 'an.' : 'aus.');
+    if (d && was === 'kamera_ordner' && d.kamera_ordner && typeof d.kamera_ordner.wert === 'string') {
+        return 'Gespeichert: Kamera-Ordner ' + d.kamera_ordner.wert;
+    }
+    if (d && was === 'gemini_export_heute') return 'Gespeichert: Gemini-Export für heute eingetragen.';
+    return 'Gespeichert.';
+}
+
+/** REINE Fehlermeldung (`detail` = Text des Servers, falls vorhanden). */
+function tageslaufFehlerText(status, detail) {
+    if (typeof detail === 'string' && detail.trim()) {
+        return detail.indexOf('Nicht gespeichert') === 0 ? detail : 'Nicht gespeichert: ' + detail;
+    }
+    if (typeof status === 'number') return 'Nicht gespeichert (HTTP ' + status + ').';
+    return 'Nicht gespeichert: keine Antwort vom Server.';
+}
+
+// ── Tageslauf: Anzeige und Bedienung (nicht rein: DOM und Netz) ────────────
+
+let _tageslaufDaten = null;
+let _tageslaufBeschaeftigt = false;
+
+function _tageslaufEl(id) { return document.getElementById(id); }
+
+function zeigeTageslauf(daten) {
+    _tageslaufDaten = daten;
+    const text = _tageslaufEl('tageslauf-text');
+    const stand = _tageslaufEl('tageslauf-stand');
+    const schalter = _tageslaufEl('tageslauf-schalter');
+    const ordner = _tageslaufEl('tageslauf-ordner');
+    if (text) text.textContent = tageslaufText(daten);
+    if (stand) stand.textContent = (daten && daten.ok === true && typeof daten.heute === 'string')
+        ? 'Stand vom ' + daten.heute : 'Tagesimport';
+    if (schalter) schalter.textContent = tageslaufSchalterText(daten);
+    // Ein Wert, den der Betreiber gerade tippt, wird nie ueberschrieben.
+    if (ordner && document.activeElement !== ordner && daten && daten.ok === true && daten.kamera_ordner) {
+        ordner.value = typeof daten.kamera_ordner.wert === 'string' ? daten.kamera_ordner.wert : '';
+    }
+}
+
+function _tageslaufMeldung(text) {
+    const el = _tageslaufEl('tageslauf-status');
+    if (!el) return;
+    el.textContent = text;
+    el.hidden = !text;
+}
+
+function _tageslaufSperren(gesperrt) {
+    _tageslaufBeschaeftigt = gesperrt;
+    ['tageslauf-schalter', 'tageslauf-ordner-speichern', 'tageslauf-gemini'].forEach((id) => {
+        const el = _tageslaufEl(id);
+        if (el) el.disabled = gesperrt;
+    });
+}
+
+/** Holt GET /api/tageslauf. Beim Oeffnen und Aktualisieren des Checks-Fensters, kein Polling. */
+async function ladeTageslauf() {
+    if (!_tageslaufEl('tageslauf-block') || _tageslaufBeschaeftigt) return;
+    try {
+        const res = await fetch(`${API_BASE}/api/tageslauf`, { credentials: 'same-origin', cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        zeigeTageslauf(await res.json());
+    } catch (_) {
+        zeigeTageslauf(null);
+        _tageslaufMeldung('Tagesimport: keine Antwort vom Server.');
+    }
+}
+
+/** Sendet ein Feld an POST /api/tageslauf/einstellungen und meldet das Ergebnis klar zurueck. */
+async function speichereTageslauf(was, koerper) {
+    if (_tageslaufBeschaeftigt) return;
+    _tageslaufSperren(true);
+    _tageslaufMeldung('Wird gespeichert …');
+    try {
+        const res = await fetch(`${API_BASE}/api/tageslauf/einstellungen`, {
+            method: 'POST', credentials: 'same-origin', cache: 'no-store',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(koerper),
+        });
+        const antwort = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            _tageslaufMeldung(tageslaufFehlerText(res.status, antwort && antwort.detail));
+            return;
+        }
+        zeigeTageslauf(antwort);
+        _tageslaufMeldung(tageslaufGespeichertText(was, antwort));
+    } catch (_) {
+        _tageslaufMeldung(tageslaufFehlerText(undefined, undefined));
+    } finally {
+        _tageslaufSperren(false);
+    }
+}
+
+(function () {
+    const schalter = _tageslaufEl('tageslauf-schalter');
+    const speichern = _tageslaufEl('tageslauf-ordner-speichern');
+    const gemini = _tageslaufEl('tageslauf-gemini');
+    const ordner = _tageslaufEl('tageslauf-ordner');
+    if (schalter) schalter.addEventListener('click', () => {
+        const an = !(_tageslaufDaten && _tageslaufDaten.an === true);
+        speichereTageslauf('an', { an: an });
+    });
+    if (speichern && ordner) speichern.addEventListener('click', () => {
+        speichereTageslauf('kamera_ordner', { kamera_ordner: ordner.value });
+    });
+    if (ordner && speichern) ordner.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); speichern.click(); }
+    });
+    if (gemini) gemini.addEventListener('click', () => {
+        speichereTageslauf('gemini_export_heute', { gemini_export_heute: true });
+    });
+})();
+// ── Ende Tageslauf
+
+// =========================================
+// (Kanban-Board/Auftragsbuch-Anzeige entfernt – der Betreiber nutzt den
+//  Assistenten direkt über Hermes, kein sichtbares Auftragskonzept mehr.)
+
+// =========================================================================
+// N13b — Bilder im Chat: Anzeige (Galerie + Diashow)
+// Auftrag: docs/auftrag-n13b-bilder-anzeige.md, Schritt N13b des Nachtlaufs.
+// Vorgänger N13a liefert GET /api/fotos/bilder (Kennungen je Event).
+//
+// HARTE REGEL: Die Bilder werden NUR kurzlebig gezeigt — fetch -> Blob ->
+// Objekt-URL — und die Objekt-URL wird beim Wechsel und beim Schliessen
+// wieder freigegeben. Es wird NICHTS dauerhaft abgelegt: keine Speicher-API
+// des Browsers (kein Dauer-Speicher im Geraet) und kein Cache des
+// Service Workers — der /api/-Zweig in sw.js ist netzwerk-zuerst und
+// legt nichts ab. Belegt durch frontend/tests/test_foto_galerie.js.
+// =========================================================================
+
+/** Buchfuehrung aller erzeugten Objekt-URLs (nur im Arbeitsspeicher).
+ *  Wird von fotoObjekteFreigeben() geleert. */
+const _fotoObjekte = new Set();
+
+/** REINE Funktion: Erkennt eine BILDER-Frage im Chat-Text.
+ *  Trifft nur, wenn ein Bild-Wort UND ein Zeige-Wort vorkommen; reine
+ *  Zaehlfragen (N11) sowie Upload/Hochladen/Loeschen sind ausgenommen.
+ *  Ohne DOM, ohne Netz, ohne API_BASE.
+ *  @returns {null|{jahr:(number|null), event:(string|null)}} */
+function fotoFrageErkennen(text) {
+    if (typeof text !== 'string') return null;
+    const t = text.toLowerCase();
+    if (!t.trim()) return null;
+    // Reine Zaehlfragen bleiben beim Text-Werkzeug aus N11.
+    if (t.indexOf('wie viele') !== -1 || t.indexOf('wieviel') !== -1
+        || t.indexOf('anzahl') !== -1) return null;
+    // Upload/Hochladen/Loeschen sind keine Anzeige-Fragen.
+    if (t.indexOf('upload') !== -1 || t.indexOf('hochladen') !== -1
+        || t.indexOf('löschen') !== -1) return null;
+    // Bild-Wort UND Zeige-Wort muessen vorkommen.
+    const BILD_WOERTER = ['foto', 'fotos', 'bild', 'bilder'];
+    const ZEIGE_WOERTER = ['zeig', 'zeige', 'zeig mir', 'anschauen', 'galerie', 'welche'];
+    const hatBild = BILD_WOERTER.some((w) => t.indexOf(w) !== -1);
+    const hatZeige = ZEIGE_WOERTER.some((w) => t.indexOf(w) !== -1);
+    if (!hatBild || !hatZeige) return null;
+    // Erste vierstellige Jahreszahl 20xx, sonst null.
+    const jahrTreffer = t.match(/20\d{2}/);
+    // Erstes zutreffendes Suchwort aus der FESTEN Liste (Listenreihenfolge).
+    const EVENTS = ['urlaub', 'konzert', 'geburtstag', 'hochzeit', 'festival', 'party'];
+    const eventTreffer = EVENTS.find((w) => t.indexOf(w) !== -1);
+    return {
+        jahr: jahrTreffer ? parseInt(jahrTreffer[0], 10) : null,
+        event: eventTreffer || null,
+    };
+}
+
+/** REINE Funktion: Baut aus der Antwort von GET /api/fotos/bilder die
+ *  Kachel-Liste. Nur ganzzahlige datei_id > 0 zaehlen (true ist KEINE
+ *  Kennung). Reihung: Events wie in der Antwort, Dateien wie in der Antwort;
+ *  Gesamtlaenge hoechstens maxKacheln (fehlend/0/negativ -> 40). */
+function fotoKacheln(daten, maxKacheln) {
+    const grenze = (typeof maxKacheln === 'number' && isFinite(maxKacheln) && maxKacheln > 0)
+        ? Math.floor(maxKacheln) : 40;
+    if (!daten || typeof daten !== 'object') return [];
+    if (daten.ok !== true || !Array.isArray(daten.events)) return [];
+    const kacheln = [];
+    for (let e = 0; e < daten.events.length; e++) {
+        const ev = daten.events[e];
+        if (!ev || typeof ev !== 'object' || !Array.isArray(ev.dateien)) continue;
+        for (let d = 0; d < ev.dateien.length; d++) {
+            if (kacheln.length >= grenze) return kacheln;
+            const eintrag = ev.dateien[d];
+            if (!eintrag || typeof eintrag !== 'object') continue;
+            const kennung = eintrag.datei_id;
+            if (typeof kennung !== 'number' || !Number.isInteger(kennung) || kennung <= 0) continue;
+            kacheln.push({
+                datei_id: kennung,
+                name: (typeof eintrag.name === 'string') ? eintrag.name : '',
+                thumb_klein: '/api/cloud/thumb?fileid=' + kennung + '&groesse=120x120',
+                thumb_gross: '/api/cloud/thumb?fileid=' + kennung + '&groesse=480x480',
+            });
+        }
+    }
+    return kacheln;
+}
+
+/** REINE Funktion: Kopfzeile + je Event eine Zeile, hoechstens 5 Zeilen.
+ *  n in der Kopfzeile = Zahl ALLER gueltigen datei_id-Werte aus daten.events.
+ *  Leere Antwort -> genau eine Zeile "Keine Bilder gefunden". */
+function fotoGalerieZeilen(daten) {
+    const ereignisse = (daten && typeof daten === 'object' && daten.ok === true
+        && Array.isArray(daten.events)) ? daten.events : [];
+    let bilder = 0;
+    const brauchbar = [];
+    for (let i = 0; i < ereignisse.length; i++) {
+        const ev = ereignisse[i];
+        if (!ev || typeof ev !== 'object') continue;
+        const dateien = Array.isArray(ev.dateien) ? ev.dateien : [];
+        let gueltig = 0;
+        for (let d = 0; d < dateien.length; d++) {
+            const x = dateien[d];
+            if (x && typeof x === 'object' && typeof x.datei_id === 'number'
+                && Number.isInteger(x.datei_id) && x.datei_id > 0) gueltig++;
+        }
+        bilder += gueltig;
+        brauchbar.push({ ev: ev, gueltig: gueltig });
+    }
+    if (!bilder) return ['Keine Bilder gefunden'];
+    const anzahlEvents = (typeof daten.anzahl === 'number' && isFinite(daten.anzahl))
+        ? daten.anzahl : brauchbar.length;
+    // Deutsche Einzahl auch in der Kopfzeile: „1 Event, 1 Bild".
+    const zeilen = ['Treffer: ' + anzahlEvents + (anzahlEvents === 1 ? ' Event' : ' Events')
+        + ', ' + bilder + (bilder === 1 ? ' Bild' : ' Bilder')];
+    for (let i = 0; i < brauchbar.length && i < 4; i++) {
+        const ev = brauchbar[i].ev;
+        const name = (typeof ev.event === 'string' && ev.event.trim()) ? ev.event : 'unbenannt';
+        const jahr = (typeof ev.jahr === 'number' && isFinite(ev.jahr)) ? ev.jahr : 'unbekannt';
+        const anzahl = (typeof ev.anzahl === 'number' && isFinite(ev.anzahl))
+            ? ev.anzahl : brauchbar[i].gueltig;
+        // Deutsche Einzahl: „1 Bild" statt „1 Bilder" (die Kopfzeile nennt
+        // weiterhin „n Bilder", dort ist die Mehrzahl korrekt).
+        const einheit = (anzahl === 1) ? ' Bild' : ' Bilder';
+        zeilen.push('· ' + name + ' (' + jahr + ') — ' + anzahl + einheit);
+    }
+    return zeilen;
+}
+
+/** REINE Funktion: naechster Index der Diashow, ueber die Enden umlaufend.
+ *  richtung 1 = vor, -1 = zurueck, alles andere = 1. anzahl <= 0 -> 0. */
+function fotoDiashowNaechster(index, anzahl, richtung) {
+    const n = (typeof anzahl === 'number' && isFinite(anzahl)) ? Math.floor(anzahl) : 0;
+    if (n <= 0) return 0;
+    const schritt = (richtung === -1) ? -1 : 1;
+    const i = (typeof index === 'number' && isFinite(index)) ? Math.floor(index) : 0;
+    return ((i + schritt) % n + n) % n;
+}
+
+// ---- Anzeige (Teil B) ---------------------------------------------------
+
+/** Holt ein Bild als Blob und liefert eine OBJEKT-URL zurueck (niemals den
+ *  Bildpfad direkt in ein img.src schreiben!). Die URL wird in _fotoObjekte
+ *  vermerkt, damit fotoObjekteFreigeben() sie spaeter wirklich freigibt.
+ *  Fehlschlag -> null (die uebrigen Bilder bleiben nutzbar). */
+async function fotoBildLaden(url) {
+    try {
+        const res = await fetch(url);
+        if (!res || res.ok !== true) return null;
+        const blob = await res.blob();
+        if (!blob) return null;
+        const objektUrl = URL.createObjectURL(blob);
+        _fotoObjekte.add(objektUrl);
+        return objektUrl;
+    } catch (_e) {
+        return null;
+    }
+}
+
+/** Gibt ALLE vermerkten Objekt-URLs frei, leert die Buchfuehrung und liefert
+ *  die Anzahl der freigegebenen URLs zurueck. */
+function fotoObjekteFreigeben() {
+    let anzahl = 0;
+    if (_fotoObjekte && typeof _fotoObjekte.forEach === 'function') {
+        _fotoObjekte.forEach((u) => {
+            try { URL.revokeObjectURL(u); anzahl++; } catch (_e) { /* schon weg */ }
+        });
+        _fotoObjekte.clear();
+    }
+    return anzahl;
+}
+
+/** Baut das Kachel-Raster. Die Bilder werden gestreamt nachgeladen und
+ *  EINZELN fehlertolerant behandelt: faellt eine Kachel aus, steht dort
+ *  "Vorschau nicht verfuegbar" — die uebrigen bleiben. */
+function bauFotoRaster(kacheln) {
+    const raster = document.createElement('div');
+    raster.className = 'foto-kacheln';
+    raster.setAttribute('data-foto-kacheln', '1');
+    kacheln.forEach((k, i) => {
+        const zelle = document.createElement('button');
+        zelle.type = 'button';
+        zelle.className = 'foto-kachel';
+        zelle.setAttribute('data-datei-id', String(k.datei_id));
+        const start = document.createElement('span');
+        start.className = 'foto-platzhalter';
+        start.textContent = '… lädt';
+        zelle.appendChild(start);
+        const beschriftung = document.createElement('span');
+        beschriftung.className = 'foto-kachel-name';
+        beschriftung.textContent = k.name || ('Bild ' + (i + 1));
+        zelle.appendChild(beschriftung);
+        zelle.addEventListener('click', () => oeffneFotoGross(kacheln, i));
+        raster.appendChild(zelle);
+        fotoBildLaden(k.thumb_klein).then((objektUrl) => {
+            if (!objektUrl) { start.textContent = 'Vorschau nicht verfügbar'; return; }
+            const img = document.createElement('img');
+            img.className = 'foto-kachel-bild';
+            img.alt = k.name || ('Bild ' + (i + 1));
+            // Objekt-URL aus dem Blob — NIEMALS den /api/cloud/thumb-Pfad
+            // direkt in das src schreiben.
+            img.src = objektUrl;
+            if (start.parentNode) start.parentNode.removeChild(start);
+            zelle.insertBefore(img, zelle.firstChild);
+        }).catch(() => { start.textContent = 'Vorschau nicht verfügbar'; });
+    });
+    return raster;
+}
+
+// Zustand der Grossansicht (ein Overlay zur Zeit).
+let _fotoGrossOverlay = null;
+let _fotoGrossKacheln = [];
+let _fotoGrossIndex = 0;
+let _fotoGrossUrl = '';
+let _fotoDiashowTimer = null;
+let _fotoDiashowLaeuft = false;
+
+function _fotoGrossElement(auswahl) {
+    return (_fotoGrossOverlay && _fotoGrossOverlay.querySelector)
+        ? _fotoGrossOverlay.querySelector(auswahl) : null;
+}
+
+/** Zeigt die Kachel `index` gross (480x480) und gibt dabei das VORHERIGE
+ *  Bild frei — jeder Wechsel raeumt die alte Objekt-URL weg. */
+async function _fotoGrossZeigen(index) {
+    const k = _fotoGrossKacheln[index];
+    if (!k) return;
+    _fotoGrossIndex = index;
+    if (_fotoGrossUrl) {
+        try { URL.revokeObjectURL(_fotoGrossUrl); } catch (_e) { /* schon weg */ }
+        _fotoObjekte.delete(_fotoGrossUrl);
+        _fotoGrossUrl = '';
+    }
+    const overlay = _fotoGrossOverlay;
+    const img = _fotoGrossElement('[data-foto-gross-bild="1"]');
+    const nameEl = _fotoGrossElement('[data-foto-gross-name="1"]');
+    const zaehler = _fotoGrossElement('[data-foto-gross-zaehler="1"]');
+    if (nameEl) nameEl.textContent = k.name || ('Bild ' + (index + 1));
+    if (zaehler) zaehler.textContent = (index + 1) + ' / ' + _fotoGrossKacheln.length;
+    if (img) { img.hidden = true; img.removeAttribute('src'); img.alt = k.name || ''; }
+    const objektUrl = await fotoBildLaden(k.thumb_gross);
+    if (!overlay || _fotoGrossOverlay !== overlay) {
+        // Grossansicht wurde waehrend des Ladens geschlossen.
+        if (objektUrl) {
+            try { URL.revokeObjectURL(objektUrl); } catch (_e) { /* schon weg */ }
+            _fotoObjekte.delete(objektUrl);
+        }
+        return;
+    }
+    if (!objektUrl) {
+        if (nameEl) nameEl.textContent = 'Vorschau nicht verfügbar';
+        return;
+    }
+    _fotoGrossUrl = objektUrl;
+    if (img) { img.src = objektUrl; img.hidden = false; }
+}
+
+function stoppeFotoDiashow() {
+    if (_fotoDiashowTimer) { clearInterval(_fotoDiashowTimer); _fotoDiashowTimer = null; }
+    _fotoDiashowLaeuft = false;
+    const knopf = _fotoGrossElement('[data-foto-diashow="1"]');
+    if (knopf) knopf.textContent = '▶ Diashow';
+}
+
+/** Diashow: selbsttaetiges Weiterschalten alle 3 Sekunden (umlaufend). */
+function starteFotoDiashow() {
+    stoppeFotoDiashow();
+    _fotoDiashowLaeuft = true;
+    const knopf = _fotoGrossElement('[data-foto-diashow="1"]');
+    if (knopf) knopf.textContent = '⏸ Stopp';
+    _fotoDiashowTimer = setInterval(() => {
+        const weiter = fotoDiashowNaechster(_fotoGrossIndex, _fotoGrossKacheln.length, 1);
+        _fotoGrossZeigen(weiter);
+    }, 3000);
+}
+
+function _fotoEscapeHandler(e) {
+    if (e && e.key === 'Escape') schliesseFotoGross();
+}
+
+/** Nach dem Freigeben sind die Objekt-URLs tot: betroffene Kacheln sagen das
+ *  ehrlich, statt ein kaputtes Bild zu zeigen. */
+function _fotoKachelnUngueltigMachen() {
+    const bilder = document.querySelectorAll('[data-foto-kacheln="1"] img');
+    for (let i = 0; i < bilder.length; i++) {
+        const img = bilder[i];
+        const ersatz = document.createElement('span');
+        ersatz.className = 'foto-platzhalter';
+        ersatz.textContent = 'Vorschau freigegeben – erneut fragen';
+        if (img.parentNode) img.parentNode.replaceChild(ersatz, img);
+    }
+}
+
+/** Schliesst die Grossansicht. Ruft IMMER fotoObjekteFreigeben(); danach ist
+ *  die Buchfuehrung leer. */
+function schliesseFotoGross() {
+    stoppeFotoDiashow();
+    if (document && document.removeEventListener) document.removeEventListener('keydown', _fotoEscapeHandler);
+    if (_fotoGrossOverlay && _fotoGrossOverlay.parentNode) {
+        _fotoGrossOverlay.parentNode.removeChild(_fotoGrossOverlay);
+    }
+    _fotoGrossOverlay = null;
+    _fotoGrossUrl = '';
+    _fotoGrossKacheln = [];
+    _fotoGrossIndex = 0;
+    _fotoKachelnUngueltigMachen();
+    fotoObjekteFreigeben();
+    return true;
+}
+
+/** Oeffnet die Grossansicht zu einer Kachel: Bild in 480x480, Beschriftung,
+ *  ‹ Zurueck / Weiter › / ▶ Diashow / ✕. Schliessen ueber ✕, Hintergrund
+ *  oder Escape. */
+function oeffneFotoGross(kacheln, index) {
+    if (!Array.isArray(kacheln) || !kacheln.length) return;
+    if (_fotoGrossOverlay) schliesseFotoGross();
+    _fotoGrossKacheln = kacheln.slice();
+    _fotoGrossIndex = 0;
+    const overlay = document.createElement('div');
+    overlay.className = 'foto-gross';
+    overlay.setAttribute('data-foto-gross', '1');
+    const panel = document.createElement('div');
+    panel.className = 'foto-gross-panel';
+    const img = document.createElement('img');
+    img.className = 'foto-gross-bild';
+    img.setAttribute('data-foto-gross-bild', '1');
+    img.alt = '';
+    img.hidden = true;
+    const kopf = document.createElement('div');
+    kopf.className = 'foto-gross-kopf';
+    const nameEl = document.createElement('span');
+    nameEl.className = 'foto-gross-name';
+    nameEl.setAttribute('data-foto-gross-name', '1');
+    const zaehler = document.createElement('span');
+    zaehler.className = 'foto-gross-zaehler';
+    zaehler.setAttribute('data-foto-gross-zaehler', '1');
+    kopf.appendChild(nameEl);
+    kopf.appendChild(zaehler);
+    const knoepfe = document.createElement('div');
+    knoepfe.className = 'foto-gross-knoepfe';
+    const zurueck = document.createElement('button');
+    zurueck.type = 'button';
+    zurueck.className = 'foto-knopf';
+    zurueck.textContent = '‹ Zurück';
+    const weiter = document.createElement('button');
+    weiter.type = 'button';
+    weiter.className = 'foto-knopf';
+    weiter.textContent = 'Weiter ›';
+    const diashow = document.createElement('button');
+    diashow.type = 'button';
+    diashow.className = 'foto-knopf';
+    diashow.setAttribute('data-foto-diashow', '1');
+    diashow.textContent = '▶ Diashow';
+    const zu = document.createElement('button');
+    zu.type = 'button';
+    zu.className = 'foto-knopf foto-knopf-schliessen';
+    zu.setAttribute('data-foto-schliessen', '1');
+    zu.textContent = '✕';
+    zurueck.addEventListener('click', () => {
+        _fotoGrossZeigen(fotoDiashowNaechster(_fotoGrossIndex, _fotoGrossKacheln.length, -1));
+    });
+    weiter.addEventListener('click', () => {
+        _fotoGrossZeigen(fotoDiashowNaechster(_fotoGrossIndex, _fotoGrossKacheln.length, 1));
+    });
+    diashow.addEventListener('click', () => {
+        if (_fotoDiashowLaeuft) stoppeFotoDiashow(); else starteFotoDiashow();
+    });
+    zu.addEventListener('click', () => schliesseFotoGross());
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) schliesseFotoGross(); });
+    knoepfe.appendChild(zurueck);
+    knoepfe.appendChild(weiter);
+    knoepfe.appendChild(diashow);
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'foto-knopf foto-gross-edit-btn';
+    editBtn.textContent = '✏️ Personen';
+    editBtn.title = 'Personen und Gesichter bearbeiten';
+    editBtn.addEventListener('click', async () => {
+        const k = _fotoGrossKacheln[_fotoGrossIndex];
+        const fid = k && (k.fileid || k.kennung || (k.thumb_gross && (k.thumb_gross.match(/fileid=([0-9]+)/) || [])[1]));
+        if (!fid) return;
+        let gesichter = [];
+        try {
+            const res = await fetch(API_BASE + '/api/gruppen/bild-gesichter?fileid=' + encodeURIComponent(fid));
+            const d = await res.json();
+            if (d && d.ok && Array.isArray(d.gesichter)) gesichter = d.gesichter;
+        } catch (_e) {}
+        const img = _fotoGrossElement('[data-foto-gross-bild="1"]');
+        zeigeBildVollbild(img, gesichter, { fileid: String(fid) });
+    });
+    knoepfe.appendChild(editBtn);
+    knoepfe.appendChild(zu);
+    panel.appendChild(img);
+    panel.appendChild(kopf);
+    panel.appendChild(knoepfe);
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+    _fotoGrossOverlay = overlay;
+    if (document && document.addEventListener) document.addEventListener('keydown', _fotoEscapeHandler);
+    _fotoGrossZeigen(index);
+}
+
+/** Baut die Galerie-Blase im Chat: Ueberschrift, die Zeilen aus
+ *  fotoGalerieZeilen(daten) und das Raster aus fotoKacheln(daten).
+ *  Fehlerfall -> EINE ehrliche Zeile, kein Absturz, keine leere Blase. */
+async function zeigeFotoGalerie(wunsch) {
+    const contentDiv = addMessage('', 'assistant');
+    const blase = (contentDiv && contentDiv.closest) ? contentDiv.closest('.message') : null;
+    if (blase && blase.setAttribute) blase.setAttribute('data-foto-galerie', '1');
+    let daten = null;
+    let ursache = '';
+    try {
+        const teile = [];
+        if (wunsch && wunsch.jahr) teile.push('jahr=' + encodeURIComponent(String(wunsch.jahr)));
+        if (wunsch && wunsch.event) teile.push('event=' + encodeURIComponent(String(wunsch.event)));
+        teile.push('limit=5');
+        teile.push('pro_event=40');
+        const res = await fetch(`${API_BASE}/api/fotos/bilder?` + teile.join('&'));
+        if (!res || res.ok !== true) { ursache = 'HTTP ' + (res ? res.status : '?'); }
+        else { daten = await res.json(); }
+    } catch (e) {
+        ursache = (e && e.message) || 'Netzwerkfehler';
+    }
+    if (!daten || daten.ok !== true) {
+        const meldung = (daten && daten.error)
+            ? daten.error : ('Bilder nicht abrufbar (' + ursache + ')');
+        zeigeBlaseMitText(blase, contentDiv, '🖼️ Bilder\n' + meldung);
+        return;
+    }
+    zeigeBlaseMitText(blase, contentDiv, '🖼️ Bilder');
+    const zeilen = fotoGalerieZeilen(daten);
+    const zeilenDiv = document.createElement('div');
+    zeilenDiv.className = 'foto-zeilen';
+    zeilenDiv.textContent = zeilen.join('\n');
+    contentDiv.appendChild(zeilenDiv);
+    const kacheln = fotoKacheln(daten);
+    if (kacheln.length) contentDiv.appendChild(bauFotoRaster(kacheln));
+}
+
+// ===== Ende Bilder-Galerie (N13b) =====
+

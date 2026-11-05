@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+node_modules/
+.env
+.env.*
+*.log
+*.db
+# created by personal-ai-agent tests at runtime
+projects/personal-ai-agent/backend/tests/_tmp*/
+# local safety copies of the export tool, never published
+.backup/

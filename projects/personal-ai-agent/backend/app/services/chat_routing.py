@@ -1,0 +1,218 @@
+"""Routing für Coding-/Werkzeug-Aufträge (aus chat.py extrahiert — Refactoring).
+
+Kapselt die Weiche, die entscheidet, wohin ein erkannter Programmier-/Werkzeug-
+Auftrag geht (die "Hermes als Toolcall"-Logik):
+
+  1. Track A — PC-Hermes (im WLAN erreichbar) → Antwort direkt.
+  2. Track C — Lokaler Hermes auf dem Gerät (Termux-CLI) → Live bearbeiten.
+  3. Track B — Auftragsbuch (nur wenn beides nicht verfügbar/erfolgreich).
+
+Die Funktionen `_finish_exchange` / `_get_or_create_conversation` sowie
+`_starte_lokale_hermes` werden injiziert, damit der Service isoliert testbar ist
+und keinen harten Import auf den Router braucht.
+"""
+
+import logging
+from typing import Any, Dict, Optional
+
+from app.services.hermes_gateway import hermes_gateway
+from app.services.hermes_local import ist_verfuegbar as hermes_local_ist_verfuegbar
+from app.services.hermes_local import arbeits_start_zeile
+
+logger = logging.getLogger(__name__)
+
+
+def statusmeldung_bereit(eintrag_id: str, grund: str) -> None:
+    """Ehrliche Statuszeile, wenn die Aufgabe niemanden hat (S7).
+
+    Ersetzt die frühere Meldung „⏳ Hermes wurde benachrichtigt – wartet auf
+    Bearbeitung" (der Betreiber, 16.10.2026): sie behauptete einen Lauf, den es
+    nicht gab — weder PC-Hermes noch lokaler Hermes waren da, und der Nutzer
+    wartete auf ein Ergebnis, das nie kam. Die neue Zeile nennt den Grund und
+    was als Nächstes passiert.
+    """
+    from app.services.auftrag_service import auftrag_service
+    auftrag_service.statusmeldung_hinzufuegen(
+        eintrag_id,
+        f"⚠️ **Liegt bereit — gerade arbeitet niemand daran.** {grund} "
+        "Sie wird abgearbeitet, sobald wieder ein Hermes erreichbar ist.",
+    )
+
+
+def bereit_reply_text(message: str, wartegrund: str) -> str:
+    """Antwort, wenn die erkannte Aufgabe gerade NIEMANDEN hat (S7).
+
+    EINE Quelle für beide Wege (`/api/chat` über `route_auftrag`, `/api/chat/stream`
+    direkt) — sonst laufen die beiden Kopien auseinander, wie es bei dieser
+    Meldung schon passiert war. Der Text behauptet keinen Lauf und nennt den
+    sofortigen Ausweg.
+    """
+    return (
+        "🧩 **Hermes-Aufgabe erkannt — sie liegt bereit, aber gerade arbeitet "
+        "niemand daran.**\n\n"
+        "➡️ **Vorgemerkt für:** Hermes\n\n"
+        f"⚠️ **Grund:** {wartegrund}\n\n"
+        f"📋 **Aufgabe:** {message[:150]}…\n\n"
+        "Sie steht in der Warteliste und wird abgearbeitet, sobald wieder ein "
+        "Hermes erreichbar ist (PC oder dieses Gerät). Sofort weiter kommst du "
+        "ohne Werkzeug: stell dieselbe Frage direkt („antworte ohne Werkzeuge“) "
+        "— dann beantworte ich sie hier selbst.\n"
+    )
+
+
+def kein_helfer_text(pc_grund: str, lokal_verfuegbar: bool) -> str:
+    """Klartext, warum eine erkannte Aufgabe gerade NIEMANDEN hat (S7).
+
+    Reine Funktion, wirft nie und enthält keine Zugangsdaten: `pc_grund` kommt
+    aus dem Gateway (`hermes_gateway.letzter_fehler`) und ist ein Klartext-
+    Grund, kein Schlüssel. Ist Track A übersprungen worden (Umlenk-Ziel
+    „handy"), bleibt `pc_grund` leer — dann wird der PC nicht behauptet.
+    """
+    teile = []
+    if lokal_verfuegbar:
+        teile.append("der lokale Hermes ist nicht gestartet")
+    else:
+        teile.append("auf diesem Gerät ist der lokale Hermes nicht einsatzbereit")
+    grund = (pc_grund or "").strip()
+    if grund:
+        teile.append(f"der PC-Hermes ist nicht erreichbar ({grund})")
+    return "; ".join(teile) + "."
+
+
+def ziel_etikett(ziel: str) -> str:
+    """Lesbares Ziel-Etikett für „Wohin wurde delegiert?"-Anzeigen.
+
+    ziel-Werte: "pc" (PC-Hermes via HTTP), "handy" (lokaler Hermes-CLI),
+    "buch" (Auftragsbuch). Unbekannte Werte fallen auf "Hermes" zurück.
+    """
+    return {
+        "pc": "Hermes (PC)",
+        "handy": "Hermes (Handy)",
+        "buch": "Auftragsbuch",
+    }.get(ziel, "Hermes")
+
+
+def ziel_zeile(ziel: str) -> str:
+    """Einzeiliger Hinweis, wohin die Aufgabe delegiert wurde (für den Reply)."""
+    return f"➡️ **Weitergeleitet an:** {ziel_etikett(ziel)}\n\n"
+
+
+def anlegen_im_buch(auftrag: str, begruendung: str,
+                    kategorie: Optional[str], komplexitaet: Optional[str]) -> Any:
+    from app.services.auftrag_service import auftrag_service
+    return auftrag_service.anlegen(
+        auftrag, hinweis=f"Automatische Erkennung: {begruendung}",
+        kategorie=kategorie, komplexitaet=komplexitaet,
+    )
+
+
+def verknuepfe_chat(eintrag_id: str, conversation_id: str) -> None:
+    from app.services.auftrag_service import auftrag_service
+    auftrag_service.setze_chat_verknuepfung(eintrag_id, conversation_id)
+
+
+def _starte_lokale_hermes_default(auftrag, hinweis, kategorie, komplexitaet, chat_verknuepfung):
+    """Fallback-Platzhalter; wird vom Router beim Verdrahten überschrieben."""
+    raise NotImplementedError("starte_lokale_hermes nicht injiziert")
+
+
+def route_auftrag(
+    message: str,
+    begruendung: str,
+    kategorie: Optional[str],
+    komplexitaet: Optional[str],
+    finish_exchange,
+    get_or_create_conversation,
+    starte_lokale_hermes,
+    kontext: str = "",
+    ziel: str = "",
+) -> Dict[str, Any]:
+    """Führt die Track-A/C/B-Weiche für einen erkannten Coding-Auftrag aus.
+
+    `kontext` (optional): der relevante Gesprächs-/Erinnerungs-Kontext, der an
+    Hermes mitgegeben wird (sonst arbeitet Hermes nur mit der nackten Frage).
+    Er wird dem Auftrag als "Kontext aus dem Gespräch" beigemischt, damit die
+    Delegation nicht blind erfolgt.
+
+    `ziel` (optional): Umlenk-Wunsch des Nutzers ("pc" | "handy" | "agent").
+    Bei "handy" wird Track A (PC-Hermes) ÜBERSPRUNGEN und direkt der lokale
+    Hermes gestartet — sonst lief der Umlenk-Button ins Leere, weil Track A
+    immer zuerst versucht wurde (der PC nahm an, lieferte aber nichts zurück).
+
+    Returns ein Dict mit den Feldern der Chat-Antwort:
+        { "art": "pc"|"lokal"|"buch", "ziel": "pc"|"handy"|"buch",
+          "reply": str, "conversation_id": str }
+    `ziel` sagt dem Frontend, WOHIN delegiert wurde (PC / Handy / Buch);
+    Aufrufer baut daraus die ChatResponse/SSE.
+    """
+    # Kontext-Erweiterung: baut die eigentliche Hermes-Aufgabe (Frage + Kontext).
+    herm_aufgabe = message
+    if kontext and kontext.strip():
+        herm_aufgabe = (
+            f"{message}\n\n"
+            "[Kontext aus dem Gespräch (vorherige Nachrichten/Erinnerungen):]\n"
+            f"{kontext.strip()}"
+        )
+
+    # 1) PC-Hermes (Track A) — exklusiv: läuft er, ist Schluss (nie beides).
+    # Bei explizitem Umlenk-Ziel "handy" wird Track A übersprungen.
+    # `pc_grund` bleibt außerhalb des Zweigs gültig: Track B nennt den ehrlichen
+    # Grund (S7). Wurde Track A übersprungen, wird der PC NICHT behauptet.
+    pc_grund = ""
+    if ziel == "handy":
+        logger.info("Umlenk-Ziel 'handy': Track A (PC) uebersprungen, direkt lokal")
+    else:
+        hermes_antwort = hermes_gateway.sende_auftrag(herm_aufgabe)
+        if hermes_antwort is not None:
+            conv_id = get_or_create_conversation(None)
+            finish_exchange(conv_id, message, hermes_antwort)
+            return {"art": "pc", "ziel": "pc", "reply": hermes_antwort,
+                    "conversation_id": conv_id}
+        # Track A fehlgeschlagen: Grund merken (für Transparenz im Track C/B),
+        # damit klar ist, warum es NICHT am PC lief — ohne dass beide laufen.
+        pc_grund = getattr(hermes_gateway, "letzter_fehler", "") or "PC nicht erreichbar"
+        logger.info("PC-Hermes uebersprungen (%s) - weiter zu Handy/Buch", pc_grund)
+
+    # 2) Lokaler Hermes (Track C) — NUR weil Track A fehlschlug.
+    lokal_verfuegbar = hermes_local_ist_verfuegbar()
+    if lokal_verfuegbar:
+        conv_id = get_or_create_conversation(None)
+        eintrag = starte_lokale_hermes(
+            herm_aufgabe,
+            hinweis=f"Automatische Erkennung: {begruendung}",
+            kategorie=kategorie,
+            komplexitaet=komplexitaet,
+            chat_verknuepfung=conv_id,
+            kontext=kontext,
+        )
+        reply_text = (
+            "🧩 **Hermes-Aufgabe erkannt – erweitertes Werkzeug übernimmt.**\n\n"
+            f"{ziel_zeile('handy')}"
+            f"📋 **Aufgabe:** {message[:150]}…\n\n"
+            # Konkrete Startzeile (was, womit, Zeitbudget) statt vager Zeilen —
+            # der Betreiber 10.10.2026: "Das muss auf jeden Fall konkreter sein".
+            + arbeits_start_zeile() + "\n"
+            "Gedanken & Zwischenschritte erscheinen hier live, das "
+            "Endergebnis danach. Der Fortschritt bleibt oben in der Leiste "
+            "sichtbar.\n"
+        )
+        finish_exchange(conv_id, message, reply_text)
+        return {"art": "lokal", "ziel": "handy", "reply": reply_text,
+                "conversation_id": conv_id}
+
+    # 3) Auftragsbuch (Track B) — interne Warteschlange; in der Nutzer-Ansicht
+    #    wird es nur noch als "Hermes" gezeigt, nie als Auftragsbuch/Nummer.
+    #    S7 (16.10.2026): Hier stand früher „Hermes wurde benachrichtigt –
+    #    wartet auf Bearbeitung" und „Hermes nimmt sich der Aufgabe an", obwohl
+    #    NICHTS lief (Termux-Paket defekt, PC aus). Der Nutzer wartete auf ein
+    #    Ergebnis, das nie kommt. Jetzt steht der ehrliche Grund sofort im Chat
+    #    und in der Statuszeile — und der Weg, sofort weiterzukommen.
+    wartegrund = kein_helfer_text(pc_grund, lokal_verfuegbar)
+    eintrag = anlegen_im_buch(herm_aufgabe, begruendung, kategorie, komplexitaet)
+    statusmeldung_bereit(eintrag["id"], wartegrund)
+    reply_text = bereit_reply_text(message, wartegrund)
+    conv_id = get_or_create_conversation(None)
+    finish_exchange(conv_id, message, reply_text)
+    verknuepfe_chat(eintrag["id"], conv_id)
+    return {"art": "buch", "ziel": "buch", "reply": reply_text,
+            "conversation_id": conv_id}

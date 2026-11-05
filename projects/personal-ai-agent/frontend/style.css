@@ -1,0 +1,3711 @@
+/* =========================================
+   Personal AI Agent – Dark Theme Styles
+   ========================================= */
+
+:root {
+    --bg-primary: #0f0f1a;
+    --bg-secondary: #1a1a2e;
+    --bg-tertiary: #16213e;
+    --text-primary: #e8e8f0;
+    --text-secondary: #9898b0;
+    --text-muted: #6b6b80;
+    --accent: #6c63ff;
+    --accent-hover: #5a52e0;
+    --accent-glow: rgba(108, 99, 255, 0.3);
+    --user-msg-bg: #2a2a4a;
+    --assistant-msg-bg: #1a1a35;
+    --border: #2a2a40;
+    --success: #4caf50;
+    --warning: #ff9800;
+    --error: #f44336;
+    --radius: 12px;
+    --radius-sm: 8px;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html, body {
+    height: 100%;
+    overflow: hidden;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* Die App-Huelle richtet sich an der SICHTBAREN Flaeche aus, nicht an 100vh
+   (Wunsch des Betreibers 2026-09-25). Befund am Handy: Mit der Tastatur schrumpft
+   nur der sichtbare Ausschnitt (visualViewport); das Layout bleibt 100vh
+   gross, Android schiebt die ganze Seite hoch, damit das Eingabefeld sichtbar
+   wird — und die Kopfzeile wandert mit aus dem Bild.
+   Loesung: position: fixed oben am sichtbaren Ausschnitt (--vv-oben), Hoehe
+   exakt der sichtbaren Flaeche (--vv-hoehe), gesetzt von app.js aus
+   visualViewport. Ohne JavaScript-Brücke (aeltere Browser) greift der
+   dvh-Rueckfall. `height: 100vh` gibt es hier bewusst NICHT mehr: Genau das
+   war die Ursache. */
+#app {
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    top: var(--vv-oben, 0px);
+    left: 0;
+    right: 0;
+    height: var(--vv-hoehe, 100dvh);
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+/* =========================================
+   Header
+   ========================================= */
+
+/* Kopfzeile: bleibt oben stehen, auch wenn im Verlauf gescrollt wird, und
+   liegt ueber dem Inhalt (z-index). Sie ist der Anker, der beim Tastatur-
+   Oeffnen sichtbar bleiben MUSS — deshalb steht hier nichts, was sie
+   ausblenden oder mitscrollen laesst (keine Hoehen-Bedingung, kein
+   display:none, kein position:absolute im Huelle-Fluss). */
+#header {
+    position: sticky;
+    top: 0;
+    z-index: 200;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+    flex-shrink: 0;
+}
+
+.header-content {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+/* Schiebt Status und Neu-Knopf nach rechts zusammen. Ohne das verteilte
+   space-between die drei Elemente gleichmaeszig und der Status landete
+   einsam in der Mitte. */
+.app-title {
+    margin-right: auto;
+}
+
+.app-title {
+    font-size: 1.2rem;
+    font-weight: 600;
+    background: linear-gradient(135deg, var(--accent), #e040fb);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+/* Status Indicator */
+.status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: background 0.3s;
+}
+
+.status.online .status-dot {
+    background: var(--success);
+    box-shadow: 0 0 6px var(--success);
+}
+
+.status.offline .status-dot {
+    background: var(--error);
+}
+
+/* =========================================
+   Hintergrund-Leiste (10.10.2026)
+   Statuszeile: zeigt, welche Hintergrundarbeit laeuft (Quelle: GET
+   /api/laeuft). Antippen zeigt Einzelheiten. Deutsch, bewusst ohne
+   Symbole. Seit 20.10.2026 (Wunsch des Betreibers) im Fenster "Checks"
+   (#selbsttest-sheet) statt am oberen Rand; Feinschliff dort siehe
+   Abschnitt "Checks-Fenster" weiter unten.
+   ========================================= */
+
+.hintergrund-leiste {
+    flex-shrink: 0;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+}
+
+#hintergrund-kopf {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 6px 20px;
+    font-size: 0.78rem;
+    font-family: inherit;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.hintergrund-leiste[data-zustand="arbeit"] #hintergrund-text {
+    color: #ffb86b;
+}
+
+#hintergrund-einzelheiten {
+    padding: 6px 20px 10px;
+    border-top: 1px dashed var(--border);
+    font-size: 0.74rem;
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+#hintergrund-einzelheiten[hidden] {
+    display: none;
+}
+
+/* =========================================
+   Chat Container
+   ========================================= */
+
+#chat-container {
+    flex: 1;
+    /* min-height: 0 ist Pflicht: Ein Flex-Kind mit overflow kann ohne das
+       nicht unter seine Inhaltshöhe schrumpfen — die Liste haette dann die
+       Tastatur-Höhe gesprengt und der Eingabebereich waere nach unten aus dem
+       Bild geschoben worden. Der Verlauf ist der einzige Scrollcontainer. */
+    min-height: 0;
+    /* Nur vertikal scrollen – eine horizontale Scrollleiste im Chat wäre
+       verwirrend und ist nie gewollt. Langes Zeug bricht um oder bekommt
+       einen eigenen Querlauf (Code/Tabellen), statt die Seite zu verbreitern. */
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    padding: 16px 20px;
+    scroll-behavior: smooth;
+}
+
+#chat-container::-webkit-scrollbar {
+    width: 6px;
+}
+
+#chat-container::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+#chat-container::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 3px;
+}
+
+/* Messages */
+#messages {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.message {
+    display: flex;
+    animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.message.user {
+    justify-content: flex-end;
+}
+
+/* Antworten: Sprechblase und Vorlese-Bedienung nebeneinander, aber oben
+   ausgerichtet. Ohne align-items stünde die Bedienung senkrecht zentriert
+   neben dem Text – bei langen Antworten also irgendwo in der Mitte. */
+.message.assistant {
+    align-items: flex-start;
+    gap: 4px;
+}
+
+.speak-controls {
+    display: flex;
+    gap: 0;
+    flex-shrink: 0;
+    padding-top: 6px;
+    /* Sticky: Der Knopf bleibt während des Blätterns durch die Antwort oben
+       in Sicht, statt mit der Blase nach oben wegzuscrollen. Der Sticky-Bereich
+       ist die eigene message.assistant-Hülle (ihre Höhe = Antwortlänge). */
+    position: sticky;
+    top: 8px;
+    z-index: 50;
+    align-self: flex-start;
+}
+
+.message-content {
+    max-width: 85%;
+    padding: 12px 16px;
+    /* Lange Wörter/URLs/Code/Base64 umbrechen statt über den Rand zu laufen */
+    overflow-wrap: break-word;
+    word-break: break-word;
+    min-width: 0;
+    border-radius: var(--radius);
+    font-size: 0.95rem;
+    line-height: 1.6;
+    word-wrap: break-word;
+}
+
+/* Links in Antworten: hell statt Browser-Dunkelblau (auf dunklem Grund kaum
+   lesbar, Befund 29.09.2026); lange Adressen brechen um. */
+.message-content a {
+    color: #c9d4e3;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    overflow-wrap: anywhere;
+}
+
+.message-content a:hover {
+    color: #ffffff;
+}
+
+.message.user .message-content {
+    background: var(--accent);
+    color: white;
+    border-bottom-right-radius: 4px;
+}
+
+.message.assistant .message-content {
+    background: var(--assistant-msg-bg);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+}
+
+/* ── Textauswahl in Nachrichten (Wunsch des Betreibers 2026-09-25) ───────────── */
+/* Langer Druck auf eine Nachricht muss die NATIVE Auswahl starten — mit
+   Griffen, Lupe und Kopieren-Menue. Bis hierher gab es keine einzige
+   user-select-Regel: Die Auswahl war allein per JavaScript unterbunden
+   (contextmenu → preventDefault), deshalb kam am Handy nie eine Auswahl.
+   -webkit-touch-callout: default ist der Standardwert (also „Menue erlaubt")
+   und steht hier ausdruecklich, damit ihn niemand versehentlich abschaltet.
+   user-select: text gilt fuer den GANZEN Verlauf (#chat-container/#messages)
+   und nicht nur je Blase: Nur so laeuft die Auswahl ueber mehrere Nachrichten
+   hinweg und bricht nicht an einer Nachbargrenze ab. */
+#chat-container,
+#messages,
+.message,
+.message-content,
+.gedanken-inhalt,
+.gedanken-kurz,
+.message-time {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+}
+
+/* ── Bilder in Chat-Nachrichten ──────────────────────────────────────────── */
+/* Hochgeladene Bilder werden in der Sprechblase inline dargestellt.
+   Ohne max-width würden große Bilder die Chat-Blase sprengen. */
+.message-content img {
+    max-width: 100%;
+    max-height: 300px;
+    border-radius: 8px;
+    object-fit: contain;
+    display: block;
+    margin: 4px 0;
+}
+
+/* ── Wartende Nachricht ─────────────────────────────────────────────────── */
+/* Getippt, aber noch nicht abgeschickt: Der Agent schreibt noch an der
+   vorigen Antwort. Gestrichelter Rand und gedaempfte Farbe zeigen auf einen
+   Blick, dass diese Blase noch nicht gilt. */
+.message.user.queued {
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+}
+
+.message.user.queued .message-content {
+    background: transparent;
+    border: 1px dashed var(--accent);
+    color: var(--text-secondary);
+}
+
+.queued-note {
+    background: none;
+    border: none;
+    padding: 2px 4px;
+    font-family: inherit;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: color 0.2s;
+}
+
+.queued-note:hover {
+    color: #cc4444;
+}
+
+/* ── Gedanken-Blasen (Zwischenmeldungen aus dem Hermes-Lauf) ─────────────── */
+/* Auf den ersten Blick unterscheidbar von einer echten Antwort: keine
+   Sprechblase, sondern ein gedaempfter, kursiver Block mit Randlinie links.
+   Vorher sahen Gedanken wie normale Nachrichten aus (gleiche Blase, gleicher
+   Zeitstempel) und waren nicht als Zwischenstand erkennbar.
+   Wunsch des Betreibers 2026-09-15. */
+.message.gedanken-strom {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    margin-left: 8px;
+    padding-left: 10px;
+    border-left: 2px solid var(--border);
+}
+
+.gedanken-kopf {
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    letter-spacing: 0.02em;
+}
+
+.gedanken-inhalt {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    font-style: italic;
+    white-space: pre-wrap;
+    line-height: 1.35;
+    overflow-wrap: break-word;
+    word-break: break-word;
+    /* Sanft schrumpfen beim Einklappen (Wunsch 2026-09-25): keine harte
+       Höhenänderung, sondern ein kurzer Übergang. */
+    max-height: 1200px;
+    opacity: 1;
+    transition: max-height 0.35s ease, opacity 0.25s ease;
+}
+
+.gedanken-zeit {
+    font-size: 0.62rem;
+    color: var(--text-muted);
+}
+
+/* ── Eingeklappte Gedanken-Blase (Wunsch 2026-09-25) ─────────────────────── */
+/* Nach dem Tippen bleibt nur eine schmale Zeile stehen: Zeit · 🧠 Kurzfassung.
+   Antippen klappt die Blase wieder auf (app.js: klappeGedankeAus). */
+.gedanken-kurz {
+    display: none;
+    max-width: 100%;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+}
+
+.gedanken-eingeklappt {
+    cursor: pointer;
+}
+
+.gedanken-eingeklappt .gedanken-kopf,
+.gedanken-eingeklappt .gedanken-zeit {
+    display: none;
+}
+
+.gedanken-eingeklappt .gedanken-inhalt {
+    max-height: 0;
+    opacity: 0;
+    overflow: hidden;
+}
+
+.gedanken-eingeklappt .gedanken-kurz {
+    display: block;
+}
+
+.message-content p {
+    margin-bottom: 8px;
+}
+
+.message-content p:last-child {
+    margin-bottom: 0;
+}
+
+.message-content ul, .message-content ol {
+    margin: 8px 0;
+    padding-left: 20px;
+}
+
+.message-content code {
+    background: rgba(255, 255, 255, 0.1);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.85em;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.message-content pre {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 12px;
+    border-radius: var(--radius-sm);
+    /* Querlauf nur als Rückfallebene: Einzelne sehr lange Code-Zeilen dürfen
+       den Rahmen nicht sprengen; wenn Umbruch nicht greift, scrollt der Block
+       lokal (kein Seitenscrollen). */
+    overflow-x: auto;
+    margin: 8px 0;
+}
+
+.message-content pre code {
+    background: none;
+    padding: 0;
+    /* Proaktives Umbrechen: Lange ununterbrechbare Strings (Base64, URLs,
+       Pfade) brechen um, statt die Sprechblase zu verbreitern. white-space:
+       pre-wrap behält den Zeilenumbruch des Codes bei, erlaubt aber das
+       Weiterbrechen überlanger Zeichenketten. */
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+/* ── Diff (Code-Schnipsel mit +/-) ──────────────────────────────────────── */
+/* Ein Patch als ```diff-Block: Hinzufügungen grün, Löschungen rot, Hunk-Kopf
+   und Dateizeilen abgesetzt. Jede Zeile ist ein eigenes <span> (app.js:
+   codeBlockZuHtml), damit die Farbe auch bei umbrochenen Zeilen erhalten
+   bleibt. Wunsch des Betreibers 2026-09-15. */
+.message-content pre.diff code span {
+    display: block;
+}
+.message-content pre.diff .d-plus {
+    background: rgba(46, 160, 67, 0.22);
+    color: #7ee787;
+}
+.message-content pre.diff .d-minus {
+    background: rgba(248, 81, 73, 0.20);
+    color: #ffa198;
+}
+.message-content pre.diff .d-hunk {
+    color: #79c0ff;
+}
+.message-content pre.diff .d-kopf {
+    color: var(--text-dim, #8b949e);
+    font-weight: 600;
+}
+.message-content pre.diff .d-kontext {
+    color: var(--text-dim, #c9c9c9);
+}
+
+/* ── Tabellen ───────────────────────────────────────────────────────────── */
+/* Eigener Rahmen mit Querlauf: Auf dem Handy passt eine Tabelle sonst nicht
+   in die Sprechblase und schiebt die ganze Seite in die Breite. */
+.table-wrap {
+    overflow-x: auto;
+    margin: 10px 0;
+    -webkit-overflow-scrolling: touch;
+}
+
+.message-content table {
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    min-width: 100%;
+}
+
+.message-content th,
+.message-content td {
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+    text-align: left;
+    vertical-align: top;
+}
+
+.message-content th {
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-primary);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.hint {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+
+/* =========================================
+   Typing-Indicator in der Blase (seit v20260817)
+   ========================================= */
+
+.message.assistant .message-content:has(.typing-indicator) {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-height: 44px;
+    padding: 12px 16px;
+}
+
+.message.assistant .message-content:has(.typing-indicator) .typing-indicator {
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+
+.message.assistant .message-content:has(.typing-indicator) .typing-indicator span {
+    width: 10px;
+    height: 10px;
+    background: var(--accent);
+}
+
+/* =========================================
+   Loading Indicator — UNTERE animierte Ladebubble
+   (aktiv genutzt: setzeTutZeile/setLoading in app.js schreiben den
+   Arbeitsschritt-Text hier rein und blenden sie ein/aus. Einzige
+   Ladeanzeige seit 2026-09-09 — kein zweiter Indikator in der
+   Assistenten-Blase mehr.)
+   ========================================= */
+
+#loading {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 0;
+    animation: fadeIn 0.3s ease;
+}
+
+#loading.hidden {
+    display: none;
+}
+
+.typing-indicator {
+    display: flex;
+    gap: 4px;
+    padding: 8px 12px;
+    background: var(--assistant-msg-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+.typing-indicator span {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: typing 1.4s infinite ease-in-out;
+}
+
+.typing-indicator span:nth-child(2) {
+    animation-delay: 0.2s;
+}
+
+.typing-indicator span:nth-child(3) {
+    animation-delay: 0.4s;
+}
+
+@keyframes typing {
+    0%, 60%, 100% { opacity: 0.3; transform: scale(0.8); }
+    30% { opacity: 1; transform: scale(1); }
+}
+
+.loading-text {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
+/* =========================================
+   Input Area
+   ========================================= */
+
+#input-area {
+    padding: 12px 20px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-secondary);
+    flex-shrink: 0;
+}
+
+.input-wrapper {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 4px;
+    transition: border-color 0.2s;
+}
+
+.input-wrapper:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+#message-input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    font-size: 0.95rem;
+    padding: 8px 12px;
+    resize: none;
+    outline: none;
+    font-family: inherit;
+    max-height: 120px;
+    line-height: 1.5;
+}
+
+#message-input::placeholder {
+    color: var(--text-muted);
+}
+
+.icon-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 8px;
+    border-radius: var(--radius-sm);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    flex-shrink: 0;
+}
+
+.icon-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.icon-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* ── Mikrofon-Status (wie TypeFREE-Tray) ────────────────────────────────── */
+#mic-btn.recording {
+    color: #00cc44;
+    animation: micPulse 1s infinite ease-in-out;
+}
+
+#mic-btn.transcribing {
+    color: #cc7700;
+}
+
+#mic-btn.polishing {
+    color: #0077cc;
+}
+
+/* Browser-Stimme liest gerade (Roadmap D3) */
+#mic-btn.spricht {
+    color: #aa66ff;
+}
+
+/* Sichtbare Zustandszeile der Spracheingabe über dem Eingabefeld:
+   „Mikrofon offen" / „hört zu" / „denkt nach" / „spricht". */
+.mic-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 4px 6px;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+
+.mic-status[hidden] {
+    display: none;
+}
+
+.mic-status::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: micPulse 1s infinite ease-in-out;
+}
+
+@keyframes micPulse {
+    0% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.6; transform: scale(1.1); }
+    100% { opacity: 1; transform: scale(1); }
+}
+
+.send-btn {
+    color: var(--accent);
+}
+
+/* Der Knopf im Stopp-Zustand: gleiche Stelle, andere Bedeutung – die Farbe
+   muss den Unterschied allein tragen, weil der Daumen ohnehin schon dort ist. */
+/* Wie beim Mikrofon-Status ueber die ID: Der Zustand muss die Grundfarbe
+   des Knopfes sicher schlagen, egal was spaeter im Blatt noch kommt. */
+#send-btn.stopping {
+    color: #cc4444;
+}
+
+#send-btn.stopping:not(:disabled):hover {
+    background: #cc4444;
+    color: white;
+}
+
+/* Der Riegel bleibt dauerhaft an und braucht deshalb keinen Schalter mehr.
+   Die Modellauswahl zeigt ohnehin nur noch, was damit nutzbar ist. */
+#privacy-btn {
+    display: none;
+}
+
+/* Aus demselben Grund ist dieser Filter wirkungslos: Er schraenkt auf
+   speicherfreie Modelle ein, und andere stehen gar nicht mehr in der Liste. */
+#model-filters [data-filter="speicherfrei"] {
+    display: none;
+}
+
+/* ── Werkzeugleiste unter der Eingabe ───────────────────────────────────── */
+/* Bewusst hier und nicht in der Kopfzeile: Bei geöffneter Tastatur ist
+   der obere Bildschirmrand auf dem Handy nicht mehr erreichbar. */
+
+/* ── Datei-Vorschau oberhalb der Eingabe ────────────────────────────────── */
+.file-preview {
+    padding: 8px 0;
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    flex-shrink: 0;
+}
+
+.file-preview.hidden {
+    display: none;
+}
+
+.file-preview-list {
+    display: flex;
+    gap: 8px;
+}
+
+.file-preview-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+    max-width: 180px;
+}
+
+.file-preview-item img {
+    width: 32px;
+    height: 32px;
+    border-radius: 4px;
+    object-fit: cover;
+    flex-shrink: 0;
+}
+
+.file-preview-item .pdf-icon {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(244, 67, 54, 0.15);
+    border-radius: 4px;
+    font-size: 1.2rem;
+    flex-shrink: 0;
+}
+
+.file-preview-item .file-name {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+
+.file-preview-item .file-remove {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 2px;
+    display: flex;
+    align-items: center;
+    border-radius: 50%;
+    transition: all 0.2s;
+    flex-shrink: 0;
+}
+
+.file-preview-item .file-remove:hover {
+    color: var(--error);
+    background: rgba(244, 67, 54, 0.1);
+}
+
+/* ── Datei-Elemente in Chat-Nachrichten ─────────────────────────────────── */
+.message-file {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    margin-top: 8px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+}
+
+.message-file img {
+    max-width: 100%;
+    max-height: 300px;
+    border-radius: var(--radius-sm);
+    object-fit: contain;
+    cursor: pointer;
+    transition: transform 0.2s;
+}
+
+.message-file img:hover {
+    transform: scale(1.02);
+}
+
+.message-file .file-icon {
+    font-size: 1.5rem;
+    flex-shrink: 0;
+}
+
+.message-file .file-meta {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ── Upload-Button in der Eingabezeile ──────────────────────────────────── */
+#upload-btn {
+    color: var(--text-secondary);
+    order: -1; /* links vom Mikrofon */
+}
+
+#upload-btn:hover {
+    color: var(--accent);
+}
+
+#upload-btn.has-files {
+    color: var(--accent);
+}
+
+/* ── Tool-Leiste ────────────────────────────────────────────────────────── */
+.input-tools {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+}
+
+.tool-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    flex-shrink: 0;
+}
+
+.tool-toggle:hover {
+    color: var(--text-primary);
+    border-color: var(--text-secondary);
+}
+
+.tool-toggle.active {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-glow);
+}
+
+/* Streaming-Geschwindigkeit-Menue (Zahnrad oben rechts) */
+.stream-menu {
+    position: absolute;
+    top: 52px;
+    right: 12px;
+    z-index: 120;
+    min-width: 210px;
+    background: #1d1d1f;
+    border: 1px solid #3a3a3a;
+    border-radius: 10px;
+    padding: 8px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+.stream-menu-label {
+    font-size: 12px;
+    color: #aaa;
+    padding: 2px 6px 8px;
+}
+.stream-opt {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 7px 10px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font-size: 0.85rem;
+}
+.stream-opt:hover { background: #2a2a2c; color: var(--accent); }
+#stream-settings-btn { color: var(--text-secondary); }
+#stream-settings-btn:hover { color: var(--text-primary); }
+
+/* "auto" sichtbar von "bei jeder Nachricht" unterscheiden: gestrichelter
+   Rand steht für "nur wenn nötig". */
+.tool-toggle.auto {
+    border-style: dashed;
+}
+
+/* ── Quellenangaben unter einer Antwort ─────────────────────────────────── */
+.sources {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    font-size: 0.8rem;
+}
+
+.sources-title {
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-size: 0.7rem;
+}
+
+.sources a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    /* Fix 29.09.2026: Flex-Kinder schrumpfen sonst nicht unter ihre
+       Textbreite -> nowrap-Titel sprengten die Blase, die Ellipse griff nie. */
+    display: block;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sources a:hover {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
+/* ── Vorlese-Knopf an fertigen Antworten ────────────────────────────────── */
+.speak-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 4px 6px;
+    margin-top: 2px;
+    border-radius: var(--radius-sm);
+    opacity: 0.55;
+    display: inline-flex;
+    align-items: center;
+    /* transform braucht einen nicht-fließenden Kontext, damit scale wirkt;
+       inline-flex ist dafür da (steht schon hier fürs SVG). */
+    transition: opacity 0.2s, color 0.2s, transform 0.2s;
+}
+
+/* Beim Abspielen vergrößert sich das Symbol (ca. 1.2x). Farbe steuert weiter
+   die bestehende .playing-Klasse; .active ist NUR für die Skalierung. */
+.speak-btn.active {
+    transform: scale(1.2);
+}
+
+.speak-btn:hover:not(:disabled) {
+    opacity: 1;
+    color: var(--accent);
+}
+
+.speak-btn:disabled {
+    cursor: wait;
+}
+
+.speak-btn.playing {
+    color: var(--accent);
+    opacity: 1;
+}
+
+.speak-btn.failed {
+    color: #cc4444;
+    opacity: 1;
+}
+
+.speak-btn.busy {
+    animation: speakPulse 1s infinite ease-in-out;
+    color: var(--accent);
+    opacity: 1;
+}
+
+@keyframes speakPulse {
+    0%   { opacity: 1; }
+    50%  { opacity: 0.4; }
+    100% { opacity: 1; }
+}
+
+.send-btn:not(:disabled):hover {
+    background: var(--accent);
+    color: white;
+}
+
+.footer-note {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    margin-left: auto;   /* schiebt sich nach rechts, Werkzeuge bleiben links */
+    text-align: right;
+}
+
+/* Der Text im Fuß ist seit 2026-09-25 ein Knopf (öffnet die Erinnerungen).
+   Als Knopf geerbt er sonst Rahmen/Hintergrund/Farbe der Browsereinstellung –
+   deshalb hier auf das Aussehen eines Textes zurückgesetzt. */
+button.footer-note {
+    background: none;
+    border: none;
+    padding: 2px 4px;
+    font-family: inherit;
+    cursor: pointer;
+    text-decoration: underline dotted;
+}
+
+button.footer-note:hover {
+    color: var(--accent);
+}
+
+/* =========================================
+   Modellauswahl – Blatt von unten
+   =========================================
+   Bewusst kein <select>: 100+ Einträge in einem Aufklappmenü sind auf dem
+   Handy unbedienbar. Stattdessen Favoriten oben, Suchfeld darunter. */
+
+/* Beide Blätter teilen sich Aussehen und Verhalten – Modellwahl und
+   Gesprächsliste unterscheiden sich nur im Inhalt. */
+/* z-index 900: Die Blätter müssen ÜBER der Kopfzeile liegen (die jetzt
+   z-index 200 hat, damit sie beim Tastatur-Öffnen sichtbar bleibt) und
+   unter dem eigenen Kontextmenü (1000) und der Teil-Kopier-Leiste (1100). */
+#model-sheet,
+#chat-sheet,
+#memory-sheet,
+#selbsttest-sheet {
+    position: fixed;
+    inset: 0;
+    z-index: 900;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(3px);
+}
+
+#model-sheet[hidden],
+#chat-sheet[hidden],
+#memory-sheet[hidden],
+#selbsttest-sheet[hidden] {
+    display: none;
+}
+
+/* Eine Zeile der Gesprächsliste. */
+.chat-row {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.9rem;
+    cursor: pointer;
+}
+
+.chat-row:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+/* Das gerade geöffnete Gespräch. */
+.chat-row.aktiv {
+    color: var(--accent);
+}
+
+.chat-row .chat-vorschau {
+    display: block;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    margin-top: 3px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Eine Erinnerung im Gedächtnis-Blatt: Text, darunter Art/Datum,
+   rechts der Entfernen-Knopf. */
+.memory-row {
+    position: relative;
+    padding: 12px 84px 12px 16px;
+    border-bottom: 1px solid var(--border);
+}
+
+.memory-text {
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.memory-meta {
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    margin-top: 4px;
+}
+
+.memory-del {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: 0.7rem;
+    padding: 3px 9px;
+    cursor: pointer;
+}
+
+.memory-del:hover:not(:disabled) {
+    color: #ff7b72;
+    border-color: #ff7b72;
+}
+
+.memory-del:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.sheet-panel {
+    background: var(--bg-secondary);
+    border-top-left-radius: var(--radius);
+    border-top-right-radius: var(--radius);
+    border-top: 1px solid var(--border);
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    /* Sanft hereinfahren – ein Blatt, das aufpoppt, wirkt wie ein Fehler. */
+    animation: sheet-up 0.22s ease-out;
+}
+
+@keyframes sheet-up {
+    from { transform: translateY(100%); }
+    to   { transform: translateY(0); }
+}
+
+.sheet-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 16px 10px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.sheet-head h2 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin-right: auto;
+}
+
+.sheet-close {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 1.5rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 6px;
+}
+
+.sheet-close:hover { color: var(--text-primary); }
+
+/* Aktualisieren-Knopf im Selbsttest-Blatt (klein, unaufdringlich). */
+.sheet-refresh {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 0.73rem;
+    padding: 4px 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.sheet-refresh:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-glow);
+}
+
+/* Der Selbsttest als Klartext (✓/⚠/✗). Monospace + Umbruch, damit auch ein
+   längerer Log-Auszug lesbar bleibt und das Bildschirmfoto nicht überläuft. */
+.selbsttest-text {
+    margin: 0;
+    padding: 6px 6px 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+#model-search {
+    width: 100%;
+    padding: 9px 12px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-family: inherit;
+}
+
+#model-search:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.sheet-search { padding: 10px 16px 6px; flex-shrink: 0; }
+
+.sheet-filters {
+    display: flex;
+    gap: 6px;
+    padding: 2px 16px 10px;
+    overflow-x: auto;
+    flex-shrink: 0;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+}
+
+.sheet-filters::-webkit-scrollbar { display: none; }
+
+.filter-chip {
+    flex-shrink: 0;
+    padding: 5px 11px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 0.73rem;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.filter-chip:hover { color: var(--text-primary); }
+
+.filter-chip.on {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-glow);
+}
+
+.sheet-list {
+    overflow-y: auto;
+    padding: 4px 10px 16px;
+    -webkit-overflow-scrolling: touch;
+}
+
+.sheet-group {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    padding: 12px 6px 6px;
+}
+
+.model-row {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    width: 100%;
+    text-align: left;
+    padding: 10px 12px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.model-row:hover { background: var(--bg-tertiary); }
+
+.model-row.selected {
+    border-color: var(--accent);
+    background: var(--accent-glow);
+}
+
+/* Nicht mehr nutzbare Favoriten bleiben sichtbar, statt still zu
+   verschwinden – sonst merkt man eine Änderung der Einstellungen nie. */
+.model-row.unavailable {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.model-row-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.model-name {
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.model-desc {
+    margin: 0;
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    white-space: normal;   /* Volltext – kein Abschneiden, kein line-clamp */
+}
+
+.model-usecase {
+    margin: 4px 0 0;
+    font-size: 0.72rem;
+    line-height: 1.35;
+    color: var(--text-secondary);
+}
+
+.model-usecase b {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+/* Stärke-Profil-Badges (Farbkodierung für die Gruppierung/Ranking) */
+.badge.stpreis_leistung { background: #0a3a0a; color: #8f8; }
+.badge.stbilder         { background: #2a1a55; color: #a9f; }
+.badge.stcoding         { background: #1a2a4a; color: #8cf; }
+.badge.streasoning      { background: #3a2a1a; color: #fb0; }
+.badge.stalltag         { background: #333;     color: #ccc; }
+
+/* Benchmark-Referenz (falls gepflegt) – nüchterne Zusatzinfo */
+.model-benchmark {
+    margin: 3px 0 0;
+    font-size: 0.7rem;
+    line-height: 1.35;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.model-meta {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.badge {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 2px 6px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    flex-shrink: 0;
+}
+
+.badge.eu {
+    border-color: var(--success);
+    color: var(--success);
+}
+
+.badge.warn {
+    border-color: var(--warning);
+    color: var(--warning);
+}
+
+.sheet-note {
+    padding: 10px 16px;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+/* =========================================================================
+   Erzähl-Diashow (Auftrag E8a, 28.09.2026) — Ereignis wählen, durch die
+   Diashow klicken, zu jedem Bild tippen oder sprechen. Vollbild-Blatt wie
+   das Selbsttest-Blatt; links Ereignisliste, rechts Diashow. Am Handy
+   (< 768 px) zwei Stufen statt nebeneinander (erzaehlen.js schaltet [hidden]).
+   ========================================================================= */
+#erzaehlen-sheet {
+    position: fixed;
+    inset: 0;
+    z-index: 900;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(3px);
+}
+
+#erzaehlen-sheet[hidden] { display: none; }
+
+.erzaehl-panel {
+    max-height: 92vh;
+    height: 92vh;
+}
+
+.erzaehl-body {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.erzaehl-spalte {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+/* Fix 06.10.2026: „display: flex" oben hebelte das hidden-Attribut aus — am Handy
+   blieb die Liste stehen und die geöffnete Diashow lag 20 px hoch unter ihr
+   (Antippen „tat nichts"). Gemessen per WebView-Debug am Handy. */
+.erzaehl-spalte[hidden] { display: none; }
+
+.erzaehl-liste-spalte {
+    width: 320px;
+    max-width: 42%;
+    border-right: 1px solid var(--border);
+}
+
+.erzaehl-diashow-spalte {
+    flex: 1;
+    padding: 10px 14px 0;      /* unten 0: der klebende Eingabe-Fuß bringt den Abstand mit */
+    overflow-y: auto;
+}
+
+.erzaehl-filter {
+    display: flex;
+    gap: 6px;
+    padding: 10px 12px 6px;
+    flex-shrink: 0;
+}
+
+.erzaehl-filter input {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.85rem;
+    padding: 7px 10px;
+}
+
+#erzaehl-suche { flex: 1; min-width: 0; }
+#erzaehl-jahr { width: 76px; }
+
+.erzaehl-liste {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 6px 10px;
+}
+
+.erzaehl-row {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    padding: 9px 10px;
+    margin-bottom: 4px;
+    color: var(--text-primary);
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.erzaehl-row:hover { background: var(--bg-tertiary); }
+
+.erzaehl-row.aktiv {
+    border-color: var(--accent);
+    background: var(--accent-glow);
+}
+
+/* Blätter-Knopf unter der Ereignisliste (07.10.2026): die Liste zeigt erst
+   200 Ereignisse, der Rest kommt auf Antippen nach. */
+.erzaehl-mehr {
+    display: block;
+    width: 100%;
+    text-align: center;
+    background: transparent;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px;
+    margin: 6px 0 12px;
+    color: var(--accent);
+    font-family: inherit;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.erzaehl-mehr:hover {
+    background: var(--bg-tertiary);
+    border-color: var(--accent);
+}
+
+.erzaehl-row-titel {
+    font-size: 0.87rem;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.erzaehl-row-meta {
+    margin-top: 2px;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    display: flex;
+    gap: 8px;
+}
+
+.erzaehl-row-marker {
+    color: var(--accent);
+}
+
+.erzaehl-back {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 0.78rem;
+    padding: 5px 12px;
+    margin-bottom: 8px;
+    align-self: flex-start;
+    cursor: pointer;
+    display: none;
+}
+
+.erzaehl-bild-buehne {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.erzaehl-bild-rahmen {
+    position: relative;
+    flex: 1;
+    min-height: 220px;
+    max-height: 46vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-primary);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.erzaehl-bild-rahmen img {
+    max-width: 100%;
+    max-height: 46vh;
+    object-fit: contain;
+    border-radius: var(--radius);
+}
+
+.erzaehl-bild-platzhalter {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
+.erzaehl-nav {
+    flex-shrink: 0;
+    width: 40px;
+    height: 40px;
+    border-radius: 999px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    font-size: 1.1rem;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.erzaehl-nav:hover { border-color: var(--accent); color: var(--accent); }
+.erzaehl-nav:disabled { opacity: 0.4; cursor: default; }
+
+.erzaehl-zaehler {
+    text-align: center;
+    margin-top: 6px;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+
+.erzaehl-geschichten {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.erzaehl-geschichte-zeile {
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    font-size: 0.85rem;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+.erzaehl-geschichte-meta {
+    margin-top: 3px;
+    font-size: 0.68rem;
+    color: var(--text-muted);
+}
+
+.erzaehl-eingabe-zeile {
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+    margin-top: 10px;
+}
+
+.erzaehl-eingabe-zeile textarea {
+    flex: 1;
+    resize: vertical;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.88rem;
+    padding: 8px 10px;
+}
+
+/* Übersicht (06.10.2026): erst alle Bilder der Gruppe als Raster, dazu eine
+   Geschichte zur ganzen Gruppe; Antippen öffnet ein Bild einzeln. Die Eingabe
+   klebt unten, damit sie auch bei vielen Bildern erreichbar bleibt. Jede Regel
+   mit display hat ihr [hidden]-Gegenstück (Lehre aus dem Fehler vom selben Tag). */
+.erzaehl-uebersicht[hidden],
+.erzaehl-einzel[hidden],
+.erzaehl-back[hidden] { display: none; }
+
+.erzaehl-back-immer { display: inline-block; }
+
+/* Zwischen Anlässen blättern (#18, 07.10.2026): ◀ Zähler ▶ über dem Titel,
+   Wischen über die ganze Spalte (senkrechtes Scrollen bleibt). */
+.erzaehl-diashow-spalte { touch-action: pan-y pinch-zoom; }
+
+.erzaehl-anlass-nav {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.erzaehl-anlass-nav[hidden] { display: none; }
+.erzaehl-anlass-nav .erzaehl-back { margin-bottom: 0; }
+
+.erzaehl-anlass-blaettern {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.erzaehl-anlass-blaettern .erzaehl-zaehler {
+    margin-top: 0;
+    min-width: 8.5em;
+}
+
+.erzaehl-anlass-knopf {
+    width: 34px;
+    height: 34px;
+    font-size: 0.95rem;
+}
+
+.erzaehl-uebersicht.erzaehl-rein-vor { animation: erzaehlReinVor 0.22s ease; }
+.erzaehl-uebersicht.erzaehl-rein-zurueck { animation: erzaehlReinZurueck 0.22s ease; }
+
+@keyframes erzaehlReinVor {
+    from { opacity: 0.35; transform: translateX(28px); }
+    to { opacity: 1; transform: none; }
+}
+
+@keyframes erzaehlReinZurueck {
+    from { opacity: 0.35; transform: translateX(-28px); }
+    to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .erzaehl-uebersicht.erzaehl-rein-vor,
+    .erzaehl-uebersicht.erzaehl-rein-zurueck { animation: none; }
+}
+
+.erzaehl-raster {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.erzaehl-kachel {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-primary);
+    overflow: hidden;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.15s, transform 0.15s;
+}
+
+.erzaehl-kachel:hover { border-color: var(--accent); }
+.erzaehl-kachel:active { transform: scale(0.97); }
+
+.erzaehl-kachel-bild {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    overflow: hidden;
+    background: var(--bg-secondary, rgba(0, 0, 0, 0.2));
+}
+
+.erzaehl-kachel-bild img,
+.erzaehl-kachel > img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.erzaehl-kachel.leer { opacity: 0.45; }
+
+.erzaehl-kachel-marker {
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.65);
+    color: var(--accent);
+    font-size: 0.7rem;
+    z-index: 2;
+}
+
+.erzaehl-kachel-untertitel {
+    padding: 6px 8px;
+    font-size: 0.75rem;
+    line-height: 1.3;
+    color: var(--text-muted);
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    word-break: break-word;
+    min-height: 2.8em;
+}
+
+.erzaehl-kachel-untertitel:empty {
+    display: none;
+}
+
+/* Eigener Titel (06.10.2026): ✏️ öffnet das Eingabefeld. */
+.erzaehl-titel-zeile {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.erzaehl-titel {
+    flex: 1;
+    min-width: 0;
+    margin: 2px 0 4px;
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1.3;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+
+.erzaehl-titel-bearbeiten {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+
+.erzaehl-titel-bearbeiten[hidden] { display: none; }
+
+.erzaehl-titel-bearbeiten input {
+    flex: 1 1 180px;
+    min-width: 0;
+    background: var(--bg-primary);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.9rem;
+    padding: 8px 10px;
+}
+
+.erzaehl-titel-bearbeiten .erzaehl-back { margin-bottom: 0; }
+
+/* Wer ist auf den Bildern (06.10.2026) — Zeile mit 🔊 zum Vorlesen. */
+.erzaehl-personen {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-primary);
+    font-size: 0.82rem;
+    line-height: 1.35;
+    color: var(--text-primary);
+}
+
+.erzaehl-personen[hidden] { display: none; }
+
+/* Was und wo (07.10.2026): Orte der Gruppe, Ort und Beschreibung je Bild. */
+.erzaehl-info {
+    position: relative;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 8px;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-primary);
+    font-size: 0.82rem;
+    line-height: 1.4;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+
+.erzaehl-info[hidden],
+.erzaehl-info > [hidden] { display: none; }
+
+.erzaehl-beschreibung { color: var(--text-secondary); }
+
+/* Gesichter im Einzelbild benennen (#11b, 07.10.2026). */
+.erzaehl-gesichter {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    touch-action: pan-x pan-y;      /* Leiste waagerecht scrollen, ohne das Bild zu wechseln */
+}
+
+.erzaehl-gesichter[hidden],
+.erzaehl-gesicht-bearbeiten[hidden],
+.erzaehl-gesicht-meldung[hidden],
+.erzaehl-gesicht-zeile[hidden],
+.erzaehl-gesicht-felder [hidden] { display: none; }
+
+.erzaehl-gesicht {
+    flex-shrink: 0;
+    width: 72px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    padding: 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.7rem;
+    cursor: pointer;
+    transition: border-color 0.15s, transform 0.15s;
+}
+
+.erzaehl-gesicht canvas {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+}
+
+.erzaehl-gesicht span {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.erzaehl-gesicht.offen { border-style: dashed; color: var(--accent); }
+.erzaehl-gesicht.aktiv { border-color: var(--accent); background: var(--accent-glow); }
+.erzaehl-gesicht:hover { border-color: var(--accent); transform: translateY(-1px); }
+
+.erzaehl-gesicht-bearbeiten {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    margin-top: 8px;
+    padding: 8px;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: var(--bg-primary);
+}
+
+.erzaehl-gesicht-bearbeiten canvas {
+    width: 80px;
+    height: 80px;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+}
+
+.erzaehl-gesicht-felder {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 0.82rem;
+}
+
+.erzaehl-gesicht-zeile {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+.erzaehl-gesicht-zeile input {
+    flex: 1;
+    min-width: 0;
+    padding: 7px 9px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.85rem;
+}
+
+.erzaehl-gesicht-zeile .erzaehl-back { margin-bottom: 0; }
+
+.erzaehl-gesicht-treffer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.erzaehl-gesicht-vorschlag {
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.78rem;
+    cursor: pointer;
+    transition: border-color 0.15s;
+}
+
+.erzaehl-gesicht-vorschlag:hover { border-color: var(--accent); }
+
+.erzaehl-gesicht-meldung {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+
+.erzaehl-gesicht-meldung .erzaehl-back { margin-bottom: 0; }
+
+/* Kopfzeile über den Notizen/Geschichten (07.10.2026): Beschriftung plus
+   Vorlese-Knopf, damit sich die Notizen wie ein Tagebuch anhören lassen. */
+.erzaehl-geschichten-kopf {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.erzaehl-geschichten-kopf[hidden] { display: none; }
+
+.erzaehl-geschichten-kopf-text { flex: 1; min-width: 0; }
+
+.erzaehl-personen span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
+.erzaehl-vorlesen {
+    flex-shrink: 0;
+    width: 34px;
+    height: 34px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    cursor: pointer;
+    transition: border-color 0.15s;
+}
+
+.erzaehl-vorlesen:hover { border-color: var(--accent); }
+
+.erzaehl-eingabe-fuss {
+    position: sticky;
+    bottom: 0;
+    margin-top: auto;
+    padding-bottom: 10px;
+    background: var(--bg-secondary);
+}
+
+/* Am Handy: Liste und Diashow als zwei Stufen statt nebeneinander. */
+@media (max-width: 768px) {
+    .erzaehl-body { flex-direction: column; }
+    .erzaehl-liste-spalte { width: 100%; max-width: 100%; border-right: none; }
+    .erzaehl-back { display: inline-block; }
+}
+
+/* Detailansicht: wer bedient das Modell, was macht er mit den Daten */
+.model-details {
+    padding: 6px 12px 10px;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.provider-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+}
+
+.provider-row:last-child { border-bottom: none; }
+.provider-row .name { flex: 1 1 auto; color: var(--text-primary); }
+.provider-row a { color: var(--accent); text-decoration: none; }
+.provider-row a:hover { text-decoration: underline; }
+
+/* =========================================
+   Utility Classes
+   ========================================= */
+
+.hidden {
+    display: none !important;
+}
+
+/* =========================================
+   Responsive
+   ========================================= */
+
+@media (max-width: 600px) {
+    #header {
+        padding: 12px 16px;
+    }
+
+    #chat-container {
+        padding: 12px 16px;
+    }
+
+    #input-area {
+        padding: 8px 12px 12px;
+    }
+
+    .message-content {
+        max-width: 90%;
+        font-size: 0.9rem;
+    }
+}
+
+@media (min-width: 801px) {
+    #app {
+        border-left: 1px solid var(--border);
+        border-right: 1px solid var(--border);
+    }
+}
+/* WhatsApp-artige Antwort-Vorschau (Zitat) ueberm Eingabefeld */
+.antwort-vorschau { display:flex; align-items:flex-start; gap:8px; padding:8px 12px;
+    margin:6px 12px 0; background:var(--bg2,#1a2a24); border-left:3px solid var(--accent,#4a7);
+    border-radius:8px; font-size:0.82rem; }
+.antwort-vorschau .av-inhalt { flex:1; min-width:0; }
+.antwort-vorschau .av-rolle { font-weight:600; color:var(--accent,#8cf); margin-bottom:2px; }
+.antwort-vorschau .av-text { color:#cfd6cf; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.antwort-vorschau .av-bild { max-width:44px; max-height:44px; border-radius:6px; object-fit:cover; }
+.antwort-vorschau .av-x { background:none;border:none;color:#9aa;font-size:1.1rem;cursor:pointer;line-height:1;padding:2px 4px; }
+
+/* =========================================
+   N13b — Bilder im Chat (Galerie + Diashow)
+   Dunkler Look wie der Rest der Oberflaeche. Die Bilder selbst werden als
+   Objekt-URL (Blob) eingesetzt und nach dem Ansehen freigegeben — hier steht
+   nur die Darstellung.
+   ========================================= */
+.foto-zeilen {
+    font-size: 0.78rem;
+    color: #b9b9cf;
+    white-space: pre-wrap;
+    margin: 4px 0 8px;
+}
+.foto-kacheln {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+    gap: 8px;
+}
+.foto-kachel {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 0;
+    min-height: 84px;
+    overflow: hidden;
+    cursor: pointer;
+    color: inherit;
+    background: var(--assistant-msg-bg, #1a1a35);
+    border: 1px solid var(--border, #2a2a40);
+    border-radius: var(--radius-sm, 8px);
+}
+.foto-kachel:active {
+    border-color: var(--accent, #6c63ff);
+}
+.foto-kachel-bild {
+    width: 100%;
+    height: 84px;
+    object-fit: cover;
+    display: block;
+}
+.foto-kachel-name {
+    max-width: 100%;
+    padding: 2px 4px;
+    font-size: 0.62rem;
+    color: var(--text-secondary, #9898b0);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.foto-platzhalter {
+    padding: 6px;
+    font-size: 0.65rem;
+    color: var(--text-muted, #6b6b80);
+    text-align: center;
+}
+.foto-gross {
+    position: fixed;
+    inset: 0;
+    z-index: 1200;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px;
+    background: rgba(0, 0, 0, 0.88);
+}
+.foto-gross-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    max-width: min(560px, 96vw);
+    padding: 10px;
+    background: var(--bg-secondary, #1a1a2e);
+    border: 1px solid var(--border, #2a2a40);
+    border-radius: var(--radius, 12px);
+}
+.foto-gross-bild {
+    width: 100%;
+    max-height: 60vh;
+    object-fit: contain;
+    border-radius: var(--radius-sm, 8px);
+    background: #0b0b14;
+}
+.foto-gross-kopf {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 0.78rem;
+    color: var(--text-secondary, #9898b0);
+}
+.foto-gross-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.foto-gross-zaehler {
+    flex: none;
+}
+.foto-gross-knoepfe {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.foto-knopf {
+    flex: 1 1 auto;
+    padding: 8px 10px;
+    font-size: 0.82rem;
+    color: inherit;
+    cursor: pointer;
+    background: #22223a;
+    border: 1px solid var(--border, #2a2a40);
+    border-radius: var(--radius-sm, 8px);
+}
+.foto-knopf:active {
+    border-color: var(--accent, #6c63ff);
+}
+.foto-knopf-schliessen {
+    flex: 0 0 auto;
+}
+
+
+/* =========================================================================
+   Personen benennen im Gruppenmodus (Plan Foto-Gedächtnis Schritt 2,
+   01.10.2026) — gruppen_quiz.js. Blatt wie Erzählen/Selbsttest; Kacheln mit
+   Gesichtsausschnitten (canvas), große Tippflächen fürs Handy.
+   ========================================================================= */
+#gruppen-sheet {
+    position: fixed;
+    inset: 0;
+    z-index: 900;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(3px);
+}
+
+#gruppen-sheet[hidden] { display: none; }
+
+.gruppen-panel {
+    max-height: 92vh;
+}
+
+.gruppen-body {
+    overflow-y: auto;
+    padding: 12px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.gruppen-fortschritt {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+
+.gruppen-karte[hidden],
+.gruppen-fertig[hidden] { display: none; }
+
+.gruppen-karte {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.gruppen-kopf {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.gruppen-kopf h3 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    background: linear-gradient(135deg, var(--accent), #e040fb);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+}
+
+.gruppen-offen,
+.gruppen-meta {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+
+.gruppen-kacheln {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+}
+
+.gruppen-kachel {
+    position: relative;
+    aspect-ratio: 1;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--bg-tertiary);
+    cursor: zoom-in;
+    transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+.gruppen-kachel:hover,
+.gruppen-kachel:focus-visible { border-color: var(--accent); transform: scale(1.02); }
+
+.gruppen-kachel canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+.gruppen-kachel.leer::after {
+    content: '—';
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-secondary);
+}
+
+.gruppen-kachel.klein {
+    width: 44px;
+    flex-shrink: 0;
+}
+
+.gruppen-zwillinge:empty { display: none; }
+
+/* Vorschlagsnummer + Wechsel-Animation (01.10.2026): Nach „Speichern" sah der
+   nächste Vorschlag oft gleich aus (wieder dieselbe Person) — jetzt sieht man,
+   dass gewechselt wurde. */
+.gruppen-nummer {
+    margin-right: auto;
+    padding: 1px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+.gruppen-karte.gruppen-wechsel {
+    animation: gruppen-einblenden 0.45s ease;
+}
+
+@keyframes gruppen-einblenden {
+    from { opacity: 0.25; transform: translateX(18px); }
+    to   { opacity: 1;    transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .gruppen-karte.gruppen-wechsel { animation: none; }
+}
+
+.gruppen-verbunden:empty { display: none; }
+
+.gruppen-notiz-zeile {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+}
+
+.gruppen-notiz-zeile textarea { flex: 1; min-width: 0; }
+
+/* Sprechknopf am Erinnerungsfeld; starteFeldDiktat (app.js) färbt ihn während
+   der Aufnahme rot und schreibt „⬤ Aufnahme läuft…" hinein. */
+.gruppen-mikro {
+    flex-shrink: 0;
+    min-width: 48px;
+    padding: 0 10px;
+    border: 1px solid var(--accent);
+    border-radius: 10px;
+    background: rgba(108, 99, 255, 0.12);
+    color: var(--text-primary);
+    font-size: 1.2rem;
+    cursor: pointer;
+    transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.gruppen-mikro:hover { background: rgba(108, 99, 255, 0.25); }
+.gruppen-mikro:active { transform: scale(0.96); }
+
+/* Suchfeld-Treffer (02.10.2026, Issue #3 B): benannte Personen, dann Kontakte. */
+.gruppen-treffer:empty { display: none; }
+
+.gruppen-treffer {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 14rem;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 4px;
+    background: rgba(15, 15, 26, 0.6);
+}
+
+.gruppen-treffer-zeile {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    width: 100%;
+    padding: 8px 12px;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text-primary, inherit);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.gruppen-treffer-zeile:hover,
+.gruppen-treffer-zeile:focus-visible { background: rgba(108, 99, 255, 0.18); outline: none; }
+.gruppen-treffer-zeile:active { transform: scale(0.98); }
+
+.gruppen-treffer-name { font-size: 0.95rem; font-weight: 600; }
+
+.gruppen-treffer-info,
+.gruppen-treffer-leer {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin: 0;
+}
+
+.gruppen-treffer-leer { padding: 8px 12px; }
+
+.gruppen-verbunden {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--accent);
+    border-radius: 10px;
+    background: linear-gradient(135deg, rgba(108, 99, 255, 0.12), rgba(224, 64, 251, 0.06));
+    font-size: 0.8rem;
+}
+
+.gruppen-verbunden span {
+    flex: 1 1 100%;
+    color: var(--text-secondary);
+}
+
+.gruppen-zwillinge {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.gruppen-zwilling {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px;
+    border: 1px dashed var(--accent);
+    border-radius: 10px;
+    font-size: 0.8rem;
+}
+
+.gruppen-zwilling span {
+    flex: 1 1 140px;
+    min-width: 0;
+}
+
+.gruppen-zwilling-knoepfe {
+    display: flex;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.gruppen-eingabe {
+    display: flex;
+    gap: 8px;
+}
+
+.gruppen-eingabe input {
+    flex: 1;
+    min-width: 0;
+    padding: 12px 14px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    color: inherit;
+    font-size: 1rem;
+}
+
+.gruppen-eingabe input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.gruppen-leiste {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.gruppen-knopf {
+    padding: 10px 14px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    color: inherit;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.gruppen-knopf:hover { border-color: var(--accent); }
+.gruppen-knopf:active { transform: scale(0.97); }
+
+.gruppen-knopf.haupt {
+    background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+    border-color: transparent;
+    color: #fff;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.gruppen-fertig {
+    text-align: center;
+    padding: 24px 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+}
+
+.gruppen-meldung {
+    min-height: 1.2em;
+    font-size: 0.82rem;
+    color: #9f9;
+}
+
+.gruppen-meldung.fehler { color: #f99; }
+
+.gruppen-profil {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+/* Namensfelder im Profil (20.10.2026, Schritt 3): Vorname und Nachname
+   nebeneinander, die Spitznamen-Zeile über die volle Breite. Am Handy (< 480 px)
+   stehen alle drei untereinander. */
+.gruppen-namensfelder {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.gruppen-namensfelder input:last-child {
+    grid-column: 1 / -1;
+}
+
+@media (max-width: 480px) {
+    .gruppen-namensfelder { grid-template-columns: 1fr; }
+}
+
+.gruppen-profil input,
+.gruppen-profil textarea {
+    width: 100%;
+    padding: 10px 14px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    color: inherit;
+    font: inherit;
+    font-size: 0.95rem;
+    resize: vertical;
+}
+
+.gruppen-profil input:focus,
+.gruppen-profil textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+/* Alle Gesichter eines Vorschlags (02.10.2026): durchsehen, falsche ausschließen. */
+.gruppen-alle-ansicht[hidden] { display: none; }
+
+.gruppen-alle-ansicht {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.gruppen-alle-raster {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.gruppen-kachel.markiert {
+    border-color: #ff6b6b;
+    box-shadow: 0 0 0 2px rgba(255, 107, 107, 0.6);
+}
+
+.gruppen-kachel.markiert::after {
+    content: '✕';
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2rem;
+    font-weight: 700;
+    color: #fff;
+    background: rgba(200, 40, 40, 0.45);
+}
+
+.gruppen-alle-leiste {
+    position: sticky;
+    bottom: 0;
+    padding: 8px 0 calc(4px + env(safe-area-inset-bottom, 0px));
+    background: linear-gradient(to top, var(--bg-secondary) 70%, transparent);
+}
+
+.gruppen-alle-leiste {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.gruppen-alle-leiste .gruppen-knopf { flex: 1 1 45%; min-width: 0; }
+
+/* Zuordnen (10.10.2026): Namen als Knöpfe über der Leiste. */
+.gruppen-alle-namen[hidden] { display: none; }
+
+.gruppen-alle-namen {
+    flex-basis: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-height: 40vh;
+    overflow-y: auto;
+}
+
+.gruppen-alle-namen .gruppen-meta { flex-basis: 100%; margin: 0; }
+
+.gruppen-alle-leiste .gruppen-alle-namen .gruppen-namen-chip { flex: 0 1 auto; }
+
+.gruppen-alle-werkzeuge {
+    display: flex;
+    justify-content: flex-end;
+    /* S4 (16.10.2026): die Werkzeugzeile trägt seit dem Auswahlmodus zwei Knöpfe
+       („Nach Jahren“, „Auswahl beenden“) — auf schmalen Anzeigen bricht sie um,
+       statt aus dem Blatt zu laufen. */
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+/* Zeitblöcke: Jahreskopf über die ganze Rasterbreite. */
+.gruppen-alle-jahr {
+    grid-column: 1 / -1;
+    margin-top: 6px;
+    padding: 2px 4px;
+    font-weight: 600;
+    color: var(--accent);
+    border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+}
+
+/* Standbild aus einem Video (14.10.2026): Zeitmarke unten rechts. */
+.gruppen-video-marke {
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    z-index: 1;
+    font-size: 0.7rem;
+    padding: 1px 4px;
+    border-radius: 6px;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.6);
+    pointer-events: none;
+}
+
+/* Von Hand zugeordnet: kleines Personen-Zeichen unten links. */
+.gruppen-kachel.zugeordnet::before {
+    content: '👤';
+    position: absolute;
+    left: 4px;
+    bottom: 4px;
+    z-index: 1;
+    font-size: 0.8rem;
+    padding: 1px 3px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.55);
+}
+
+.gruppen-alle-leiste .gruppen-knopf:disabled {
+    opacity: 0.55;
+    cursor: default;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+}
+
+/* Reiter „Offen“ / „Benannt“ + Person bearbeiten (02.10.2026, Wunsch des Betreibers:
+   schon benannte Personen wieder aufrufen und bearbeiten wie ein Dokument). */
+.gruppen-reiter,
+.gruppen-liste-filter {
+    display: flex;
+    gap: 4px;
+    padding: 4px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: rgba(15, 15, 26, 0.6);
+}
+
+.gruppen-reiter-knopf {
+    flex: 1;
+    padding: 9px 12px;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background 0.2s ease, color 0.2s ease;
+}
+
+.gruppen-reiter-knopf.aktiv {
+    background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+    color: #fff;
+    font-weight: 600;
+}
+
+/* Gruppenübersicht/-liste (T2 am 16.10.2026 in `main` übernommen). Die Ansicht
+   bringt eigene Klassen mit; ohne Regeln klebte sie unformatiert unter dem Quiz.
+   Nachgetragen als Befund 1 der Ergebnisprüfung — die Ansicht steht als
+   Geschwister der Quiz-Karte, deshalb dieselbe Spaltenform wie .gruppen-benannt-ansicht.
+   Achtung: `display: flex` überschreibt das `hidden`-Attribut, deshalb die
+   [hidden]-Zeile — die Ansicht wird per `hidden` ein- und ausgeblendet. */
+.gruppen-liste-ansicht[hidden] { display: none; }
+
+/* To-do Punkt 14 (18.10.2026): der Statusfilter der Gruppenliste hat jetzt fünf
+   Knöpfe (Offen · Später · Benannt · Aufgelöst · Ausgeblendet). Gemessen im
+   echten Browser: bei 380 px Breite lag „Ausgeblendet" außerhalb des Fensters.
+   Deshalb umbrechen und eine Mindestbreite, damit die Knöpfe bedienbar bleiben. */
+.gruppen-liste-filter { flex-wrap: wrap; }
+
+.gruppen-liste-filter .gruppen-reiter-knopf { min-width: 84px; }
+
+.gruppen-liste-ansicht {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.gruppen-uebersicht-knopf { width: 100%; margin-top: 2px; }
+
+.gruppen-liste-seiten { display: flex; gap: 8px; }
+
+.gruppen-liste-seiten .gruppen-knopf { flex: 1 1 45%; min-width: 0; }
+
+.gruppen-benannt-ansicht[hidden],
+.gruppen-person[hidden] { display: none; }
+
+.gruppen-benannt-ansicht,
+.gruppen-person {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.gruppen-benannt-liste {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.gruppen-benannt-zeile {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 10px 6px 6px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-tertiary);
+    cursor: pointer;
+    transition: border-color 0.15s ease, transform 0.1s ease;
+}
+
+.gruppen-benannt-zeile:hover,
+.gruppen-benannt-zeile:focus-visible { border-color: var(--accent); outline: none; }
+.gruppen-benannt-zeile:active { transform: scale(0.99); }
+
+.gruppen-benannt-zeile .gruppen-kachel.klein { width: 52px; cursor: pointer; }
+
+.gruppen-benannt-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.gruppen-abschnitt {
+    margin: 6px 0 0;
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+}
+
+.gruppen-person-vorschlag {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: linear-gradient(135deg, rgba(108, 99, 255, 0.08), rgba(224, 64, 251, 0.04));
+}
+
+.gruppen-person-vorschlaege {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.gruppen-person-notizen:empty { display: none; }
+
+.gruppen-person-notizen {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.gruppen-person-notiz {
+    padding: 8px 12px;
+    border-left: 3px solid var(--accent);
+    border-radius: 8px;
+    background: var(--bg-tertiary);
+}
+
+.gruppen-person-notiz p {
+    margin: 2px 0 0;
+    font-size: 0.9rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+
+/* ── Lebensabschnitte & Erinnerungen (30.10.2026) ────────────────────────── */
+.gruppen-phasen-vorschlag {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 14px;
+    border: 1px solid rgba(108, 99, 255, 0.35);
+    border-radius: 12px;
+    background: linear-gradient(135deg, rgba(108, 99, 255, 0.12), rgba(224, 64, 251, 0.06));
+}
+
+.gruppen-phasen-vorschlag[hidden] { display: none; }
+
+.gruppen-phasen-hinweis {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.gruppen-phasen-uebernehmen {
+    margin-left: auto;
+}
+
+.gruppen-lebensabschnitte {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.gruppen-lebensabschnitte[hidden] { display: none; }
+
+.gruppen-lebensabschnitt-karte {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-tertiary);
+    border-left: 3px solid var(--accent);
+}
+
+.gruppen-lebensabschnitt-titel {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.lebensabschnitt-aussage {
+    margin: 2px 0 6px;
+    font-style: italic;
+    color: var(--text-secondary);
+}
+
+.lebensabschnitt-begleiter {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
+.lebensabschnitt-kacheln {
+    margin-top: 4px;
+}
+
+
+/* ── Anmelden aus dem Heim-WLAN (HTTPS-Plan H2, 14.10.2026) ─────────────── */
+#anmelden {
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: radial-gradient(circle at 30% 20%, rgba(108, 99, 255, 0.18), transparent 60%),
+                rgba(15, 15, 26, 0.92);
+    backdrop-filter: blur(8px);
+    animation: anmelden-ein 0.25s ease-out;
+}
+#anmelden[hidden] { display: none; }
+body.anmelden-offen { overflow: hidden; }
+.anmelden-karte {
+    width: 100%;
+    max-width: 360px;
+    padding: 28px 24px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: linear-gradient(160deg, rgba(26, 26, 46, 0.95), rgba(22, 33, 62, 0.9));
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45), 0 0 0 1px var(--accent-glow);
+}
+.anmelden-karte h2 { margin: 0 0 4px; font-size: 1.25rem; }
+.anmelden-untertitel { margin: 0 0 20px; color: var(--text-secondary); font-size: 0.9rem; }
+#anmelden-formular { display: flex; flex-direction: column; gap: 8px; }
+#anmelden-formular[hidden] { display: none; }
+#anmelden-formular label { color: var(--text-secondary); font-size: 0.85rem; }
+#anmelden-formular input {
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 1rem;
+}
+#anmelden-formular input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+#anmelden-benutzer { color: var(--text-muted); }
+#anmelden-knopf {
+    margin-top: 8px;
+    padding: 11px;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: var(--accent);
+    color: #fff;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.1s;
+}
+#anmelden-knopf:hover { background: var(--accent-hover); }
+#anmelden-knopf:active { transform: scale(0.98); }
+#anmelden-knopf:disabled { opacity: 0.6; cursor: wait; }
+.anmelden-meldung { min-height: 1.2em; margin: 4px 0 0; color: var(--error); font-size: 0.9rem; }
+.anmelden-hinweis { margin: 0; color: var(--warning); line-height: 1.5; }
+@keyframes anmelden-ein { from { opacity: 0; } to { opacity: 1; } }
+
+/* =========================================================================
+   Kachelgroesse in breiten Ansichten (S3, 16.10.2026) — Befund der Betreiber:
+   „Fuer Tablet oder PC sind die Kacheln viel, viel zu gross." Das
+   Gruppenblatt liegt NICHT in #app (max-width: 800px) und fuellt das Fenster;
+   mit vier festen Spalten waren die Gesichts-Kacheln bei 1400 px rund 337 px
+   breit (im echten Browser gemessen), bei 380 px 82,5 px.
+   Ab 1000 px Fensterbreite daher ein Raster mit fester Mindestbreite statt
+   fester Spaltenzahl: mehr Spalten, kleinere Kacheln (gemessen 8 Spalten zu
+   165,75 px bei 1400 px, 6 zu 156,33 px bei 1000 px).
+   Unter 1000 px — Handy (380 px) und Tablet (768 px) — bleibt alles wie
+   bisher: vier Spalten, gleiche Kachelbreite. Der Block steht bewusst am
+   Dateiende, weil .gruppen-alle-raster weiter oben vier Spalten setzt und
+   hier ueberschrieben werden muss.
+   ========================================================================= */
+@media (min-width: 1000px) {
+    .gruppen-kacheln,
+    .gruppen-alle-raster {
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    }
+}
+
+/* =========================================================================
+   Gruppenfilter in „Benannt“ (S5, 16.10.2026) — Wunsch des Betreibers: die
+   Filterauswahl der Gruppenansicht auch in „Benannt“, ohne die Ansicht
+   umzubauen. Die Zeile traegt Suche, Gruppenauswahl und Zuruecksetzen;
+   auf schmalen Anzeigen bricht sie um, statt zu quetschen.
+   ========================================================================= */
+.gruppen-benannt-filter-zeile {
+    flex-wrap: wrap;
+}
+
+.gruppen-benannt-filter-zeile input[type="search"],
+.gruppen-benannt-filter-zeile select {
+    flex: 1 1 170px;
+    min-width: 0;
+}
+
+.gruppen-benannt-filter-zeile select {
+    padding: 12px 14px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    color: inherit;
+    font-size: 1rem;
+}
+
+.gruppen-benannt-filter-zeile select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+/* =========================================
+   Server-Zustand (18.10.2026, To-do Punkt 12)
+   Kleine Anzeige; seit 20.10.2026 (Wunsch des Betreibers) im Fenster "Checks"
+   (#selbsttest-sheet). Der farbige Punkt traegt den Zustand, der Text
+   nennt ihn im Klartext; derselbe Zustand steckt im Roboter-Symbol im Kopf
+   (#agent-face, siehe unten).
+   ========================================= */
+
+.server-zustand {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 20px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    min-width: 0;
+}
+
+.server-punkt {
+    flex: 0 0 auto;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--text-muted);
+}
+
+#server-zustand-text {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.server-zustand[data-zustand="ok"] .server-punkt { background: #57c46a; }
+.server-zustand[data-zustand="kein-modell"] .server-punkt { background: #ffb86b; }
+.server-zustand[data-zustand="weg"] .server-punkt { background: #e05555; }
+
+.server-zustand[data-zustand="weg"] #server-zustand-text {
+    color: #ff9a9a;
+}
+
+#server-protokoll-btn {
+    flex: 0 0 auto;
+    margin-left: auto;
+    padding: 2px 8px;
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+/* =========================================================================
+   Server-Bereich (18.10.2026, To-do Punkt 16) — Wunsch des Betreibers:
+   „Früher war es so, dass in Termux der Server gesteuert wurde und ich den
+   Verlauf sehen konnte … Das ist nicht mehr möglich."
+   Zeigt die letzten Zeilen des Server-Protokolls, dazu die Angaben aus
+   /api/health und die Knöpfe „Aktualisieren" / „Neu starten".
+   Seit 20.10.2026 (Wunsch des Betreibers) im Fenster "Checks" statt am oberen
+   Rand; zugeklappt (`hidden`). Das Protokoll selbst ist ein <pre> mit
+   eigenem Rollbereich, damit lange Zeilen das Fenster nicht aufblasen.
+   ========================================= */
+
+.server-protokoll {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px 20px 10px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    min-width: 0;
+}
+
+.server-protokoll-kopf {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+#server-protokoll-stand {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.server-protokoll-knoepfe {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.server-protokoll-knoepfe button {
+    padding: 3px 10px;
+    min-height: 28px;
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+.server-protokoll-knoepfe button:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+#server-protokoll-zeilen {
+    margin: 0;
+    max-height: 40vh;
+    overflow: auto;
+    padding: 6px 8px;
+    background: #14142a;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.68rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--text-secondary);
+}
+
+@media (max-width: 420px) {
+    .server-protokoll-knoepfe {
+        margin-left: 0;
+    }
+}
+
+/* Bild-Editor B5 und selektiver Privat-Schutz (30.10.2026) */
+.erzaehl-privat-verdeckt {
+    filter: blur(28px) !important;
+    user-select: none !important;
+    -webkit-user-drag: none !important;
+}
+
+.erzaehl-privat-sperre {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(15, 20, 25, 0.72);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    z-index: 10;
+    cursor: pointer;
+    border-radius: 8px;
+    color: #fff;
+    font-weight: 700;
+    font-size: 0.95rem;
+    padding: 12px;
+    text-align: center;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    touch-action: manipulation;
+}
+
+.erzaehl-privat-sperre[hidden] {
+    display: none !important;
+}
+
+.erzaehl-privat-sperre * {
+    pointer-events: auto;
+}
+
+.erzaehl-privat-sperre:hover {
+    background: rgba(25, 30, 35, 0.8);
+}
+
+.erzaehl-bild-steuerleiste {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    align-items: center;
+    margin: 8px 0;
+    flex-wrap: wrap;
+}
+
+.erzaehl-steuer-btn {
+    padding: 8px 16px;
+    border-radius: 20px;
+    background: #1f3a2a;
+    border: 1px solid #2e8b57;
+    color: #9f9;
+    font-size: 0.85rem;
+    font-weight: 700;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.erzaehl-steuer-btn:hover {
+    background: #2a5338;
+}
+
+.erzaehl-steuer-btn.privat-aktiv {
+    background: #3a1f25;
+    border-color: #a44;
+    color: #fbb;
+}
+
+#datenstand-btn {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+/* =========================================================================
+   Datenstand der Fotoquellen (18.10.2026, gesamtplan T0)
+   „Fotoquellen wirklich bis zum Handy nachweisen" — eine Statuszeile je
+   Quelle: entpackt → Bildindex → Gesichtserkennung → Gruppenbestand → auf
+   diesem Handy. Gemessen wird auf DIESEM Gerät (rund 250 MB Dateien), ein
+   Stand gilt für eine Weile, „Neu messen" misst frisch.
+   Nur Zahlen und Klartext, keine Symbole. Seit 20.10.2026 (Wunsch des Betreibers)
+   im Fenster "Checks" statt am oberen Rand, zugeklappt (`hidden`); die Liste
+   rollt selbst (max-height 40vh), damit lange Zeilen das Fenster nicht
+   aufblasen.
+   ========================================= */
+
+.datenstand {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px 20px 10px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    min-width: 0;
+}
+
+.datenstand-kopf {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+#datenstand-stand {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.datenstand-knoepfe {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.datenstand-knoepfe button {
+    padding: 3px 10px;
+    min-height: 28px;
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+.datenstand-knoepfe button:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+#datenstand-liste {
+    max-height: 40vh;
+    overflow: auto;
+    padding: 6px 8px;
+    background: #14142a;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    line-height: 1.5;
+    min-width: 0;
+}
+
+.datenstand-zeile {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.datenstand-quelle {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-top: 4px;
+}
+
+.datenstand-quelle:first-child {
+    margin-top: 0;
+}
+
+.datenstand-wert {
+    color: var(--text-secondary);
+}
+
+@media (max-width: 420px) {
+    .datenstand-knoepfe {
+        margin-left: 0;
+    }
+}
+
+/* =========================================================================
+   Checks-Fenster (20.10.2026, Wunsch des Betreibers: "alles unter Checks im Menue
+   verstecken", "Rest wegmachen") — Server-Zustand, Hintergrund-Leiste,
+   Datenstand und Server-Protokoll stehen im Fenster #selbsttest-sheet
+   (.sheet-list) statt dauerhaft ueber dem Chat. Hier nur der Feinschliff fuer
+   den neuen Ort: volle Breite, Abstand untereinander, eigener Rahmen.
+   Datenstand-Liste und Protokoll rollen schon selbst (max-height 40vh).
+   ========================================= */
+
+#selbsttest-sheet .server-zustand,
+#selbsttest-sheet .hintergrund-leiste,
+#selbsttest-sheet .datenstand,
+#selbsttest-sheet .server-protokoll {
+    width: 100%;
+    margin: 0 0 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-primary);
+    box-sizing: border-box;
+}
+
+#selbsttest-sheet .server-zustand {
+    flex-wrap: wrap;
+    padding: 8px 12px;
+}
+
+#selbsttest-sheet #hintergrund-kopf {
+    padding: 8px 12px;
+}
+
+#selbsttest-sheet #hintergrund-einzelheiten {
+    padding: 6px 12px 10px;
+}
+
+#selbsttest-sheet .datenstand,
+#selbsttest-sheet .server-protokoll {
+    padding: 8px 12px 10px;
+}
+
+/* [hidden] verliert gegen "display: flex" der Klassen — ohne diese Regel
+   waeren beide Bereiche trotz hidden-Attribut sichtbar. */
+.datenstand[hidden],
+.server-protokoll[hidden] {
+    display: none;
+}
+
+#selbsttest-sheet #datenstand-liste,
+#selbsttest-sheet #server-protokoll-zeilen {
+    max-height: 40vh;
+    overflow: auto;
+}
+
+/* Roboter-Symbol im Kopf (#agent-face) = Serverzustand (20.10.2026): antippbar,
+   oeffnet das Checks-Fenster. 'ok' ohne Filter, 'kein-modell' mit dezentem
+   orangem Ton (kein neues Emoji), 'weg' schlafend und grau (wie bisher).
+   Klassen setzt app.js (agentGesichtFuer / zeichneAgentGesicht). */
+#agent-face {
+    cursor: pointer;
+}
+
+#agent-face.agent-face-kein-modell {
+    filter: sepia(1) saturate(3.5) hue-rotate(-12deg);
+}
+
+#agent-face.agent-face-weg {
+    filter: grayscale(0.9);
+}
+
+#agent-face:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+}
+
+/* =========================================================================
+   Personenauswahl als alphabetische Liste (S8, 18.10.2026) — Wunsch des Betreibers
+   (To-do Punkt 10): „eine Liste mit Suchzeile, scrollbar und alphabetisch
+   sortiert (mit Buchstaben-Sprungmarken)". Die Zeilen waren schon eine Liste
+   samt Suchzeile; neu sind der eigene Rollbereich, die Reihenfolge und die
+   Sprungleiste darueber.
+   Bewusst NUR im Reiter „Benannt" (.gruppen-benannt-ansicht): die
+   Gruppenuebersicht traegt dieselbe Klassenkette (gruppen-benannt-liste
+   gruppen-liste) und bleibt wie sie ist.
+   ========================================================================= */
+.gruppen-benannt-ansicht .gruppen-benannt-liste {
+    max-height: 60vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding-right: 2px;
+}
+
+.gruppen-sprung {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.gruppen-sprung[hidden] { display: none; }
+
+.gruppen-sprung-knopf {
+    min-width: 30px;
+    padding: 2px 6px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.gruppen-sprung-knopf:hover,
+.gruppen-sprung-knopf:focus-visible {
+    border-color: var(--accent);
+    color: var(--text-primary);
+    outline: none;
+}
+
+/* Der angesprungene Eintrag wird kurz hervorgehoben — sonst ist nicht zu
+   sehen, wohin der Sprung gefuehrt hat (er wird nur markiert, nie gewaehlt). */
+.gruppen-benannt-zeile.gruppen-sprung-ziel {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+/* =========================================================================
+   Tagesimport im Checks-Fenster (26.10.2026, Schritt C3)
+   Schalter, Kamera-Ordner, letzter Bericht je Baustein, Gemini-Erinnerung.
+   Dunkles Bestandsdesign wie Datenstand/Protokoll; grosse Tippflaechen fuers
+   Handy (mindestens 44 px). Nicht zugeklappt: der Schalter soll sofort da sein.
+   ========================================= */
+
+.tageslauf-block {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 8px 12px 12px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    min-width: 0;
+}
+
+.tageslauf-kopf {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+#tageslauf-text {
+    margin: 0;
+    max-height: 40vh;
+    overflow: auto;
+    padding: 6px 8px;
+    background: #14142a;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.72rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--text-secondary);
+}
+
+.tageslauf-ordner-zeile {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.tageslauf-ordner-zeile label {
+    flex: 1 0 100%;
+    color: var(--text-secondary);
+}
+
+#tageslauf-ordner {
+    flex: 1 1 12rem;
+    min-width: 0;
+    min-height: 44px;
+    padding: 6px 10px;
+    box-sizing: border-box;
+    background: #14142a;
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.8rem;
+}
+
+.tageslauf-block button {
+    min-height: 44px;
+    padding: 6px 14px;
+    background: transparent;
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+.tageslauf-block button:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+#selbsttest-sheet .tageslauf-block {
+    width: 100%;
+    margin: 0 0 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-primary);
+    box-sizing: border-box;
+}
+
+
+/* Andocken & Lebensabschnitts-Zuordnung (30.10.2026B) */
+.gruppen-andocken-bereich {
+    margin: 12px 0;
+    padding: 12px;
+    background: var(--bg-karte, #1e2530);
+    border: 1px solid var(--linie, #303e54);
+    border-radius: 8px;
+}
+.gruppen-andocken-kopf h4 {
+    margin: 0 0 4px;
+    font-size: 0.95rem;
+    color: var(--text-hell, #f0f4f8);
+}
+.gruppen-andocken-liste {
+    max-height: 220px;
+    overflow-y: auto;
+    margin: 8px 0;
+    padding: 6px 8px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 6px;
+}
+.andocken-kandidat-zeile {
+    margin: 4px 0;
+    font-size: 0.85rem;
+}
+.lebensabschnitt-gruppen-info {
+    font-weight: 500;
+    color: var(--accent, #64b5f6);
+}
+.gruppen-lebensabschnitt-pille {
+    display: inline-block;
+    padding: 2px 6px;
+    background: rgba(76, 175, 80, 0.15);
+    color: #81c784;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    margin-left: 6px;
+}
+
+.erzaehl-privat-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+}
+
+.erzaehl-privat-aufdecken-btn {
+    background: #4f46e5;
+    color: #fff;
+    border: none;
+    padding: 8px 18px;
+    border-radius: 20px;
+    font-weight: 700;
+    font-size: 0.9rem;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    pointer-events: auto !important;
+}
+
+.erzaehl-privat-aufdecken-btn:hover {
+    background: #4338ca;
+}

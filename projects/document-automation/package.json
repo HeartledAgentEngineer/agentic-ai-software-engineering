@@ -1,0 +1,29 @@
+{
+  "name": "document-automation-engine",
+  "version": "1.0.0",
+  "description": "Data-driven CV generator: JSON -> validated -> escaped HTML -> A4 PDF (Puppeteer), plus PDF merging (pdf-lib)",
+  "main": "build.js",
+  "scripts": {
+    "build": "node build.js",
+    "build:html": "node build.js --nur-html",
+    "merge": "node merge_pdfs.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "docx",
+    "openxml",
+    "puppeteer",
+    "pdf-lib",
+    "document-automation"
+  ],
+  "author": "Max Mustermann",
+  "license": "MIT",
+  "dependencies": {
+    "docx": "^8.2.0",
+    "pdf-lib": "^1.17.1",
+    "puppeteer": "^21.5.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

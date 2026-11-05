@@ -1,0 +1,2381 @@
+"""Chat API routes."""
+
+import json
+import logging
+import os
+import threading
+import time
+from datetime import datetime
+from typing import Optional, List, Dict, Any, Iterator
+
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
+
+from app.config import settings, BASE_DIR
+from app.models import ChatRequest, ChatResponse
+from app.services.archiv_service import zeitraum_kurz
+from app.services.archiv_standard import StandardArchiv
+from app.services.auftrag_service import auftrag_service
+from app.services.auftrags_erkennung import ist_auftrag
+from app.services.faehigkeiten import stoesst_an_grenze
+from app.services.modell_router import MODELL_VISION
+from app.services.hermes_gateway import hermes_gateway
+from app.services.hermes_local import (
+    ist_verfuegbar as hermes_local_ist_verfuegbar,
+    stream_auftrag as hermes_local_stream_auftrag,
+    hermes_registry,
+    arbeits_start_zeile as hermes_arbeits_start_zeile,
+)
+from app.services.llm_service import llm_service
+from app.services.memory_service import memory_service
+from app.services import gesichter_service
+from app.services import chat_verlauf
+from app.services import sse as sse_service
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api", tags=["chat"])
+
+# Verlauf liegt jetzt im Service (app.services.chat_verlauf) — Refactoring.
+# Re-Export, damit der Rest dieser Datei (und alte Nutzer) identisch weiter
+# funktionieren. Memory-Extraktion wird hier injected, damit der Service keine
+# harten Imports braucht.
+conversations = chat_verlauf.conversations
+
+# Flüchtiger Bild-Cache pro Conversation (Option B): das zuletzt gefundene
+# Bild (data_url + pfad) bleibt kurz im RAM, damit Folgefragen ("was war noch
+# drauf?") OHNE erneutes Suchen anhand des Bildes beantwortet werden können.
+# Nichts wird auf Platte gespeichert; nach _BILD_CACHE_DAUER_S verworfen.
+_bild_cache: Dict[str, dict] = {}
+_BILD_CACHE_DAUER_S = 600  # 10 Minuten
+
+
+def _bild_cache_verwerfen(conversation_id: Optional[str] = None) -> int:
+    """Wirft den flüchtigen Bild-Cache weg (ganz oder für EINE Conversation).
+
+    Fix 2026-09-25 (Konsistenz): Der Cache ist bewusst NUR ein
+    Fortsetzungs-Gedächtnis INNERHALB derselben Conversation. Beim Verlassen
+    eines Chats bzw. beim Start der Oberfläche wird er verworfen, damit kein
+    Bild aus einem anderen/älteren Zusammenhang in eine neue Frage rutscht.
+    Returns: Anzahl der verworfenen Cache-Einträge.
+    """
+    if conversation_id:
+        return 1 if _bild_cache.pop(conversation_id, None) is not None else 0
+    anzahl = len(_bild_cache)
+    _bild_cache.clear()
+    return anzahl
+
+
+VERLAUF_DATEI = os.path.join(settings.chroma_persist_dir, "conversations.json")
+
+# Service initialisieren (lädt Verlauf von der Platte).
+chat_verlauf.init(VERLAUF_DATEI, settings.chroma_persist_dir)
+
+# Memory-Extraktion an den Service anbinden (gleiche wie bisher).
+chat_verlauf.setze_memory_extractor(
+    memory_service.extract_and_store_memories
+)
+
+# Alias für Abwärtskompat im restlichen Code:
+_lade_verlauf = chat_verlauf._lade_verlauf
+_speichere_verlauf = chat_verlauf._speichere_verlauf
+verlauf_nachricht_anhaengen = chat_verlauf.verlauf_nachricht_anhaengen
+_get_or_create_conversation = chat_verlauf._get_or_create_conversation
+_finish_exchange = chat_verlauf.finish_exchange
+_verlauf_sperre = chat_verlauf._verlauf_sperre
+
+
+
+
+_sse = sse_service._sse
+_strom_auftrag_live = sse_service.strom_auftrag_live
+
+
+def _archiv_treffer(frage: str, aktiv: bool) -> List[Dict[str, Any]]:
+    """Passende Stellen aus den Chat-Archiven holen.
+
+    Gesucht wird ueber den **Standardweg** (:class:`StandardArchiv`): erst der
+    volle Index (mit dem WhatsApp-Vollbestand), dann der alte Dienst. Bis zum
+    11.10.2026 lief hier nur der alte Dienst — deshalb kam aus den
+    WhatsApp-Daten nie ein Zusammenhang an (des Betreibers Befund Nr. 3).
+
+    Scheitert die Suche, geht die Anfrage trotzdem durch – nur ohne
+    Vergangenheitswissen. Ein kaputtes Archiv darf den Chat nicht lahmlegen.
+    """
+    if not aktiv:
+        return []
+    try:
+        return StandardArchiv().hybrid(frage)
+    except Exception as e:
+        logger.warning("Archivsuche uebersprungen: %s", e)
+        return []
+
+
+def _wirkt_wie_aufgabe(nachricht: str) -> bool:
+    """Kostenkontrolle fuer den LLM-Tool-Use-Decider (braucht_hermes).
+
+    Nur Nachrichten mit System-/Arbeits-Charakter sollen den zusaetzlichen
+    LLM-Call ausloesen - reine Plauderei/Wissensfragen nicht (Latenz/Kosten).
+    Deterministischer Schnellfilter ueber Kernbegriffe.
+    """
+    if not nachricht:
+        return False
+    t = nachricht.lower()
+    _ARBEITS_HINWEISE = (
+        "schreibe", "baue", "erstelle", "fixe", "ändere", "aendere", "change",
+        "code", "datei", "repo", "repository", "server", "api", "endpoint",
+        "modul", "funktion", "skript", "script", "installiere", "pip", "npm",
+        "git", "commit", "push", "pull", "branch", "merge", "docker", "container",
+        "test", "bug", "fehler", "fehlerbehebung", "konfigurier", "starte",
+        "dienst", "service", "sps", "terminal", "shell", "befehl", "bereinige",
+        "refactor", "schema", "datenbank", "log", "debuggen",
+    )
+    return any(h in t for h in _ARBEITS_HINWEISE)
+
+
+def _starte_lokale_hermes(
+    auftrag: str,
+    hinweis: str,
+    kategorie: Optional[str],
+    komplexitaet: Optional[str],
+    chat_verknuepfung: Optional[str] = None,
+    kontext: str = "",
+):
+    """Track C im Hintergrund: Lokaler Termux-Hermes bearbeitet den Auftrag und
+    strahlt seine Gedanken live ins Auftragsbuch.
+
+    Legt den Auftrag als direkt ``laeuft`` an (damit der Watcher ihn nicht
+    doppelt claimt), startet den Hermes-Stream in einem Daemon-Thread und
+    schreibt jeden Zwischengedanken als Status-Meldung sowie das Endergebnis
+    via ``ergebnis_eintragen``. Das Frontend zeigt die Meldungen live als
+    Chat-Blasen — inhaltlich 1:1, wie der Agent sie tippt.
+
+    Returns:
+        Dict mit der angelegten Auftrags-Äquivalenz (id, status).
+    """
+    eintrag = auftrag_service.anlegen_als_arbeitender(
+        auftrag,
+        hinweis=hinweis,
+        kategorie=kategorie,
+        komplexitaet=komplexitaet,
+    )
+    auftrag_id = eintrag["id"]
+
+    # Verknuepfung Auftrag <-> Gespraech VOR dem Thread-Start setzen.
+    # Wuerde sie erst nach dem Start geschehen, koennte der Worker die
+    # allerersten Hermes-Zwischenmeldungen liefern, bevor seine
+    # conversation_id in der Datei steht -> verlauf_nachricht_anhaengen
+    # wuerde sie verwerfen. So sind alle Hermes-Meldungen ab der ersten
+    # an das Gespraech gebunden und landen im persistenten Verlauf.
+    if chat_verknuepfung:
+        auftrag_service.setze_chat_verknuepfung(auftrag_id, chat_verknuepfung)
+
+    def _worker():
+        try:
+            try:
+                for ereignis in hermes_local_stream_auftrag(
+                        auftrag_id, auftrag,
+                        # Zwei-Stellen-Steuerung: Ist HERMES_LOCAL_SESSION in
+                        # der .env gesetzt, dockt der Auftrag an diese laufende
+                        # tmux-Session an statt eine neue zu starten (Sonst:
+                        # bestehende_session=None → neue Session je Auftrag).
+                        bestehende_session=(
+                            # conv_code (Coding-Chat) bekommt eine EIGENE
+                            # persistente Hermes-Session 'hermes_code', getrennt
+                            # vom Haupt-Chat, mit eigenem fortlaufendem Kontext
+                            # (Wunsch des Betreibers 2026-09-06). Sonst aktive Session.
+                            # Der Kontext (Konversations-Info) ist im _worker-Scope
+                            # verfuegbar; pruefen, ob conv_code aktiv ist.
+                            ("hermes_code"
+                             if ("conv_code" in (kontext or ""))
+                             else settings.hermes_local_session) or None
+                        ),
+                        # Zweitweg (Wunsch des Betreibers): HERMES_LOCAL_KANAL=query
+                        # nutzt den Einmal-Subprozess statt tmux.
+                        nutze_query_modus=(
+                            settings.hermes_local_kanal == "query"
+                        ),
+                        # AKTIV-Kanal (Wunsch): Server -> laufende Termux-
+                        # Session ueber Datei-Inbox (kein tmux).
+                        nutze_aktiv_modus=(
+                            settings.hermes_local_kanal == "aktiv"
+                        ),
+                        # Kontext dieser Hermes-Session mitgeben, damit der
+                        # Ziel-Hermes "weiss, dass er diese Session ist".
+                        kontext=kontext,
+                    ):
+                    art = ereignis.get("art")
+                    text = ereignis.get("text", "")
+                    if art == "gedanke" and text:
+                        auftrag_service.statusmeldung_hinzufuegen(auftrag_id, text)
+                        # Auch in den persistenten Chat-Verlauf, falls verknuepft.
+                        _reite_an_verlauf(auftrag_id, "assistant", text)
+                    elif art == "frage" and text:
+                        # Rueckfrage des Agenten: sichtbar machen, aber NICHT
+                        # als fertig eintragen. Der Stream bleibt am Leben,
+                        # die Session offen, bis der Nutzer per /eingabe
+                        # geantwortet hat und eine finale Antwort folgt.
+                        auftrag_service.statusmeldung_hinzufuegen(auftrag_id, text)
+                        _reite_an_verlauf(auftrag_id, "assistant", text)
+                    elif art == "ergebnis":
+                        auftrag_service.ergebnis_eintragen(
+                            auftrag_id, text, erfolg=bool(text)
+                        )
+                        if text:
+                            _reite_an_verlauf(auftrag_id, "assistant", text)
+                    elif art == "fehler":
+                        auftrag_service.ergebnis_eintragen(
+                            auftrag_id, text, erfolg=False
+                        )
+                        return
+            except Exception as e:
+                logger.error("Lokaler Hermes-Job abgebrochen (%s): %s", auftrag_id[:8], e)
+                auftrag_service.ergebnis_eintragen(
+                    auftrag_id, f"Fehler im lokalen Hermes-Job: {e}", erfolg=False
+                )
+            finally:
+                # Auftrag ist final (ergebnis/fehler eingetragen oder Abbruch):
+                # den laufenden Hermes-CLI aus der Registry nehmen. Dadurch
+                # loest entferne() -> job.beende() -> tmux kill-session aus und
+                # der interaktive Agent wird wirklich beendet. Stattdessen
+                # verwaisten vorher jede abgeschlossene Programmierung eine
+                # offene tmux-Session (Ressourcenschwund ueber die Tage).
+                hermes_registry.entferne(auftrag_id)
+        except Exception as e:
+            logger.error("Lokaler Hermes-Job-Traeger selbst fehlgeschlagen (%s): %s",
+                         auftrag_id[:8], e)
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return eintrag
+
+
+def _reite_an_verlauf(auftrag_id: str, role: str, content: str) -> None:
+    """Reicht eine Hermes-Nachricht in den persistenten Chat-Verlauf weiter.
+
+    Der Coding-Auftrag fuehrt eine verknuepfte conversation_id; landet die
+    Nachricht nur im Auftragsbuch, ist der Chat-Verlauf nach einem Neuladen
+    leer. Hier wird die Verknuepfung gelesen und angehaengt, wenn vorhanden.
+    """
+    try:
+        eingang = auftrag_service.einzeln(auftrag_id)
+        conv_id = eingang.get("conversation_id") if eingang else None
+        if conv_id:
+            auftrag_service._in_verlauf_anhaengen(conv_id, role, content)
+    except Exception as e:
+        logger.warning("Verlauf-Übergabe fehlgeschlagen (%s): %s", auftrag_id[:8], e)
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """Process a chat message and return the LLM response."""
+    try:
+        # Weiche: Coding-/Werkzeug-Auftraege weiterleiten. Bei hochgeladenen
+        # Dateien (request.files) NICHT als Coding-Auftrag einordnen — ein
+        # Dokument-/Bild-Upload ist immer eine Verständnis-/Analyse-Frage an
+        # den LLM, kein Programmier-Kommando an Hermes.
+        # Zusätzlich zur ist_auftrag()-Heuristik wird die Fähigkeits-Grenze
+        # geprüft (Terminal/Datei/System/Tool-Install) — selbst wenn die
+        # Heuristik es nicht als Coding einstuft, delegiert der Agent an
+        # Hermes (Toolcall).
+        ist_auftrag_val = False
+        # conv_code delegiert IMMER an Hermes — auch bei hochgeladenen
+        # Bildern/Dateien (request.files). Ein Screenshot im Coding-Chat
+        # (z. B. eine Fehlermeldung) soll von Hermes analysiert und
+        # weiterverarbeitet werden: Der Bild-Pfad wird ueber
+        # `_hermes_kontext_mit_bild` an den Hermes-Auftrag geheftet, und
+        # Hermes liest das Bild ueber sein Vision-Werkzeug (gemini-Vision-
+        # Modell) ein (siehe Skill 'coding-chat-bild-vision').
+        if ((getattr(request, "conversation_id", None) or "").strip() == "conv_code"
+                and not request.force_agent):
+            ist_auftrag_val = True
+            begruendung = "conv_code: immer Hermes (+ Bild/Kontext)"
+            kategorie = "code"
+            komplexitaet = "mittel"
+        elif not request.files and not request.force_agent:
+            ist_auftrag_val, begruendung, kategorie, komplexitaet = ist_auftrag(request.message)
+            if not ist_auftrag_val and stoesst_an_grenze(request.message):
+                ist_auftrag_val = True
+                begruendung = "Fähigkeits-Grenze (Terminal/Datei/System) – Hermes als Toolcall"
+                kategorie = "feature"
+                komplexitaet = "mittel"
+            elif not ist_auftrag_val:
+                # Sauberer Tool-Use als letzte Stufe: Ein günstiger LLM-Call
+                # entscheidet, ob Hermes nötig ist (Wunsch des Betreibers 2026-09-01).
+                # Nur bei Nachrichten mit System-/Arbeits-Charakter, NICHT bei
+                # reiner Plauderei, um Latenz/Kosten zu begrenzen.
+                if _wirkt_wie_aufgabe(request.message):
+                    bedarf = llm_service.braucht_hermes(request.message)
+                    if bedarf.get("braucht_hermes"):
+                        ist_auftrag_val = True
+                        begruendung = (
+                            "LLM-Tool-Use: Hermes nötig ("
+                            + (bedarf.get("begruendung") or "System-/Repo-Arbeit")
+                            + ")"
+                        )
+                        kategorie = "feature"
+                        komplexitaet = "mittel"
+        else:
+            begruendung, kategorie, komplexitaet = "", None, None
+        if ist_auftrag_val:
+            # Die Track-A/C/B-Weiche (PC → lokal → Buch) liegt jetzt im
+            # Routing-Service. Er liefert art/reply/conversation_id; hier wird
+            # nur noch die ChatResponse daraus gebaut.
+            from app.services.chat_routing import route_auftrag
+            res = route_auftrag(
+                request.message,
+                begruendung,
+                kategorie,
+                komplexitaet,
+                finish_exchange=(lambda _cid, _msg, _rep, **kw: _finish_exchange(
+                    _cid, _msg, _rep,
+                    bild_pfad=kw.get("bild_pfad") or _upload_bild_pfad(request),
+                    user_bild_pfad=kw.get("user_bild_pfad") or _upload_bild_pfad(request),
+                )),
+                get_or_create_conversation=lambda _: _get_or_create_conversation(request.conversation_id),
+                starte_lokale_hermes=_starte_lokale_hermes,
+                kontext=_hermes_kontext_mit_bild(_baue_kontext(request.message, request.conversation_id), request),
+                ziel=(getattr(request, "ziel", "") or ""),
+            )
+            return ChatResponse(
+                reply=res["reply"],
+                conversation_id=res["conversation_id"],
+                memories_used=0,
+                memories_created=0,
+                sources=[],
+                archiv_used=0,
+                ziel=res.get("ziel"),
+            )
+
+        conversation_id = _get_or_create_conversation(request.conversation_id)
+        history = conversations[conversation_id]
+
+        # 1. Retrieve relevant memories from vector DB
+        memories = memory_service.retrieve_relevant_memories(
+            request.message, top_k=5
+        )
+
+        # 1b. Passende Stellen aus den Chat-Archiven – das, was den Agenten
+        # über die eigene Vergangenheit sprechen lässt.
+        archiv = _archiv_treffer(request.message, request.archiv)
+
+        # 1c. Rolling-Summary der älteren Unterhaltung (Ein-Chat). Begrenzt die
+        # History auf die letzten 15 + gibt den kompakten Summary als Zusatz-
+        # Kontext weiter, damit die Vergangenheit nicht verloren geht / der
+        # Prompt nicht explodiert.
+        kontext_summary, _ = _hole_kontext_summary(conversation_id, history, request.message)
+        begrenzte_history = history[-15:]
+
+        # 1d. Handy-Dateisuche als Tool über Sprache: Wenn die Anfrage einen
+        # Datei-Such-Wunsch enthält, wird die Tool-Ausgabe an die user_message
+        # gehängt, damit der LLM die Treffer nennt (Stufe A).
+        werkzeug_notiz = ""
+        datei_tool_bilder = []
+        datei_bilder = []
+        # 1e. Archiv-Tool über Sprache: 'was weißt du über X aus dem Archiv'.
+        # Hat VORRANG vor der Dateisuche — wer nach alten Gesprächen fragt,
+        # meint keine lokalen PDFs. Eine Archiv-Frage darf die Handy-
+        # Dateisuche NICHT auslösen.
+        archiv_notiz = _archiv_tool(request.message)
+        werkzeug_notiz = archiv_notiz
+        if not werkzeug_notiz:
+            werkzeug_notiz, datei_tool_bilder = _datei_tool(request.message)
+            # 1f. Verlaufs-Tool über Sprache (Rückblick): 'was haben wir zu X gesagt'.
+            if not werkzeug_notiz:
+                werkzeug_notiz = _verlauf_tool(request.message)
+            # 1f2. Gesichts-Suche ueber Bilder (dynamisch, kontextbasiert).
+            if not werkzeug_notiz:
+                werkzeug_notiz = _gesicht_suche_tool(request.message)
+            # 1f3. Fotos-Uebersicht (N11, 2026-09-27): reine Zahlen und
+            # Event-Namen aus der kleinen lokalen Uebersichtsdatei — kein Bild,
+            # kein Netz. Beantwortet "wie viele Events gab's?" / "Urlaube 2021".
+            if not werkzeug_notiz:
+                werkzeug_notiz = _fotos_uebersicht_tool(request.message)
+            # 1f4. Beziehungen (N28, 2026-09-29): „wer war mit wem wo" an einem
+            # Tag — nur aus der lokalen Datei beziehungen.jsonl (N27e), kein
+            # Bild, kein Netz, kein LLM-Aufruf.
+            if not werkzeug_notiz:
+                werkzeug_notiz = _beziehungen_tool(request.message)
+        user_message_fuer_llm = request.message
+        if werkzeug_notiz:
+            user_message_fuer_llm = request.message + werkzeug_notiz
+        # Bilder aus der Dateisuche an die files-Liste anhängen (Vision-LLM).
+        if datei_tool_bilder:
+            datei_bilder = datei_tool_bilder
+            # Flüchtiger Bild-Cache für die laufende Conversation (Option B):
+            # das zuletzt gefundene Bild bleibt für Folgefragen kurz im RAM
+            # (10 Min), damit "was war noch drauf?" OHNE erneutes Suchen
+            # beantwortet werden kann — nichts wird auf Platte gespeichert.
+            _bild_cache[conversation_id] = {
+                "bilder": datei_tool_bilder,
+                "zeit": time.time(),
+                # Zu welcher Nachricht das Bild gehoert (Fix 2026-09-25): Index
+                # der Nachricht, die das Bild angefordert hat. Damit ist
+                # belegbar, dass der Cache nur INNERHALB dieser Conversation
+                # wirkt und nicht als „letztes Bild" an eine neue Nachricht
+                # wandert.
+                "nachricht_index": len(conversations.get(conversation_id, [])),
+            }
+        elif (conversation_id in _bild_cache) and not archiv_notiz and conversation_id != "conv_code":
+            # Kein neues Bild angefordert: nutze das gecachte (wenn frisch).
+            # Bei conv_code (Coding-/Hermes-Chat) NICHT: dort sind Folgefragen
+            # Programmier-/Textfragen; ein zuvor gefundenes Dateisuche-Bild
+            # darf nicht als 'hängengeblieben' in die Hermes-Frage fliessen.
+            eintrag = _bild_cache[conversation_id]
+            if time.time() - eintrag["zeit"] < _BILD_CACHE_DAUER_S:
+                if not datei_bilder:
+                    datei_bilder = eintrag["bilder"]
+                    user_message_fuer_llm += (
+                        "\n\n[Fortsetzung: Das zuvor gefundene Bild wird "
+                        "mitgeschickt — beantworte die Frage anhand des Bildes.]"
+                    )
+            else:
+                _bild_cache.pop(conversation_id, None)
+
+
+        # 1g. Gesichter: Wird ein Bild betrachtet (Dateisuche ODER Upload),
+        # den Gesichter-Katalog an den Prompt hängen, damit der Vision-LLM
+        # bekannte Personen benennt statt zu raten. Deterministisch, kein
+        # Extra-LLM-Call: der Katalog-Text ist klein.
+        katalog_bilder = []
+        bild_aktiv = bool(datei_bilder) or bool(
+            request.files and any(f.type == "image" for f in request.files)
+        )
+        if bild_aktiv:
+            katalog = gesichter_service.katalog_kontext()
+            if katalog:
+                user_message_fuer_llm += katalog
+            # Referenz-Miniaturen als Vergleichsbilder mitgeben (falls da):
+            # der Vision-LLM kann das aktuelle Foto gegen die eingebetteten
+            # Referenzgesichter abgleichen statt nur über die Text-Liste zu
+            # raten. pCloud-sicher: das sind die eingebetteten Kopien, nicht
+            # die (möglicherweise verschobenen) Originaldateien.
+            katalog_bilder = gesichter_service.referenz_bilder()
+            if katalog_bilder:
+                ref_namen = ", ".join(
+                    b.get("person") or "?"
+                    for b in katalog_bilder if b.get("person")
+                )
+                user_message_fuer_llm += (
+                    "\n\n[Dem aktuellen Foto sind zusätzlich die bekannten "
+                    "Referenzgesichter angehängt (in dieser Reihenfolge): "
+                    + (ref_namen or "mehrere Personen")
+                    + ". Vergleiche das aktuelle Foto damit und benenne "
+                      "bekannte Personen — aber nur, wenn die Übereinstimmung "
+                      "überzeugend ist. Erfinde KEINE Zuordnung.]"
+                )
+
+        # 1h. Gesichter reaktiv 'merken': Sagt der Nutzer beim Betrachten
+        # eines Bildes, WER darauf ist ('das ist Lumi', 'das ist meine Oma
+        # Erika'), wird das deterministisch in den Katalog übernommen — der
+        # Vision-LLM erkennt die Person künftig auf Fotos. Konservativ: nur
+        # bei aktiver Bild-Ansicht + Nenn-Phrase, sonst kein Effekt.
+        # Ist gerade ein Bild (Dateisuche ODER Upload) da, wird es als
+        # Referenz-Miniatur an die Person gekoppelt (für den späteren
+        # Bild-zu-Bild-Abgleich) — wichtig z. B. um Zwillingsbrüder per
+        # echtem Vergleichsbild statt nur Namens-Kontext zu unterscheiden.
+        aktuelles_bild_data = ""
+        if datei_bilder and datei_bilder[0].get("data_url"):
+            aktuelles_bild_data = datei_bilder[0]["data_url"]
+        elif request.files:
+            upload_img = next(
+                (f for f in request.files if f.type == "image" and f.data_url),
+                None,
+            )
+            if upload_img:
+                aktuelles_bild_data = upload_img.data_url
+        merkhinweis = _gesichter_merke(
+            request.message, bild_aktiv, str(aktuelles_bild_data or ""),
+            embedding=_embedding_aus_data_url(str(aktuelles_bild_data or ""))
+            if bild_aktiv and aktuelles_bild_data else None,
+        )
+        if merkhinweis:
+            user_message_fuer_llm += merkhinweis
+        # WhatsApp-artiges Antwort-Zitat an den LLM-Kontext (nicht an die
+        # Erkennung): der Agent beantwortet primär das konkret Zitierte.
+
+        user_message_fuer_llm += _zitat_anhang(request)
+        # SFace-Gesichts-Abgleich (deterministisch, auch fuer hochgeladenes Bild)
+        _gesichts_notiz = _gesichtsabgleich_notiz(request, datei_bilder)
+        if _gesichts_notiz:
+            user_message_fuer_llm += _gesichts_notiz
+        # PFLICHT-Instruktion: Ein deterministisches Gesichtsergebnis darf der
+        # LLM nicht mehr per Datenschutz-Refusal verweigern.
+        if merkhinweis or _gesichts_notiz:
+            user_message_fuer_llm += _refusal_stopper()
+
+
+        # 2. Get LLM response with memory context
+        # Vision-Routing: Wird ein Bild aus der Dateisuche mitgeschickt
+        # (datei_tool_bilder), braucht es ein VISION-fähiges Modell — ein
+        # reines Text-Modell (z. B. DeepSeek Flash) kann das Bild nicht sehen
+        # und antwortet "kein Zugriff". Dann nehmen wir automatisch Gemini
+        # Flash (günstig + bildfähig), falls der Nutzer kein anderes wählte.
+        vision_modell = MODELL_VISION  # zentral im Modell-Router (21.10.2026)
+        modell_fuer_call = request.model or ""
+        # Vision-Routing: Ein mitgeschicktes Bild (UPLOAD oder Dateisuche;
+        # `bild_aktiv`) braucht ein VISION-faehiges Modell — ein reines
+        # Text-Modell (z. B. DeepSeek Flash) kann das Bild nicht sehen und
+        # antwortet "kein Zugriff". Dann nehmen wir automatisch Gemini
+        # Flash (guenstig + bildfaehig), falls der Nutzer kein anderes
+        # vision-faehiges waehlte.
+        if bild_aktiv and not (modell_fuer_call
+                                      and ("gemini" in modell_fuer_call
+                                           or "gpt-4o" in modell_fuer_call
+                                           or "gpt-5" in modell_fuer_call
+                                           or "sonnet" in modell_fuer_call
+                                           or "claude" in modell_fuer_call)):
+            modell_fuer_call = vision_modell
+
+        # Websuche (Namensverbot): manual sucht vorab mit des Betreibers eigenem Satz;
+        # der Hauptaufruf sucht nie selbst (llm_service._extra_body), auto gibt es
+        # nur im Werkzeug-Weg.
+        web_notiz, web_quellen, _ = _websuche_vorab(request)
+
+        reply, quellen = llm_service.chat(
+            user_message=user_message_fuer_llm + web_notiz,
+            conversation_history=begrenzte_history,
+            memories=memories,
+            web_search=request.web_search,
+            model=modell_fuer_call,
+            no_retention=request.no_retention,
+            archiv=archiv,
+            summary=kontext_summary,
+            files=(
+                [f.model_dump() for f in request.files] if request.files else []
+            ) + (datei_tool_bilder if datei_tool_bilder else []) + (katalog_bilder if katalog_bilder else []),
+        )
+
+        # 3./4. Verlauf fortschreiben und Erinnerungen ableiten.
+        # Bildpfad des Dateisuche-Bildes mitgeben, damit die flüchtige
+        # Vorschau einen Reload überlebt (Frontend lädt ihn nach).
+        #
+        # WICHTIG (Fix 2026-09-25, Konsistenz): Hier wird NUR `datei_tool_bilder`
+        # verwendet — das Bild, das in DIESER Runde wirklich gefunden wurde.
+        # Vorher stand hier `datei_bilder`; das enthielt auch ein Bild aus dem
+        # 10-Minuten-RAM-Cache (Fortsetzungsfragen wie „was war noch drauf?").
+        # Folge: Ein ALTES Bild wurde an eine NEUE Nachricht geschrieben und
+        # erschien nach jedem Reload an der falschen Stelle („jetzt kommen
+        # schon wieder Bilder, die ich irgendwann schon mal hatte"). Der Cache
+        # bleibt weiterhin als KONTEXT für den LLM erhalten (Option B) — er
+        # bestimmt aber nicht mehr, was ANGEZEIGT und GESPEICHERT wird.
+        memories_created = _finish_exchange(
+            conversation_id, request.message + _zitat_anhang(request), reply,
+            bild_pfad=(
+                datei_tool_bilder[0].get("pfad") if datei_tool_bilder else None
+            ) or _upload_bild_pfad(request),
+            user_bild_pfad=_upload_bild_pfad(request),
+        )
+
+        return ChatResponse(
+            reply=reply,
+            conversation_id=conversation_id,
+            memories_used=len(memories),
+            memories_created=memories_created,
+            sources=web_quellen + quellen,
+            archiv_used=len(archiv),
+            bild_vorschau=(
+                datei_tool_bilder[0]["data_url"] if datei_tool_bilder else None
+            ),
+            bild_pfad=(
+                datei_tool_bilder[0].get("pfad") if datei_tool_bilder else None
+            ),
+        )
+
+    except Exception as e:
+        logger.error("Chat error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+_PERSON_NENN_MUSTER = (
+    "das ist", "das ist doch", "das hier ist", "das dort ist", "das ist auf",
+    "der ist", "die ist", "das ist die", "das ist der", "das ist meine",
+    "das ist mein", "das ist unsere", "das ist unser",
+)
+
+# Deutsche Substantive werden ALLE großgeschrieben — die Capitalize-Heuristik
+# würde sonst z. B. "das ist die beste Idee" als Person "Idee" speichern. Diese
+# konservative Ausschlussliste verhindert das (allgemeine Nicht-Personen-Wörter).
+_KEINE_PERSON_ROLLE = {
+    # Familienrollen, die NIE der Eigenname sind (Rollen werden separat erkannt).
+    "mutter", "oma", "opa", "vater", "tante", "onkel", "mama", "papa",
+    "bruder", "schwester", "frau", "mann", "kind", "tochter", "sohn",
+    # Allgemeine Nicht-Personen-Substantive (Großschreibung ist in Deutsch ja
+    # der Normalfall — nur konkrete Alltagsfälle, die bei Fotos auftauchen).
+    "idee", "haus", "auto", "baumschule", "sache", "ding", "bild", "foto",
+    "screenshot", "tasse", "buch", "vase", "tisch", "hund", "katze", "straße",
+    "plastikmull", "beste", "schönste", "größte", "groesste",
+    # Farb-/Eigenschaftswörter (häufig unmittelbar nach "das ist …").
+    "blau", "rot", "grün", "gruen", "gelb", "schwarz", "weiß", "weiss",
+}
+
+
+def _nutzer_name() -> str:
+    """Vor-/Kosename des Nutzers aus dem lokalen System-Prompt, sonst \"\"."""
+    try:
+        with open(settings.system_prompt_local_file, "r", encoding="utf-8") as f:
+            text = f.read()
+        import re as _re
+        m = _re.search(r"Name:\s*([A-Za-zÄÖÜäöüß][A-Za-zÄÖÜäöüß \-]*)", text)
+        if m:
+            return m.group(1).strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _werkzeuge_an(request: Any) -> bool:
+    """Tool Use fuer diese Anfrage? Anfrage-Feld vor Konfiguration (Standard aus).
+
+    Gilt nur im Stream-Weg (den nutzt die Oberflaeche); /chat bleibt bei der
+    Vorab-Weiche. Spec: docs/spec-tool-use-v1.md.
+    """
+    wunsch = getattr(request, "werkzeuge", None)
+    if wunsch is not None:
+        return bool(wunsch)
+    return bool(getattr(settings, "tool_use", False))
+
+
+def _zitat_anhang(request: Any) -> str:
+    """WhatsApp-artiger Antwort-Kontext: Legt als Text das konkret beantwortete
+    Zitat bei, das an die LLM-Nachricht und den persistierten Verlauf geheftet wird.
+    """
+    try:
+        z = (getattr(request, "antwort_auf", "") or "").strip()
+        if not z:
+            return ""
+        if len(z) > 400:
+            z = z[:397] + "..."
+        kopf = "[Antwort des Nutzers auf diese frühere Nachricht — beziehe dich primär auf DIESES Zitat:]"
+        return "\n\n" + kopf + "\n" + z
+    except Exception:
+        return ""
+
+
+def _gesichtsabgleich_notiz(request: Any, datei_bilder: Optional[list] = None) -> str:
+    """SFace-Gesichts-Tool-abgleich fuer Bilder (auch hochgeladen)."""
+    try:
+        from app.services import face_service as _face
+        if not _face.verfuegbar():
+            return ""
+        pfad = None
+        if datei_bilder and datei_bilder[0].get("pfad"):
+            pfad = datei_bilder[0]["pfad"]
+        if not pfad:
+            pfad = _upload_bild_pfad(request)
+        if not pfad or not os.path.exists(pfad):
+            return ""
+        personen = _face.erkenne_bild_pfad(pfad).get("personen") or []
+        namen = []
+        for _p in personen:
+            for _t in _p.get("treffer", []):
+                namen.append(_t.get("name") + (" (sicher)" if _t.get("sicher") else " (unsicher)"))
+        if not namen:
+            return ""
+        return " Erkennung per Gesichts-Embedding: " + "; ".join(sorted(set(namen))) + "."
+    except Exception:
+        return ""
+
+
+def _hermes_bild_hinweis(request: Any) -> str:
+    """Baut die Bild-Anweisung fuer den Hermes-Auftrag (gemini-Vision).
+
+    Haengt den realen Platten-Pfad der hochgeladenen Bild-Datei an und weist
+    Hermes explizit an, das Bild mit seinem Vision-Werkzeug (`vision_analyze`,
+    routet ueber ein gemini-Vision-/OpenRouter-Modell) einzulesen. NUR der
+    Pfad wird uebergeben - die Datei bleibt unantastbar. Ist kein Bild
+    angehaengt (oder lasst sich kein Pfad ableiten), wird "" geliefert.
+    """
+    try:
+        pfad = _upload_bild_pfad(request)
+        if not pfad:
+            return ""
+        return (
+            "\n\n[Angehaengte Bild-Datei zur Analyse: "
+            f"{pfad}\n"
+            "Lies DIESES Bild mit deinem Vision-Werkzeug (vision_analyze; "
+            "routet ueber ein Gemini-Vision-Modell) ein und analysiere es. "
+            "Verwende exakt diesen Pfad - erzeuge keinen anderen und rate "
+            "nicht ueber den Inhalt. Beschreibe/beantworte die Frage anhand "
+            "des tatsaechlichen Bildinhalts (auf Deutsch), code-Vorschlaege "
+            "gerne direkt.]"
+        )
+    except Exception:
+        return ""
+
+
+def _hermes_kontext_mit_bild(kontext: str, request: Any) -> str:
+    """Haengt den Pfad + die Vision-Anweisung einer hochgeladenen Bild-Datei
+    an den Hermes-Kontext, damit die lokale Hermes-CLI das Bild mit einem
+    gemini-Vision-Modell einlesen kann (z. B. Fehlerscreenshots im Coding-Chat).
+    Nur der Pfad - die Datei bleibt unantastbar.
+    """
+    try:
+        hinweis = _hermes_bild_hinweis(request)
+        if hinweis.strip():
+            return f"{kontext}{hinweis}"
+    except Exception:
+        pass
+    return kontext
+
+
+def _upload_bild_pfad(request: Any) -> Optional[str]:
+    """Mappt ein ueber den Upload-Button angehaengtes Bild auf seinen realen
+    Platten-Pfad (uploads/<id>.<ext>.
+
+    Damit ein hochgeladenes Bild im persistierten Verlauf einen `bild_pfad`
+    bekommt (wie Dateisuche-Bilder schon) und so einen Reload/Neustart
+    ueberlebt: Das Frontend laedt es per GET /api/dateien/daten?pfad=
+    frisch nach. Es wird NUR der Pfad persistiert, nie die Bild-Datei.
+    """
+    try:
+        if not request.files:
+            return None
+        import glob
+        for f in request.files:
+            if not f.type == "image" or not getattr(f, "id", ""):
+                continue
+            # Robust: echte Datei per wildcard suchen (Upload-ID), weil die
+            # tatsaechliche Erweiterung vom Uploader stammt (id.jpg, id.jpeg,
+            # id.png ...) und nicht aus dem MIME erraten werden darf.
+            base = str(BASE_DIR / "uploads" / f.id)
+            treffer = sorted(glob.glob(base + ".*"))
+            if treffer and os.path.exists(treffer[0]):
+                return treffer[0]
+    except Exception as e:
+        logger.warning("Upload-Bildpfad-Ableitung fehlgeschlagen: %s", e)
+    return None
+
+
+def _embedding_aus_data_url(data_url: str):
+    """Extrahiert aus einer data_url (base64) das erste Gesichts-Embedding.
+
+    Dekodiert das Bild und laesst es in der Debian-Face-Engine (YuNet+SFace)
+    detektieren/embedden. Returns: erstes Embedding (list[float]) oder None.
+    Robust: Fehler/Schwaechen schlagen den Chat nie fehl.
+    """
+    try:
+        if not data_url or "base64," not in data_url:
+            return None
+        from app.services import face_service
+        if not face_service.verfuegbar():
+            return None
+        b64 = data_url.split("base64,", 1)[1]
+        import base64 as _b, tempfile, os as _os
+        roh = _b.b64decode(b64)
+        fd, tmp = tempfile.mkstemp(suffix=".png")
+        _os.close(fd)
+        try:
+            with open(tmp, "wb") as f:
+                f.write(roh)
+            gesichter = face_service.embeddings_fuer_pfad(tmp)
+        finally:
+            try:
+                _os.remove(tmp)
+            except OSError:
+                pass
+        for g in gesichter:
+            emb = g.get("embedding")
+            if emb:
+                return emb
+        return None
+    except Exception as e:
+        logger.warning("Embedding-Extraktion fehlgeschlagen (ignoriert): %s", e)
+        return None
+
+
+def _gesichter_merke(
+    frage: str, bild_aktiv: bool, referenz_bild: str = "",
+    embedding: Optional[list] = None,
+) -> str:
+    """Reaktiv 'Gesichter merken' über Sprache (ohne UI).
+
+    Erkennt beim Betrachten eines Bildes die Angabe, WER darauf abgebildet
+    ist — z. B. 'das ist Lumi', 'das bin ich', 'das ist mein Zwillingsbruder
+    Jonas' oder mehrere Personen auf EINEM Bild ('das bin ich und das ist
+    Jonas') — und speichert jede erkannte Person (Name + ggf. Rolle) in den
+    Gesichter-Katalog (`gesichter_service.person_speichern`). Zusätzlich wird
+    das gerade betrachtete Bild (`referenz_bild` als data_url) als
+    Referenz-Miniatur an jede Person gekoppelt — damit der spätere Abgleich
+    per echtem Bild-zu-Bild-Vergleich läuft (entscheidend z. B. um einen
+    Zwillingsbruder zu unterscheiden).
+
+    Extraktion: Zuerst agentischer LLM-Aufruf (`extrahiere_gesichts_anlernen`)
+    — robust gegen freie Formulierung und Gruppenbilder. Scheitert der (oder
+    ist das Modell nicht erreichbar), fällt er auf eine konservative
+    deterministische Heuristik für den Einzel-Fall zurück.
+
+    Konservativ: läuft nur bei aktivem Bild (`bild_aktiv`) + Anlern-Signal.
+    Ohne Bild wird NICHTS gemerkt (kein versehentliches Speichern, z. B.
+    bei 'das ist die beste Idee'). Merken darf den Chat nie brechen.
+
+    Returns: Anweisungs-Text für den LLM (an die user_message anzuhängen),
+    oder \"\" wenn nichts zu merken ist.
+    """
+    if not bild_aktiv or not frage or len(frage.strip()) < 3:
+        return ""
+    f = frage.lower().strip()
+    # Günstiges Gate: nur weiter, wenn ein Personen-Nenn-Signal vorliegt —
+    # sonst würde für jede Bild-Frage ein LLM-Call abgehen (teuer + langsam).
+    _anlern_signal = False
+    if " ich" in f or "bin ich" in f or "ich bin" in f or "auf dem bild" in f:
+        _anlern_signal = True
+    elif any(m in f for m in _PERSON_NENN_MUSTER):
+        _anlern_signal = True
+    else:
+        # Eigennamen-Signal: ein großgeschriebenes Wort nach einer Nenn-Phrase
+        # (ohne das Signal selbst wäre eine normale Rückfrage).
+        import re as _re
+        if _re.search(r"(das ist|das ist die|das ist der|das ist mein|das ist meine|das ist unser|das ist unsere)\s+[A-ZÄÖÜ]", frage):
+            _anlern_signal = True
+    if not _anlern_signal:
+        return ""
+
+    nutzer_name = _nutzer_name()
+    personen = []
+
+    # 1) Agentisch: LLM extrahiert die Person(en) robust.
+    try:
+        res = llm_service.extrahiere_gesichts_anlernen(frage, nutzer_name)
+        if res.get("ist_anlern_wunsch") and res.get("personen"):
+            personen = res["personen"]
+    except Exception:
+        personen = []
+
+    # 2) Fallback: deterministische Heuristik (Einzelperson, kein LLM).
+    if not personen:
+        p = _gesichter_merke_deterministisch(frage)
+        if p:
+            personen = [p]
+
+    if not personen:
+        return ""
+
+    # Alle Personen speichern (je dieselbe Referenz-Miniatur).
+    gespeichert = []
+    try:
+        for p in personen:
+            name = (p.get("name") or "").strip()
+            if not name:
+                continue
+            rolle = (p.get("rolle") or "").strip()
+            gesichter_service.person_speichern(
+                name=name, rolle=rolle,
+                beziehung="",
+                beschreibung="",
+                referenz_bild_pfad="",
+                # Das aktuelle Bild als Referenz einbetten (falls da).
+                referenz_bild_miniatur=(referenz_bild or "").strip(),
+                # Echtes Gesichts-Embedding (128-dim) für Zwillings-robustes
+                # Wiedererkennen; None -> kein Embedding gespeichert.
+                embedding=embedding,
+            )
+            gespeichert.append((name, rolle))
+    except Exception:
+        # Merken ist Bonus — darf den Chat nie brechen.
+        if not gespeichert:
+            return ""
+
+    if not gespeichert:
+        return ""
+    hat_bild = bool((referenz_bild or "").strip())
+    namen_text = ", ".join(
+        (n + (f" ({r})" if r else "")) for n, r in gespeichert
+    )
+    hinweis = (
+        f"Folgende Person(en) wurde(n) dem Gesichter-Katalog hinzugefügt: "
+        f"{namen_text}"
+        + (f", jeweils mit diesem Bild als Referenz versehen" if hat_bild else "")
+        + ". Sag dem Nutzer kurz, dass du sie gespeichert hast und sie künftig "
+        "auf Fotos erkennst (per Bild-Vergleich wenn ein Referenzbild "
+        "vorhanden ist). "
+        "Achtung bei einander stark ähnlichen Personen (z. B. Zwillingsbrüder): "
+        "Wenn zwei Personen verwechselbar aussehen, sage ehrlich, wenn du "
+        "unsicher bist, statt zu raten — \"das kann ich nicht zuverlässig "
+        "unterscheiden\" ist erlaubt und besser als eine erfundene Zuordnung. "
+        "Erfinde KEINE Details."
+    )
+    return f"\n\n[Hinweis für den Assistenten: {hinweis}]"
+
+
+def _refusal_stopper():
+    """Harte Direktive an den LLM: Wenn ein Gesichts-Ergebnis deterministisch
+    vorliegt, darf keine generelle Datenschutz-Weigerung folgen. Private
+    Familienfotos des Nutzers sind dsgvo-rechtlich erlaubt (Haushaltsausnahme)
+    und liegen lokal. Weigert sich der Agent trotzdem, gilt die Antwort als
+    fehlgeschlagen.
+    """
+    return ("\n\n[PFLICHT-ANWEISUNG an dich, wenn oben ein Gesichts-Ergebnis "
+            "(Erkennung/gespeicherte Person) steht:] Das Ergebnis ist bereits "
+            "deterministisch erledigt (lokales SFace, private Familienfotos des "
+            "Nutzers auf dessen Geraet — nach Art. 2 Abs. 2 lit. c DSGVO "
+            "(Haushaltsausnahme) erlaubt). Bestaetige es direkt und beantworte "
+            "die Nutzerfrage sachlich. Nenne dabei KEINE allgemeinen "
+            "Datenschutz-Bedenken, keine 'ich darf das nicht'- oder "
+            "'kann keine Gesichter identifizieren'-Aussagen. Eine Weigerung "
+            "gilt als fehlgeschlagene Antwort.")
+
+def _gesichter_merke_deterministisch(frage: str) -> Optional[dict]:
+    """Deterministischer Fallback: erkennt EINE genannte Person (Name+Rolle).
+
+    Konservativ, nur für den Einzel-Fall inkl. 'das bin ich'. Returns dict
+    {name, rolle, ist_nutzer} oder None.
+    """
+    import re as _re
+    # 'das bin ich' ohne weiteren Namen → Nutzer.
+    if not _re.search(r"das ist|das ist die|das ist der|das ist mein|das ist meine",
+                      frage, _re.I) and ("bin ich" in frage.lower() or "ich bin" in frage.lower()):
+        return {"name": "", "rolle": "", "ist_nutzer": True}  # Name wird unten befüllt
+
+    m = _re.search(r"(?:das ist|das hier ist|das dort ist|das ist doch|das ist auf)"
+                   r"(?: die| der| meine| mein| unsere| unser)?\s+(.+?)\s*[.!?]?\s*$",
+                   frage)
+    if not m:
+        return None
+    rest = m.group(1).strip()
+    woerter = _re.findall(r"[A-ZÄÖÜ][a-zäöüß]+", rest)
+    if not woerter:
+        return None
+    name = next((w for w in reversed(woerter) if w.lower() not in _KEINE_PERSON_ROLLE), "")
+    if not name:
+        return None
+    rolle = ""
+    for w in reversed(woerter):
+        if w == name:
+            continue
+        if w.lower() in _KEINE_PERSON_ROLLE and w.lower() not in _KEINE_NICHT_ROLLE_WORTE:
+            rolle = w
+            break
+    return {"name": name, "rolle": rolle, "ist_nutzer": False}
+
+
+_KEINE_NICHT_ROLLE_WORTE = {
+    "beste", "schönste", "größte", "groesste", "blau", "rot", "grün", "gruen",
+    "gelb", "schwarz", "weiß", "weiss", "idee", "haus", "auto", "sache", "ding",
+    "bild", "foto", "screenshot", "tasse", "buch", "vase", "tisch", "hund",
+    "katze", "straße", "plastikmull",
+}
+
+
+def _baue_kontext(frage: str, conversation_id: Optional[str] = None) -> str:
+    """Baut das kompakte Kontext-Paket für die Hermes-Delegation (Variante C).
+
+    Nimmt die letzten Chat-Nachrichten der AKTUELLEN Conversation (die, aus der
+    geschrieben wird - conv_main ODER conv_code) + die 3 relevantesten
+    Erinnerungen und kuerzt sie auf eine handliche Textmenge.
+
+    ZWEI GROESSEN, je Kanal (Stand 2026-09-15, Wunsch des Betreibers: „die
+    Gespräche müssen weitergeführt werden"):
+      * Coding-Chat (conv_code): bis zu 12 Runden, je bis 1200 Zeichen,
+        Gesamtdeckel 7000 Zeichen.
+      * Haupt-Chat (conv_main): unveraendert knapp (3 Runden x 400).
+
+    WARUM das fuer den Coding-Chat so wichtig ist: Jeder Auftrag dort ist ein
+    FRISCHER ``hermes chat -q``-Prozess (Inbox-Daemon) — Hermes hat ueber
+    Auftraege hinweg KEIN eigenes Sitzungsgedaechtnis. Die Kontinuitaet eines
+    Arbeitsfadens entsteht ausschliesslich hier im Kontextpaket. Mit 3 x 400
+    riss der Faden bei Coding-Aufgaben regelmaessig (welche Datei? welche
+    Entscheidung? welcher naechste Schritt?).
+    """
+    konv_id = _get_or_create_conversation(conversation_id)
+    hist = conversations.get(konv_id, [])
+    teile: List[str] = []
+    # Groesse je Kanal: der Coding-Chat braucht den laengeren Faden.
+    _ist_coding = (conversation_id or "").strip() == "conv_code"
+    max_runden = 12 if _ist_coding else 3
+    max_zeichen = 1200 if _ist_coding else 400
+    deckel = 7000 if _ist_coding else 1600
+    # Nur ECHTE, relevante Nachrichten als Kontext - kein alter Feed-Wildwuchs
+    # (viele Hermes-Status-/Duplikat-Eintraege machen den Kontext sonst zu einem
+    # 'ausgespuckten alten Stand'). Statuszeilen mit Zeitstempel-Präfix und
+    # direkte Duplikate werden ausgefiltert.
+    relevante = []
+    for m in reversed(hist):
+        rolle = m.get("role", "?")
+        inhalt = (m.get("content") or "").strip()
+        if not inhalt:
+            continue
+        # Hermes-Status-/Zwischenzeilen mit Zeitstempel-Praefix ueberspringen.
+        if inhalt.startswith("[") and "]" in inhalt[:16]:
+            continue
+        # Direkte Duplikate (gleiche role+content) nur einmal.
+        if relevante and relevante[-1][0] == rolle and relevante[-1][1] == inhalt:
+            continue
+        relevante.append((rolle, inhalt))
+        if len(relevante) >= max_runden:
+            break
+    for rolle, inhalt in reversed(relevante):
+        if len(inhalt) > max_zeichen:
+            inhalt = inhalt[:max_zeichen] + "…"
+        teile.append(f"{rolle}: {inhalt}")
+    # Relevante Erinnerungen (semantisch zur Frage).
+    try:
+        mems = memory_service.retrieve_relevant_memories(frage, top_k=3)
+        for m in mems:
+            inhalt = (m.get("content") or m.get("text") or "").strip()
+            if inhalt and len(inhalt) < 400:
+                teile.append(f"Erinnerung: {inhalt}")
+    except Exception:
+        pass  # Kontext ist Bonus — nie die Delegation deswegen brechen.
+    if not teile:
+        return ""
+    text = "\n".join(teile)
+    if len(text) > deckel:
+        # Vorne kuerzen, hinten vollstaendig: fuer den Faden zaehlt das NEUESTE
+        # (die Erinnerungen stehen hinten und bleiben so erhalten).
+        text = "…\n" + text[-deckel:]
+    return text
+
+
+# ── Archiv-Tool über Sprache ────────────────────────────────────────────
+# Harte Signale: Wer DAS sagt, meint den Wissensspeicher (alte Chats von
+# ChatGPT/Gemini/Claude) — unabhängig davon, ob das Wort „Archiv" fällt.
+_ARCHIV_SIGNALE = (
+    "aus dem archiv", "aus meinem archiv", "im archiv", "dem archiv", "archiv",
+    "alte chats", "alten chats", "alte gespräche", "alten gespräche",
+    "alte gespraeche", "alten gespraeche", "alte unterhaltungen",
+    "alten unterhaltungen",
+)
+# Weiche Signale: Erinnerungs-/Wissens-Fragen, die genauso gut den
+# lokalen Gesprächsverlauf meinen könnten — Archiv wenn verfügbar,
+# sonst stiller Rückfall auf Verlauf/allgemeines Wissen.
+_ARCHIV_SIGNALE_WEICH = (
+    "was weißt du über", "was weisst du über",
+    "erinnerst du dich", "erinnerst du dich noch", "erinnere dich an",
+    "weißt du noch", "weisst du noch", "historisch", "chronik",
+    "vergangenheit",
+)
+# Gegenstück: Bild-/Foto-Fragen gehören zur Handy-DATEISUCHE, nie ins
+# Archiv — selbst wenn sie „über …" formuliert sind („was weißt du über
+# das Foto von gestern?"). Kein False-Positive.
+_ARCHIV_AUSSCHLUSS = ("bild", "foto", "screenshot", "aufnahme")
+_ARCHIV_STOPWOERTER = {
+    "zu", "über", "ueber", "aus", "dem", "den", "der", "die", "das", "des",
+    "im", "in", "an", "auf", "von", "vom", "mit", "und", "oder", "noch",
+    "auch", "ein", "eine", "einen", "einer", "einem", "eines", "wir",
+    "ich", "du", "haben", "hat", "hatte", "hatten", "gesagt", "besprochen",
+    "erinnere", "erinnerst", "dich", "dass", "was", "weiß", "weiss",
+    "wissen", "archiv", "alte", "alten", "chats", "gespräche", "gespraeche",
+    "unterhaltungen", "historisch", "chronik", "vergangenheit", "bitte",
+    "mal", "mir", "mich", "nochmal",
+}
+
+# Harte Personen-Signale (N19, 2026-09-29): „was habe ich mit X gemacht?"
+# fragt nach einem *Menschen*, nicht nach dem Gegenüber eines Chats. Ohne
+# eigenes Signal lief so eine Frage ins Leere, obwohl der Index die
+# Erwähnungen längst kennt. Bewusst getrennt von _ARCHIV_SIGNALE — hier wird
+# der Name aus dem Satz gelöst und über ALLE Quellen gesucht.
+_ERWAEHNUNG_SIGNALE = (
+    "was habe ich mit", "was hab ich mit", "was war mit", "was war da mit",
+    "wo war ich mit", "mit wem war ich", "wen kenne ich", "was weiß ich über",
+    "was weiss ich über",
+)
+
+# Orts-/Zeitangaben sind kein Personenname („mit wem war ich in Hamburg?").
+# Steht eine solche Präposition im Rest, wird lieber nichts getan als eine
+# Stadt als Person durchsucht.
+_ERWAEHNUNG_ORTSSIGNALE = {
+    "in", "im", "an", "am", "auf", "bei", "nach", "zu", "zum", "zur", "von",
+    "vom", "aus", "über", "ueber", "unter", "vor", "neben", "zwischen",
+    "seit", "durch", "gegen", "ohne", "um", "mit",
+}
+
+# Füllwörter, die in diesen Fragen übrig bleiben, aber niemanden bezeichnen.
+_ERWAEHNUNG_FUELLWOERTER = {
+    "gemacht", "macht", "machen", "erlebt", "unternommen", "angefangen",
+    "gestartet", "getan", "passiert", "gewesen", "eigentlich", "damals",
+    "alles", "denn", "jetzt", "schon", "wieder", "zusammen", "besucht",
+}
+
+
+def _erwaehnung_name(frage: str) -> Optional[str]:
+    """Den gesuchten Personennamen aus einer Erwähnungs-Frage lösen.
+
+    Reine Funktion (kein Index, kein Netz, kein DOM) — deshalb offline
+    prüfbar. Sie nimmt den Text **nach** dem Signal, schneidet Satzzeichen ab
+    und verwirft ``_ARCHIV_STOPWOERTER`` sowie weitere Füllwörter. Nur wenn
+    **genau ein** Wort übrig bleibt (mindestens 3 Zeichen), gilt es als Name;
+    sonst ``None`` — lieber nichts tun als die ganze Frage als Namen zu
+    durchsuchen.
+    """
+    roh = (frage or "").strip()
+    if not roh:
+        return None
+    klein = roh.lower()
+    signal = next((s for s in _ERWAEHNUNG_SIGNALE if s in klein), None)
+    if not signal:
+        return None
+    rest_roh = roh[klein.find(signal) + len(signal):].strip()
+    if not rest_roh:
+        return None
+    sauber = [w.strip(" ?!,.:;\"'()[]{}") for w in rest_roh.split()]
+    sauber = [w for w in sauber if w]
+    if not sauber:
+        return None
+    # Orts-/Zeitangabe → kein Personenname.
+    if any(w.lower() in _ERWAEHNUNG_ORTSSIGNALE for w in sauber):
+        return None
+    behalten = [
+        w for w in sauber
+        if w.lower() not in _ARCHIV_STOPWOERTER
+        and w.lower() not in _ERWAEHNUNG_FUELLWOERTER
+    ]
+    if len(behalten) != 1:
+        return None
+    name = behalten[0]
+    return name if len(name) >= 3 else None
+
+
+def _erwaehnung_notiz(name: str, service: Optional[Any] = None) -> str:
+    """Die Erwähnungssuche als Notiz für das Modell (Form „\\n\\n[…]").
+
+    ``service`` ist injizierbar (Tests). Kennt der übergebene Dienst die
+    Erwähnungssuche nicht (weder der Standardweg ``StandardArchiv`` noch der
+    alte Volltext-Dienst ``archiv_service`` kennen sie), wird der Indexdienst
+    aus ``app.services.archiv_suche`` genommen. Ist nichts erreichbar oder
+    scheitert die Suche, kommt ein ehrlicher Hinweis statt eines stillen
+    Rückfalls — erfunden wird nie.
+    """
+    try:
+        from app.services.archiv_suche import erwaehnungs_text, archiv_suche as index_dienst
+    except Exception as e:  # pragma: no cover - Import ist immer möglich
+        logger.warning("Erwähnungssuche nicht verfügbar: %s", e)
+        return (
+            "\n\n[Die Erwähnungssuche im Archiv ist gerade nicht verfügbar. "
+            "Sag dem Nutzer ehrlich, dass Du dazu gerade nichts sagen kannst — "
+            "erfinde KEINE Archiv-Fundstellen.]"
+        )
+    dienst = service if (service is not None and hasattr(service, "erwaehnung_treffer")) else index_dienst
+    if dienst is None or not getattr(dienst, "is_available", False):
+        return (
+            "\n\n[Der Wissensspeicher/Archiv mit den alten Chats ist gerade "
+            "nicht erreichbar. Sag dem Nutzer ehrlich, dass Du dazu gerade "
+            "nichts sagen kannst, und schlage vor, es später erneut zu "
+            "versuchen — erfinde KEINE Archiv-Fundstellen.]"
+        )
+    try:
+        ergebnis = dienst.erwaehnung_treffer(name)
+    except Exception as e:
+        logger.warning("Erwähnungssuche fehlgeschlagen: %s", e)
+        return (
+            "\n\n[Die Archiv-Suche ist gerade fehlgeschlagen. Sag dem Nutzer "
+            "ehrlich, dass Du dazu gerade nichts sagen kannst — erfinde "
+            "KEINE Archiv-Fundstellen.]"
+        )
+    return "\n\n[" + erwaehnungs_text(ergebnis) + "]"
+
+
+def _archiv_tool(frage: str, service: Optional[Any] = None) -> str:
+    """Archiv-Suche als 'Tool' über Sprache (ohne UI).
+
+    Erkennt Archiv-/Erinnerungs-Signale („aus dem Archiv", „alte Chats",
+    „was weißt du über X", „erinnerst du dich an X", „historisch") →
+    durchsucht den Wissensspeicher (Chunk-DB der alten ChatGPT/Gemini/
+    Claude-Gespräche) → hängt die Treffer mit Quelle + Datum an die
+    user_message, damit der LLM daraus zitiert.
+
+    Hat VORRANG vor der Dateisuche: Eine Archiv-Frage darf die Handy-
+    Dateisuche NICHT auslösen (der Nutzer meint alte Gespräche, keine
+    lokalen PDFs). Deshalb liefert das Tool auch bei leerem oder nicht
+    erreichbarem Archiv einen Hinweis statt eines leeren Strings — nur
+    weiche Erinnerungs-Signale fallen bei fehlendem Archiv still auf den
+    lokalen Gesprächsverlauf (_verlauf_tool) zurück.
+
+    `service` ist injizierbar (Tests); Default ist der Standardweg
+    (:class:`StandardArchiv`): erst der volle Index mit dem WhatsApp-Bestand,
+    dann der alte Dienst. Bis zum 11.10.2026 lief hier nur der alte Dienst.
+
+    Liefert "" wenn kein Archiv-Wunsch vorliegt (dann läuft die
+    Dateisuche/Verlaufssuche ganz normal).
+    """
+    if service is None:
+        service = StandardArchiv()
+    f = frage.lower().strip()
+    if not f:
+        return ""
+    # Foto-/Bild-Fragen: Dateisuche, nicht Archiv (False-Positive-Schutz).
+    if any(w in f for w in _ARCHIV_AUSSCHLUSS):
+        return ""
+    # N19: Personenfrage („was habe ich mit X gemacht?") → Erwähnungssuche
+    # über ALLE Quellen. Steht VOR der Signalprüfung, damit auch Fragen ohne
+    # das Wort „Archiv" den Index sehen.
+    name = _erwaehnung_name(frage)
+    if name:
+        return _erwaehnung_notiz(name, service)
+    trigger = next((s for s in _ARCHIV_SIGNALE if s in f), None)
+    weich = False
+    if trigger is None:
+        trigger = next((s for s in _ARCHIV_SIGNALE_WEICH if s in f), None)
+        weich = trigger is not None
+    if not trigger:
+        return ""
+    # Stichwort = Text nach dem Signal, bereinigt um Stoppwörter → der
+    # Kern bleibt („EasyBank“ aus „was weißt du über EasyBank aus dem
+    # Archiv“).
+    stichwort = f[f.find(trigger) + len(trigger):].strip(" ?!,.:")
+    teile = [w for w in stichwort.split() if w not in _ARCHIV_STOPWOERTER]
+    stichwort = " ".join(teile).strip()
+    if not stichwort or len(stichwort) < 3:
+        # Nichts herauslösbar (Signal am Satzende) → ganze Frage als
+        # Suchanfrage; die FTS-Aufbereitung filtert selbst die Füllwörter.
+        stichwort = f
+    # Wissensspeicher nicht erreichbar (z. B. PC ohne angebundenes Handy):
+    # bei hartem Archiv-Bezug ehrlich sagen (und KEINE Dateisuche starten),
+    # bei weichem Erinnerungs-Signal den lokalen Verlauf übernehmen lassen.
+    if not service.is_available:
+        if weich:
+            return ""
+        return (
+            "\n\n[Der Wissensspeicher/Archiv mit den alten Chats ist gerade "
+            "nicht erreichbar. Sag dem Nutzer ehrlich, dass Du dazu gerade "
+            "nichts sagen kannst, und schlage vor, es später erneut zu "
+            "versuchen — erfinde KEINE Archiv-Fundstellen.]"
+        )
+    try:
+        treffer = service.hybrid(stichwort)
+    except Exception as e:
+        logger.warning("Archiv-Tool-Suche uebersprungen: %s", e)
+        return (
+            "\n\n[Die Archiv-Suche ist gerade fehlgeschlagen. Sag dem Nutzer "
+            "ehrlich, dass Du dazu gerade nichts sagen kannst — erfinde "
+            "KEINE Archiv-Fundstellen.]"
+        )
+    if not treffer:
+        return (
+            "\n\n[Im Archiv zu '" + stichwort + "': nichts gefunden. "
+            "Beantworte die Frage trotzdem aus deinem allgemeinen Wissen — "
+            "erfinde aber KEINE Archiv-Fundstellen.]"
+        )
+    zeilen = []
+    for t in treffer[:5]:
+        quelle = t.get("source") or "unbekannt"
+        # Tag oder Tagesspanne: ein Abschnitt kann mehrere Tage umfassen, und
+        # der Zitattag darf dann nicht der erste Tag sein (sonst „falscher
+        # Zeitpunkt"). Aeltere Aufrufer ohne `ende` bleiben beim Einzeldatum.
+        datum = zeitraum_kurz(t.get("beginn"), t.get("ende"))
+        kopf = f"[{quelle}, {datum}]" if datum else f"[{quelle}]"
+        text = (t.get("text") or "").strip().replace("\n", " ")[:300]
+        zeilen.append(f"{kopf} {text}")
+    from app.services.archiv_suche import ARCHIV_FLUSS_ANWEISUNG
+    return (
+        "\n\n[Aus dem Archiv zu '" + stichwort + "':]\n"
+        + "\n".join(zeilen)
+        + "\n" + ARCHIV_FLUSS_ANWEISUNG + "]"
+    )
+
+
+def _gesicht_suche_tool(frage: str) -> str:
+    """Chat-Befehl: Gesichter-Suche auf lokalen Bildern (dynamisch, kontextbasiert).
+
+    Erkennt Wünsche wie 'zeig mir alle Fotos mit Erika/Oma', 'Bilder der letzten
+    7 Tage mit Oma', 'welche Fotos sind von Oma'. Nutzt die deterministische
+    SFace-Suche (gesicht_fotos) gegen den Gesichter-Katalog — kein hartkodierter
+    Name, die Person wird zur Laufzeit aufgeloest. Liefert eine Notiz mit den
+    Treffern (Anzahl + Dateinamen) an die user_message, damit der Agent sie
+    fluessig anzeigt und dem Nutzer nennt.
+    """
+    try:
+        f = (frage or "").strip()
+        if not f:
+            return ""
+        import re as _re
+        import datetime as _dt
+        # Zeitraum-Hinweis (Tage) — "letzte(n) 7 Tage/Woche", "diese Woche"...
+        tage = None
+        m = _re.search(r"\b(\d{1,3})\s+(tag|tage|tagen|tag\b)", f.lower())
+        if m:
+            tage = int(m.group(1))
+        elif "woche" in f.lower() or "wochen" in f.lower():
+            mw = _re.search(r"\b(\d{1,3})\s+(woche|wochen)", f.lower())
+            tage = 7 * int(mw.group(1)) if mw else 7
+        elif "heute" in f.lower():
+            tage = 1
+        elif "gestern" in f.lower():
+            tage = 1
+        # Muss einen Bild-/Foto-Kontext UND einen Personen-Bezug haben
+        # (kontextbasiert, nicht bloß ein Name beliebig). Katalog als Referenz.
+        from app.services import gesichter_service
+        katalog = gesichter_service.liste_personen()
+        if not katalog:
+            return ""
+        namen = [((p.get("name") or "").strip().lower()) for p in katalog if p.get("name")]
+        rollen = [((p.get("rolle") or "").strip().lower()) for p in katalog if p.get("rolle") if p.get("rolle")]
+        fl = f.lower()
+        bild_bezug = any(w in fl for w in ("foto", "fotos", "bild", "bilder", "screenshot", "aufnahme", "foto's"))
+        person_hit = next((n for n in namen if n and n in fl), None)
+        if not person_hit:
+            person_hit = next((r for r in rollen if r and r in fl), None)
+        if not bild_bezug or not person_hit:
+            return ""
+        # Person aufloesen (bevorzugt Name, fallback Rolle).
+        ziel = person_hit
+        from app.services import gesicht_fotos
+        ergebnis = gesicht_fotos.suche_bilder_mit_person(ziel, tage=tage)
+        gefunden = ergebnis.get("gefunden", [])
+        if not gefunden:
+            return ("\n\n[Aus der Gesichts-Suche zu '%s': KEINE Fotos gefunden%s. "
+                    "Sag das ehrlich und erfinde keine Treffer.]"
+                    % (ziel, (f" in den letzten {tage} Tagen" if tage else "")))
+        namen_txt = "; ".join(dict.fromkeys(g.get("name") or "?" for g in gefunden[:12]))
+        dateien = "; ".join((g.get("pfad") or "").split("/")[-1] for g in gefunden[:12])
+        zeit_hinweis = f" der letzten {tage} Tage" if tage else ""
+        return ("\n\n[Gesichts-Suche zu '%s': %d Foto(s)%s gefunden (Erkennung per "
+                "SFace): %s | Dateien: %s. Zeige dem Nutzer die Bilder als fluessige "
+                "Vorschau und nenne Anzahl/Dateien.]"
+                % (ziel, len(gefunden), zeit_hinweis, namen_txt, dateien))
+    except Exception as e:
+        return ""
+
+
+def _fotos_uebersicht_tool(frage: str) -> str:
+    """Chat-Werkzeug: Zahlen/Event-Namen aus der lokalen Fotos-Übersicht (N11).
+
+    Erkennt Fragen wie 'wie viele Events gab's?', 'zeig mir die Urlaube 2021',
+    'welche Konzerte gibt es'. Quelle ist die kleine Datei
+    ``~/foto_sortierung/fotos_uebersicht.json`` (nur Zahlen und Namen, keine
+    Bilder) — die Sortierdaten selbst liegen weiterhin nur auf dem PC.
+
+    Enge Auslöseregel (bewusst, damit normale Fragen NICHT hier landen):
+    Es muss ein Foto-Wort UND ein Frage-/Listen-Wort vorkommen. Fehlt die
+    Datei, ist die Antwort leer — der Chat bleibt still, statt zu raten.
+    Kein LLM-Aufruf, kein Netz.
+    """
+    try:
+        f = (frage or "").strip().lower()
+        if not f:
+            return ""
+        import re as _re
+        foto_woerter = ("foto", "fotos", "bild", "bilder", "event", "events",
+                        "anlass", "anlaesse", "anlässe", "urlaub", "konzert")
+        frage_woerter = ("wie viele", "wieviele", "wie oft", "anzahl", "wieviel",
+                         "zeig", "zeige", "welche", "liste", "übersicht",
+                         "uebersicht", "gibts", "gibt es", "gab")
+        if not any(w in f for w in foto_woerter):
+            return ""
+        # 'gab' mit Wortgrenze: sonst würde 'Aufgabe'/'Ausgabe' das Tor öffnen.
+        if not (any(w in f for w in frage_woerter if w != "gab")
+                or _re.search(r"\bgab", f)):
+            return ""
+        # Jahreszahl als Filter, Urlaub/Konzert als Suchwort.
+        jahr = None
+        m = _re.search(r"\b(20\d{2})\b", f)
+        if m:
+            jahr = int(m.group(1))
+        suche = None
+        for wort in ("urlaub", "konzert"):
+            if wort in f:
+                suche = wort
+                break
+        from app.services import foto_uebersicht
+        return foto_uebersicht.text_antwort(jahr=jahr, suche=suche)
+    except Exception as e:  # noqa: BLE001 – ein Werkzeug darf nie den Chat reißen
+        logger.warning("Fotos-Uebersicht-Tool fehlgeschlagen: %s", e)
+        return ""
+
+
+def _beziehungen_tool(frage: str) -> str:
+    """Chat-Werkzeug: „wer war mit wem wo" an einem Tag (N28, 2026-09-29).
+
+    Beantwortet Fragen wie „was war am 27.12.2019?" belegt aus der lokalen
+    Datei ``~/foto_sortierung/beziehungen.jsonl`` (N27e). Quelle ist der Dienst
+    ``services/beziehungen_service.py`` — kein Bild, kein Netz, kein
+    LLM-Aufruf.
+
+    Enge Auslöseregel (bewusst, damit normale Fragen NICHT hier landen): Es
+    muss ein **Datum** erkannt werden **und** die Frage einen Zeit-/Beleg-Bezug
+    haben (z. B. „was war", „wer war", „damals", „an dem tag", „foto", „chat",
+    „mit wem") — oder die Frage ist kurz (< 60 Zeichen) und besteht überwiegend
+    aus dem Datum. Fehlt die Datei, ist die Antwort leer — der Chat bleibt
+    still, statt zu raten. Ein Fehler reißt den Chat nie.
+    """
+    try:
+        f = (frage or "").strip()
+        if not f:
+            return ""
+        from app.services import beziehungen_service
+
+        # Erst das Datum: ohne erkennbares Datum löst das Werkzeug nie aus.
+        datum = beziehungen_service.datum_erkennen(f)
+        if not datum:
+            return ""
+
+        bezug_woerter = (
+            "was war", "wer war", "was passierte", "was war los", "damals",
+            "an dem tag", "an diesem tag", "ereignis", "termin", "foto",
+            "fotos", "bild", "bilder", "chat", "zusammen", "mit wem", "dabei",
+        )
+        fl = f.lower()
+        # Kurze Frage, die überwiegend das Datum ist (z. B. „27.12.2019"):
+        # höchstens sechs Buchstaben, etwa für ein vorangestelltes „am".
+        kurz_und_datum = len(f) < 60 and sum(1 for z in f if z.isalpha()) <= 6
+        if not (any(w in fl for w in bezug_woerter) or kurz_und_datum):
+            return ""
+
+        # Fehlt die Aussagen-Datei, schweigt der Chat (statt zu raten).
+        if not os.path.isfile(beziehungen_service.aussagen_pfad()):
+            return ""
+
+        return beziehungen_service.text_antwort(datum)
+    except Exception as e:  # noqa: BLE001 – ein Werkzeug darf nie den Chat reißen
+        logger.warning("Beziehungen-Tool fehlgeschlagen: %s", e)
+        return ""
+
+
+def _datei_tool(frage: str) -> tuple:
+    """Handy-Dateisuche als 'Tool' über Sprache (ohne UI).
+
+    Stufe A: erkennt Datei-Suchs-Signale → sucht Treffer → LLM nennt sie.
+    Stufe B: erkennt Lese-Signale ("lies <datei>", "was steht in <datei>",
+    "zeig mir den inhalt von <datei>", "gib mir die <datei>") → liest den
+    INHALT der gefundenen/benannten Datei + hängt ihn als Text (oder Bild-
+    data_url) an die user_message, damit der LLM zusammenfasst/informiert.
+
+    Returns: (text, bild_files) — text hängt an die user_message, bild_files
+    ist eine Liste von {"type":"image","data_url":...} für den Vision-LLM.
+    Liefert ("", []) wenn kein Datei-Bezug vorliegt (kein Tool-Trigger).
+    """
+    # Agentischer LLM-Intent (primär). Ein günstiges Gate entscheidet zuerst,
+    # ob hier überhaupt ein Datei-Verdacht vorliegt — so wird nicht jede
+    # normale Frage an den LLM geschickt (spart Token). Jahre zählen mit:
+    # "letztes Foto aus 2025" hat "foto" (Signal) + "2025".
+    f = frage.lower().strip()
+    if not f:
+        return "", []
+    import re as _re
+    _jahr_vorhanden = bool(_re.search(r"\b(20)\d{2}\b", f)) or "jahr" in f
+
+    # Schnelles, günstiges Vor-Gate: Nur bei Datei-Verdacht weiter (sonst
+    # würde JEDE Nachricht einen LLM-Call auslösen = teuer + langsam). Ein
+    # Datei-Signal (Wort) oder eine Jahreszahl öffnet das Tor; danach darf
+    # der LLM den Intent agentisch aus dem Satz verstehen.
+    _vor_signal = [
+        "lies", "lese", "was steht in", "inhalt von", "zeig mir den inhalt",
+        "zeig mir den text", "fasse zusammen aus", "gib mir die datei",
+        "suche", "finde", "zeig mir", "zeige mir", "datei", "dokument",
+        "bild", "foto", "screenshot", "screen", "unterlagen", "download",
+        "wo liegt", "hast du eine datei", "was liegt", "aufnahme",
+        "heute", "gestern", "vorgestern",
+    ]
+    if not any(sig in f for sig in _vor_signal) and not _jahr_vorhanden:
+        return "", []
+
+    # Agentisch: LLM-Intent (Skill-Gate). Er versteht Jahr/Synonyme/Satzbau
+    # UND entscheidet kontextbewusst, ob hier ueberhaupt ein Datei-/Bild-/
+    # Inhaltszugriff gewollt ist (aktiv). Das eliminiert Fehltriigger aus
+    # losen Woertern wie "zeig mir"/"heute"/"foto", wenn kein Datei-Wunsch.
+    try:
+        _intent = llm_service.extrahiere_datei_such_intent(frage)
+    except Exception:
+        _intent = None
+
+    # SKILL-GATE (robust): Das Modell liefert aktiv (kontextuell). Entscheidend
+    # ist aber die Kombination aus aktiv UND konkreten Datei-/Lese-Signalen im
+    # Intent. Ein False bei aktiv darf ECHTE Dateizugriffe nicht toeten (sonst
+    # Fehl-Tiigger der Gegenrichtung); bloße Plauderei (aktiv:false + KEIN
+    # Datei-/Lese-Signal) wird abgewehrt.
+    _hat_signal = bool(
+        _intent is not None
+        and (
+            _intent.get("suchbegriff")
+            or _intent.get("neueste")
+            or _intent.get("jahr") is not None
+            or _intent.get("ordner")
+            or _intent.get("nur_bilder")
+            or _intent.get("nur_dokumente")
+            or _intent.get("erklaeren")
+            or _intent.get("aufnahme_am") is not None
+        )
+    )
+    _aktiv = bool(_intent is not None and _intent.get("aktiv", False))
+    if _intent is not None and not _aktiv and not _hat_signal:
+        return "", []
+    _agent_pfad = bool(_intent is not None) and (_aktiv or _hat_signal)
+
+    if _agent_pfad and _intent:
+        reines_stichwort = _intent["suchbegriff"]
+        neueste_zuerst = _intent.get("neueste", False)
+        jahr = _intent.get("jahr")
+        aufnahme_am = _intent.get("aufnahme_am") or None
+        ordner_hinweis = _intent.get("ordner", "") or ""
+        if _intent.get("nur_bilder"):
+            nur_erweiterungen = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+        elif _intent.get("nur_dokumente"):
+            nur_erweiterungen = {".pdf", ".doc", ".docx", ".txt", ".md", ".csv", ".xlsx", ".xls"}
+        else:
+            nur_erweiterungen = None
+        lese_wunsch = bool(_intent.get("erklaeren"))
+        will_erklaeren = bool(_intent.get("erklaeren"))
+        stichwort = reines_stichwort or f
+    else:
+        # ── Heuristik (Fallback, falls kein LLM / kein plausibler Intent) ──
+        # Signale (deutsch). "lies" zuerst für Stufe B.
+        signale = [
+            "lies", "lese", "was steht in", "inhalt von", "zeig mir den inhalt",
+            "zeig mir den text", "fasse zusammen aus", "gib mir die datei",
+            "suche", "finde", "zeig mir", "zeige mir", "datei", "dokument",
+            "bild", "foto", "screenshot", "unterlagen", "download", "wo liegt",
+            "hast du eine datei", "was liegt",
+        ]
+        trigger = next((s for s in signale if s in f), None)
+        if not trigger and not _jahr_vorhanden:
+            return "", []
+
+        # "letzte/neueste" → nach Zeit sortieren (neueste zuerst).
+        neueste_zuerst = any(w in f for w in ("letzte", "letzten", "neueste", "neuesten"))
+
+        # Such-/Stichwort = Text nach dem Signal (grob bereinigt).
+        stichwort = f[f.find(trigger) + len(trigger):].strip(" ?!,.:") if trigger else ""
+        # Ein leeres Stichwort ist nur ok, wenn eine "letzte Bild/Screenshot"-
+        # Suche läuft. Jahr allein ("Foto von 2025") öffnet den Weg ebenfalls,
+        # dann wird ohne Namens-Match nach Zeit + Jahr gefiltert.
+        bild_zeit_wunsch = neueste_zuerst and any(w in f for w in ("bild", "foto", "screenshot", "aufnahme"))
+        if not stichwort and not bild_zeit_wunsch and not _jahr_vorhanden:
+            return "", []
+        jahr = None
+        m = _re.search(r"\b(20\d{2})\b", f)
+        if m:
+            jahr = int(m.group(1))
+        # relativer Tag (heute/gestern) → Tagesfilter; "vom Mai" bleibt ohne.
+        aufnahme_am = None
+        if "gestern" in f:
+            aufnahme_am = "gestern"
+        elif "heute" in f:
+            aufnahme_am = "heute"
+        elif "vorgestern" in f:
+            aufnahme_am = "vorgestern"
+
+        stopwoerter = {
+            "das", "die", "der", "den", "dem", "des", "ein", "eine", "einen",
+            "letzte", "letzten", "neueste", "neuesten", "aufgenommene",
+            "aufgenommen", "bild", "foto", "erkläre", "erkläre", "mir", "ist",
+            "und", "was", "da", "drauf", "darauf", "zeig", "zeige", "suche",
+            # Füll-/Steuerwörter, die den eigentlichen Suchbegriff verschlucken:
+            # "Lies den INHALT MEINER Lebenslauf-Datei" → Suchwort = lebenslauf.
+            "inhalt", "inhalte", "meiner", "meine", "meinen", "mein",
+            "wichtigsten", "wichtigen", "stationen", "zusammen", "fass",
+            "fasse", "den", "die", "der", "und",
+        }
+        teile = []
+        for w in stichwort.split():
+            kern = w.strip(" ?!,.:;-_")
+            if kern and kern not in stopwoerter:
+                teile.append(kern)
+
+        # Dokument-Themenwörter priorisieren.
+        dokument_thema = next(
+            (tema for tema in (
+                "lebenslauf", "lebensläufe", "rechnung", "rechnungen", "vertrag",
+                "verträge", "zeugnis", "zeugnisse", "angebot", "angebote",
+                "bewerbung", "bewerbungen", "mietvertrag", "arbeitsvertrag",
+                "lohnabrechnung", "gehaltsabrechnung", "letter",
+            ) if tema in f),
+            None,
+        )
+        if dokument_thema:
+            reines_stichwort = dokument_thema
+        else:
+            reines_stichwort = " ".join(teile[:2]).strip()
+
+        # Bei "letzte/neueste Bild/Foto/Screenshot" → alle nach Zeit sortiert,
+        # kein Namens-Match nötig.
+        if ("bild" in f or "foto" in f or "screenshot" in f or "aufnahme" in f) and neueste_zuerst:
+            reines_stichwort = ""
+
+        # Dateityp-Filter.
+        nur_erweiterungen = None
+        if "bild" in f or "foto" in f or "screenshot" in f or "aufnahme" in f:
+            nur_erweiterungen = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+        elif ("pdf" in f or "dokument" in f or "datei" in f
+              or "unterlagen" in f or "lebenslauf" in f or "vertrag" in f
+              or "rechnung" in f or "bewerbung" in f):
+            nur_erweiterungen = {".pdf", ".doc", ".docx", ".txt", ".md", ".csv", ".xlsx", ".xls"}
+
+        # Stufe B: expliziter Lese-Wunsch → Inhalt lesen.
+        lese_wunsch = bool(trigger) and trigger in (
+            "lies", "lese", "was steht in", "inhalt von",
+            "zeig mir den inhalt", "zeig mir den text",
+            "gib mir die datei", "fasse zusammen aus")
+        will_erklaeren = (
+            "erklär" in f or "erkläre" in f or "drauf ist" in f
+            or "was ist darauf" in f or "rate" in f or "welches" in f
+            or "was ist das" in f or "was sieht" in f
+            or ("bild" in f or "foto" in f or "screenshot" in f)
+        )
+
+        # Ordner-Hinweis.
+        if "screenshot" in f:
+            ordner_hinweis = "screenshot"
+        elif "bild" in f or "foto" in f or "aufnahme" in f:
+            ordner_hinweis = "kamera"
+        else:
+            ordner_hinweis = ""
+
+    from app.services.datei_suche import lese_datei_info, suche_dateien
+
+    try:
+        treffer = suche_dateien(
+            reines_stichwort,
+            neueste_zuerst=neueste_zuerst,
+            ordner_hinweis=ordner_hinweis,
+            nur_erweiterungen=nur_erweiterungen,
+            jahr=jahr,
+            aufnahme_am=aufnahme_am,
+        )
+    except Exception:
+        return "", []
+
+    if (lese_wunsch or will_erklaeren) and treffer:
+        # lese den ersten/passendsten Treffer (Inhalt) — bei "letzter/neueste"
+        # nach Zeit sortiert, also das neueste Bild.
+        datei = treffer[0]
+        info = lese_datei_info(datei["pfad"])
+        if info.get("ist_bild"):
+            if info.get("data_url"):
+                # Bild als Datei für den Vision-LLM (nicht in den Text)…
+                # + Pfad mitgeben: in der Notiz SICHTBAR, damit der Nutzer
+                # sieht, WELCHES Bild gefunden wurde (und es nachladen kann).
+                # WICHTIG: Dateinamen der Kamera kodieren das Aufnahmedatum
+                # (IMG_20260829_143240300 = 29.08.2026) — dem LLM explizit
+                # sagen, dass es dieses Datum als Aufnahmedatum nennen soll.
+                # Sonst parst ein diffuses Modell den Namen falsch („Jahr 5")
+                # oder halluziniert ein anderes Datum.
+                erkannt_notiz = ""
+                try:
+                    from app.services import face_service as _face
+                    if _face.verfuegbar():
+                        personen = (_face.erkenne_bild_pfad(datei["pfad"]).get("personen") or [])
+                        namen = []
+                        for _p in personen:
+                            for _t in _p.get("treffer", []):
+                                namen.append(_t["name"] + (" (sicher)" if _t.get("sicher") else " (unsicher)"))
+                        if namen:
+                            erkannt_notiz = " Erkennung per Gesichts-Embedding: " + "; ".join(sorted(set(namen))) + "."
+                except Exception:
+                    erkannt_notiz = ""
+                return (
+                    "\n\n[Datei-Bild zum Ansehen: " + datei["name"]
+                    + " | Pfad: " + datei["pfad"] + erkannt_notiz
+                    + ". Dieses Bild hat das Aufnahmedatum, das im Dateinamen "
+                      "kodiert ist (Muster IMG_JJJJMMTT_HHMMSS oder "
+                      "Screenshot_JJJJMMTT-HHMMSS): benenne diesen Zeitpunkt "
+                      "als Aufnahmedatum bitte korrekt (JJJJ.JJ.TT …) und "
+                      "erfinde KEIN anderes Datum.]",
+                    [{"type": "image", "data_url": info["data_url"],
+                      "pfad": datei["pfad"]}],
+                )
+            return f"\n\n[Datei-Bild: {datei['name']} (für Vision verfügbar)]", []
+        if info.get("text"):
+            return (
+                "\n\n[Inhalt der Datei '" + datei["name"]
+                + "':]\n" + info["text"][:8000]
+                + "\nFasse dem Nutzer den Inhalt verständlich zusammen.]",
+                [],
+            )
+        return f"\n\n[Datei '{datei['name']}' konnte nicht gelesen werden: {info.get('fehler')}]", []
+
+    # Stufe A: nur Treffer-Liste (Name/Art).
+    if not treffer:
+        return (f"\n\n[Aus der Handy-Dateisuche zu '{reines_stichwort or stichwort}': "
+                "KEINE Treffer. Sag dem Nutzer ehrlich, dass nichts gefunden wurde "
+                "und erfinde KEINE Dateinamen. Frage nach einem anderen Begriff.]", [])
+    zeilen = [f"- {t['name']}  ({t['erweiterung']})" for t in treffer[:10]]
+    return (
+        "\n\n[Aus der Handy-Dateisuche zu '"
+        + (reines_stichwort or stichwort)
+        + "':]\n"
+        + "\n".join(zeilen)
+        + "\nNenne dem Nutzer die gefundenen Dateien und frag, welche er verwenden will.]",
+        [],
+    )
+
+
+def _verlauf_tool(frage: str, verlauf: Optional[Dict[str, list]] = None) -> str:
+    """Chat-Verlauf-Suche als 'Tool' über Sprache (ohne UI).
+
+    Erkennt Erinnerungs-/Rückblick-Signale ("was haben wir zu X gesagt",
+    "erinnere mich an", "was war", "worum ging es bei") → sucht im
+    Gesprächsverlauf (Volltext in `conversations`) → hängt die Treffer an die
+    user_message, damit der LLM die Vergangenheit zitiert.
+
+    `verlauf` ist injizierbar (Tests); Default ist das globale conversations-Dict.
+
+    Liefert "" wenn kein Rückblick-Wunsch vorliegt.
+    """
+    if verlauf is None:
+        verlauf = conversations
+    signale = [
+        "was haben wir", "was hatten wir", "erinnere mich an", "erinnerst du dich",
+        "was war", "worum ging es", "was haben wir gesagt", "was haben wir besprochen",
+        "was haben wir besprochen", "zurückblickend",
+    ]
+    f = frage.lower().strip()
+    if not f:
+        return ""
+    trigger = next((s for s in signale if s in f), None)
+    if not trigger:
+        return ""
+    # Stichwort = Text nach dem Signal, bereinigt um Stoppwörter ("zu / über /
+    # wir / haben / gesagt / besprochen / ...") → nur der Kern bleibt.
+    stichwort = f[f.find(trigger) + len(trigger):].strip(" ?!,.:")
+    stopwoerter = {
+        "zu", "über", "ueber", "wir", "haben", "hatten", "gesagt", "besprochen",
+        "auch", "noch", "der", "die", "das", "den", "dem", "des", "ein", "eine",
+        "einen", "einer", "und", "oder", "dazu", "mal",
+    }
+    teile = [w for w in stichwort.split() if w not in stopwoerter]
+    stichwort = " ".join(teile).strip()
+    if not stichwort or len(stichwort) < 2:
+        return ""
+
+    # Volltext-Suche im Verlauf (die eine Conversation).
+    treffer = []
+    for cid, nachrichten in verlauf.items():
+        for n in nachrichten:
+            inhalt = (n.get("content") or "")
+            if stichwort in inhalt.lower():
+                treffer.append({
+                    "rolle": n.get("role", "?"),
+                    "text": inhalt[:200],
+                    "zeit": n.get("zeit") or "",
+                })
+    treffer.sort(key=lambda t: t.get("zeit") or "", reverse=True)
+    if not treffer:
+        return f"\n\n[Im Gesprächsverlauf zu '{stichwort}': nichts gefunden.]"
+    zeilen = []
+    for t in treffer[:5]:
+        zeilen.append(f"({t['rolle']}) {t['text']}")
+    return (
+        "\n\n[Aus dem Gesprächsverlauf zu '"
+        + stichwort
+        + "':]\n"
+        + "\n".join(zeilen)
+        + "\nBeziehe dich im Fluss darauf, wie Rede: ganze Sätze, keine "
+          "Strichliste und keine Aufzählung — und nur auf das, was dort steht.]"
+    )
+
+
+def _websuche_vorab(request: ChatRequest) -> tuple:
+    """Modus ``manual`` (bei jeder Frage suchen): Vorab-Suche mit des Betreibers
+    EIGENEM Satz als Suchtext – nie mit Kontext (Namensverbot, 14.10.2026).
+
+    Rückgabe ``(notiz, quellen, status)``: ``notiz`` wird an die Nutzernachricht
+    gehängt, ``status`` ist nur bei Ablehnung gesetzt. Andere Modi: leer.
+    """
+    if request.web_search != "manual":
+        return "", [], ""
+    from app.services import web_suche
+
+    treffer = web_suche.suchen(request.message, request.message)
+    if treffer.abgelehnt:
+        return "", [], "🔒 Websuche ohne Namen – für diese Frage aus"
+    if not treffer.ok:
+        return "", [], ""
+    return "\n\n[Websuche zu deiner Frage]\n" + treffer.text, treffer.quellen, ""
+
+
+def _hole_kontext_summary(conversation_id: str, historie: list, frage: str) -> tuple:
+    """Holt das Rolling-Summary der Conversation (+ rollt bei Bedarf neu).
+
+    Liefert (summary_text, gerollt). Rollt nur, wenn die Historie über der
+    Schwelle liegt UND genug neue Nachrichten seit dem letzten Roll kamen
+    (Rate-Limit → günstig). Erhöht den Zähler bei jedem Aufruf.
+    """
+    from app.services import chat_verlauf, kontext_service
+    summary_eintrag = chat_verlauf.summary_holen(conversation_id)
+    summary = str(summary_eintrag.get("text") or "")
+    anzahl_seit = int(summary_eintrag.get("anzahl_seit_roll") or 0)
+
+    # Kontext-Paket bauen (Rolling-Summary-Logik).
+    ergebnis = kontext_service.baue_kontext(
+        historie, frage,
+        memory_extractor=None,           # Erinnerungen kommen separat in llm_service
+        gespeichertes_summary=summary,
+        anzahl_seit_roll=anzahl_seit,
+    )
+    if ergebnis["gerollt"]:
+        chat_verlauf.summary_setzen(conversation_id, ergebnis["summary"])
+    # Zähler fürs künftige Roll-Limit erhöhen.
+    chat_verlauf.summary_erhoehe_zaehler(conversation_id)
+    return ergebnis["summary"], ergebnis["gerollt"]
+
+
+@router.post("/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """Wie /chat, liefert die Antwort aber Stück für Stück (Server-Sent Events)."""
+    # ── Verlauf-Sicherung SOFORT (Wunsch des Betreibers, 15.09.2026) ─────────────
+    # Vorher schrieb erst `finish_exchange` am ENDE User+Antwort in den Verlauf.
+    # Brach der Stream ab (Browser-Neustart, Hänger, Timeout), war die eigene
+    # Nachricht spurlos verloren. Jetzt wird sie sofort gesichert;
+    # `finish_exchange` hängt sie dank Idempotenz-Prüfung nicht doppelt an.
+    try:
+        verlauf_nachricht_anhaengen(
+            _get_or_create_conversation(request.conversation_id),
+            "user", request.message,
+            # Markierung: Diese Frage ist gesichert, ihre Antwort steht noch
+            # aus. finish_exchange erkennt sie daran wieder und hängt sie
+            # nicht erneut an (Fix 2026-09-25: keine Dubletten nach Reload,
+            # auch wenn zwischendurch Hermes-Zwischenmeldungen kamen).
+            offen=True,
+        )
+    except Exception as e:
+        # Die Sicherung darf den Chat nie blockieren — aber sie muss sichtbar
+        # scheitern (Log), damit ein Persistenz-Problem nicht stumm bleibt.
+        logger.warning("Sofort-Sicherung der User-Nachricht fehlgeschlagen: %s", e)
+
+    # Gleiche Weiche wie in /chat: Coding-Auftraege weiterleiten. Bei
+    # hochgeladenen Dateien (request.files) NICHT als Coding-Auftrag einordnen
+    # — ein Dokument-/Bild-Upload ist eine Verständnis-/Analyse-Frage an den
+    # LLM. Zusätzlich stößt ein Fähigkeits-Grenzthema (Terminal/Datei/System)
+    # an Hermes als Toolcall, auch wenn ist_auftrag es nicht als Coding sieht.
+    ist_auftrag_val = False
+    begruendung, kategorie, komplexitaet = "", None, None
+    # Umlenk-Ziel erzwingt den Track direkt (Umlenk-Buttons):
+    #   ziel="pc"    → Track A (PC-Hermes), egal was die Erkennung sagt
+    #   ziel="handy" → Track C (lokaler Hermes) direkt
+    #   ziel="agent" → lokaler LLM (nie Hermes)
+    # conv_code delegiert IMMER an Hermes — auch bei hochgeladenen
+    # Bildern/Dateien: Der Bild-Pfad wird ueber die Hermes-Aufgabe
+    # (`_hermes_bild_hinweis`) mitgegeben, Hermes analysiert ihn per
+    # Vision-Werkzeug (siehe Skill 'coding-chat-bild-vision').
+    if ((getattr(request, "conversation_id", None) or "").strip() == "conv_code"
+            and not request.force_agent
+            and request.ziel != "agent"):
+        # conv_code: IMMER an lokale Hermes-CLI (live Gedanken wie in der CLI)
+        # — auch mit Bild/Datei: der angehaengte Pfad wird an Hermes
+        # uebergeben, der es mit einem Vision-Modell (gemini) analysiert.
+        ist_auftrag_val = True
+        begruendung = "conv_code: immer Hermes (+ Bild/Kontext)"
+        kategorie = "code"
+        komplexitaet = "mittel"
+    elif request.ziel == "pc" or request.ziel == "handy":
+        ist_auftrag_val = True
+        begruendung = f"Umlenk-Button (ziel={request.ziel})"
+        kategorie = "feature"
+        komplexitaet = "mittel"
+    elif request.ziel == "agent" or request.force_agent:
+        ist_auftrag_val = False
+    elif not request.files:
+        ist_auftrag_val, begruendung, kategorie, komplexitaet = ist_auftrag(request.message)
+        if not ist_auftrag_val and stoesst_an_grenze(request.message):
+            ist_auftrag_val = True
+            begruendung = "Fähigkeits-Grenze (Terminal/Datei/System) – Hermes als Toolcall"
+            kategorie = "feature"
+            komplexitaet = "mittel"
+    else:
+        begruendung, kategorie, komplexitaet = "", None, None
+    if ist_auftrag_val:
+        # Kontext-Erweiterung: Frage + Gesprächskontext, damit Hermes nicht
+        # blind (nur mit der Frage) arbeitet. (Gleiche Logik wie im Router.)
+        kontext_paket = _baue_kontext(request.message, request.conversation_id)
+        herm_aufgabe = request.message
+        if kontext_paket and kontext_paket.strip():
+            herm_aufgabe = (
+                f"{request.message}\n\n"
+                "[Kontext aus dem Gespräch (vorherige Nachrichten/Erinnerungen):]\n"
+                f"{kontext_paket.strip()}"
+            )
+        # Bild-Pfad + Vision-Anweisung DIREKT in die Hermes-Aufgabe einbetten
+        # (nicht nur in `kontext`): der tmux-Kanal (`bestehende_session`)
+        # uebergibt NUR `auftrag_text` an die laufende Session — der Kontext
+        # wuerde dort verworfen. So erreicht das Bild Hermes in JEDEM Kanal.
+        herm_aufgabe += _hermes_bild_hinweis(request)
+        # A/B-Wahl im normalen Chat (conv_main u. a.) statt stiller Auto-
+        # Delegation. Wunsch des Betreibers (2026-09-07): Bei erkannten Hermes-
+        # Aufgaben soll der Nutzer zuerst wählen, ob sie an den Coding-Chat
+        # (A) oder als eigener paralleler Hermes-Thread hier (B) geht.
+        # Plauderfragen (ist_auftrag_val=False) laufen weiter direkt; der
+        # Coding-Chat (conv_code) und explizite Umlenk-Ziele (pc/handy/agent)
+        # delegieren weiterhin sofort, ohne Wahl.
+        conv_id_req = (getattr(request, "conversation_id", None) or "").strip()
+        explizites_ziel = getattr(request, "ziel", None) in ("pc", "handy", "agent")
+        if conv_id_req and conv_id_req != "conv_code" and not explizites_ziel and not request.force_agent:
+            # User-Runde persistieren, damit sie einen Reload überlebt (der
+            # Verlauf ist append-only; die Wahl-Buttons selbst sind reine
+            # UI-Transporte und landen nicht im Verlauf).
+            lokale_conv = _get_or_create_conversation(conv_id_req)
+            _finish_exchange(lokale_conv, request.message, "⏳ **Wohin mit dieser Aufgabe?**")
+            aufgabe = herm_aufgabe or request.message
+
+            def _wahl_ereignisse():
+                yield _sse({"art": "wahl", "aufgabe": aufgabe})
+                yield _sse({
+                    "done": True,
+                    "conversation_id": lokale_conv,
+                    "memories_used": 0, "memories_created": 0,
+                    "memory_count": memory_service.get_memory_count(),
+                    "archiv_used": 0, "sources": [], "ziel": "wahl",
+                })
+
+            return StreamingResponse(
+                _wahl_ereignisse(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        # Wie /chat: erst PC-Hermes (Track A), dann lokalen Hermes
+        # (Track C). Nur wenn beides nicht verfuegbar ist, geht der
+        # Auftrag ins Buch (Track B).
+        #
+        # AUSNAHME (Umlenk-Wunsch / Coding-Chat): Bei explizitem ziel="handy"
+        # wird Track A übersprungen — sonst lief der Umlenk-Button ins Leere,
+        # weil der PC den Auftrag annahm und nichts ans Handy zurückgab.
+        # Der Coding-Chat (conv_code) läuft ebenfalls IMMER lokal: dort IST
+        # Hermes der Agent (siehe Kommentar oben), und die lokale CLI liefert
+        # die Gedanken live ins Frontend — der PC-Weg tut das nicht.
+        _conv_id_req = (getattr(request, "conversation_id", None) or "").strip()
+        _nur_lokal = (
+            getattr(request, "ziel", None) == "handy" or _conv_id_req == "conv_code"
+        )
+        hermes_antwort = None
+        if _nur_lokal:
+            logger.info(
+                "Track A uebersprungen (%s) - direkt lokaler Hermes",
+                "Umlenk-Ziel handy" if getattr(request, "ziel", None) == "handy" else "conv_code",
+            )
+        else:
+            hermes_antwort = hermes_gateway.sende_auftrag(herm_aufgabe)
+        if hermes_antwort is not None:
+            conversation_id = _get_or_create_conversation(request.conversation_id)
+            _finish_exchange(conversation_id, request.message, hermes_antwort)
+            # Auftrag im Buch anlegen (für die Umlenk-Buttons: /wechseln-handy
+            # braucht eine auftrag_id; ohne Buch-Eintrag gibt es keine).
+            auftrag_id = ""
+            try:
+                eintrag = auftrag_service.anlegen(
+                    herm_aufgabe, begruendung, kategorie, komplexitaet
+                )
+                auftrag_id = eintrag["id"]
+                auftrag_service.setze_chat_verknuepfung(auftrag_id, conversation_id)
+            except Exception:
+                pass
+            def pc_baer_ereignisse():
+                yield _sse({"message": hermes_antwort, "ziel": "pc",
+                            "auftrag_id": auftrag_id})
+                yield _sse({"done": True, "conversation_id": conversation_id,
+                            "memories_used": 0, "memories_created": 0,
+                            "memory_count": memory_service.get_memory_count(),
+                            "archiv_used": 0, "sources": [], "ziel": "pc"})
+            return StreamingResponse(
+                pc_baer_ereignisse(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        # Track C: Lokaler Hermes startet die Aufgabe im Hintergrund und
+        # strahlt Gedanken + Ergebnis live ins Auftragsbuch.
+        if hermes_local_ist_verfuegbar():
+            # Gespraech ERST anlegen/ermitteln, damit die Verknuepfung
+            # vor dem Thread-Start an den Worker geht und das Gespraech
+            # im conversations-Dict bereits existiert, wenn die ersten
+            # Hermes-Zwischenmeldungen eintreffen.
+            conversation_id = _get_or_create_conversation(request.conversation_id)
+            eintrag = _starte_lokale_hermes(
+                herm_aufgabe,
+                hinweis=f"Automatische Erkennung: {begruendung}",
+                kategorie=kategorie,
+                komplexitaet=komplexitaet,
+                chat_verknuepfung=conversation_id,
+                kontext=_hermes_kontext_mit_bild(_baue_kontext(request.message, request.conversation_id), request),
+            )
+            ist_conv_code = (getattr(request, "conversation_id", None) or "") == "conv_code"
+            if ist_conv_code:
+                # Coding-Chat (conv_code): Hermes IST hier der Agent — keine
+                # redundante "Übergabe an Hermes"-Vor-Meldung. Hermes antwortet
+                # direkt; Gedanken & Ergebnis erscheinen live (Track C). Die
+                # User-Runde wird trotzdem persistiert, damit der Verlauf voll
+                # bleibt. (Wunsch des Betreibers 2026-09-07)
+                reply_text = "▶️ Hermes bearbeitet…\n"
+            else:
+                # Konkrete Startzeile (was, womit, Zeitbudget) statt vager
+                # Zeilen — der Betreiber 10.10.2026: "Das muss auf jeden Fall
+                # konkreter sein, was er gerade macht". Der Fortschritt
+                # bleibt zusaetzlich oben in der Statusleiste sichtbar
+                # (GET /api/laeuft, app/services/laufende_arbeiten.py).
+                reply_text = (
+                    "🧩 **Hermes-Aufgabe erkannt – erweitertes Werkzeug übernimmt.**\n\n"
+                    "➡️ **Weitergeleitet an:** Hermes (Handy)\n\n"
+                    f"📋 **Aufgabe:** {request.message[:150]}…\n\n"
+                    + hermes_arbeits_start_zeile() + "\n"
+                    "Gedanken & Zwischenschritte erscheinen hier live, das "
+                    "Endergebnis danach. Der Fortschritt bleibt oben in der "
+                    "Leiste sichtbar.\n"
+                )
+            _finish_exchange(conversation_id, request.message, reply_text)
+            # Verknuepfung Auftrag <-> Gespraech setzt _starte_lokale_hermes
+            # bereits VOR dem Thread-Start; kein zweites setzen noetig.
+
+            return StreamingResponse(
+                _strom_auftrag_live(eintrag["id"], conversation_id, reply_text),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        # S7 (18.10.2026): Hier stand dieselbe Behauptung wie im Nicht-Stream-Weg
+        # („wird übernommen" / „Hermes nimmt sich der Aufgabe an"), obwohl
+        # weder PC-Hermes noch lokaler Hermes liefen. Der Text und die
+        # Statuszeile kommen jetzt aus EINER Quelle in `chat_routing` — zwei
+        # Kopien derselben Meldung waren schon einmal auseinandergelaufen.
+        from app.services.chat_routing import (
+            bereit_reply_text,
+            kein_helfer_text,
+            statusmeldung_bereit,
+        )
+
+        if _nur_lokal:
+            _pc_grund = ""
+        else:
+            _pc_grund = getattr(hermes_gateway, "letzter_fehler", "") or "PC nicht erreichbar"
+        _wartegrund = kein_helfer_text(_pc_grund, False)
+        eintrag = auftrag_service.anlegen(
+            herm_aufgabe,
+            hinweis=f"Automatische Erkennung: {begruendung}",
+            kategorie=kategorie,
+            komplexitaet=komplexitaet,
+        )
+        statusmeldung_bereit(eintrag["id"], _wartegrund)
+        reply_text = bereit_reply_text(request.message, _wartegrund)
+        conversation_id = _get_or_create_conversation(request.conversation_id)
+        _finish_exchange(conversation_id, request.message, reply_text)
+        # Auftrag an das Gespraech binden, damit Hermes-Live-Meldungen
+        # (Zwischenschritte, Ergebnis) den persistenten Verlauf füllen.
+        auftrag_service.setze_chat_verknuepfung(eintrag["id"], conversation_id)
+
+        def auftrag_ereignisse():
+            # In zwei Teile zerlegt: erst Text, dann fertig - die UI haengt
+            # ihr "fertig"-Handle an das done-Event.
+            yield _sse({"message": reply_text, "ziel": "buch"})
+            yield _sse({
+                "done": True,
+                "conversation_id": conversation_id,
+                "memories_used": 0,
+                "memories_created": 0,
+                "memory_count": memory_service.get_memory_count(),
+                "archiv_used": 0,
+                "sources": [],
+                "ziel": "buch",
+            })
+
+        return StreamingResponse(
+            auftrag_ereignisse(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    conversation_id = _get_or_create_conversation(request.conversation_id)
+    history = conversations[conversation_id]
+    memories = memory_service.retrieve_relevant_memories(request.message, top_k=5)
+    archiv = _archiv_treffer(request.message, request.archiv)
+
+    def ereignisse():
+        teile: List[str] = []
+        quellen: List[Dict[str, str]] = []
+        # Vor dem try initialisieren: Der finally-Zweig (auch bei GeneratorExit /
+        # Client-Abbruch mitten in der Verarbeitung) greift auf s_werkzeug_bilder
+        # zu, um den Bildpfad in den Verlauf zu schreiben. Ohne Vorab-Init wäre
+        # er dort eine ungebundene Variable.
+        s_werkzeug_bilder: List[dict] = []
+        # Tool Use (docs/spec-tool-use-v1.md): Mit Werkzeugen entfaellt die
+        # Vorab-Weiche unten - das Modell waehlt Archiv, Dateien, Fotos usw.
+        # selbst. Ohne Angabe gilt die Konfiguration (Standard aus).
+        s_werkzeuge_an = _werkzeuge_an(request)
+        try:
+            # Rolling-Summary + Datei-Tool auch hier (Stream = gleicher Kontext)
+            try:
+                s_conv_id = _get_or_create_conversation(request.conversation_id)
+                s_history = conversations.get(s_conv_id, [])
+                s_summary, _ = _hole_kontext_summary(s_conv_id, s_history, request.message)
+                s_hist_begrenzt = s_history[-15:]
+                # Archiv-Frage hat VORRANG: keine Dateisuche bei Archiv-Ziel
+                # (gleiche Kette wie in /chat, damit beide Wege identisch
+                # antworten).
+                s_werkzeug_text = "" if s_werkzeuge_an else _archiv_tool(request.message)
+                s_werkzeug_bilder = []
+                if not s_werkzeug_text and not s_werkzeuge_an:
+                    s_werkzeug_text, s_werkzeug_bilder = _datei_tool(request.message)
+                    if not s_werkzeug_text:
+                        s_werkzeug_text = _verlauf_tool(request.message)
+                    if not s_werkzeug_text:
+                        s_werkzeug_text = _gesicht_suche_tool(request.message)
+                    # Fotos-Uebersicht (N11): gleiche Kette wie in /chat, damit
+                    # beide Wege identisch antworten (das Frontend nutzt /stream).
+                    if not s_werkzeug_text:
+                        s_werkzeug_text = _fotos_uebersicht_tool(request.message)
+                    # Beziehungen (N28): gleiche Kette wie in /chat, damit
+                    # beide Wege identisch antworten (das Frontend nutzt /stream).
+                    if not s_werkzeug_text:
+                        s_werkzeug_text = _beziehungen_tool(request.message)
+                s_user = (request.message + (s_werkzeug_text or "") + _zitat_anhang(request)
+        + _gesichtsabgleich_notiz(request, s_werkzeug_bilder))
+                # Live-Status (Fortschritts-Feedback): Zeigt dem Nutzer, was
+                # gerade passiert, statt nur "Denke nach...".
+                if s_werkzeug_bilder:
+                    yield _sse({"status": "🔍 Suche in deinen Dateien/Bildern…"})
+                elif s_werkzeug_text and ("Archiv" in s_werkzeug_text
+                                          or "Gesprächsverlauf" in s_werkzeug_text):
+                    yield _sse({"status": "🔎 Sage ich dir aus dem Archiv/Verlauf…"})
+                elif s_werkzeug_text:
+                    yield _sse({"status": "🔍 Suche in deinen Dateien…"})
+                elif s_werkzeuge_an:
+                    yield _sse({"status": "🤔 Agent überlegt (mit Werkzeugen)…"})
+                else:
+                    yield _sse({"status": "🤔 Agent überlegt…"})
+            except Exception:
+                s_werkzeug_bilder = []
+                s_summary, s_hist_begrenzt, s_user = "", history, request.message
+            # Gesichter reaktiv 'merken' (wie in /chat). Das Frontend nutzt
+            # standardmäßig /api/chat/stream — fehlte diese Logik hier, würde
+            # 'das ist Lumi' / 'das bin ich' beim normalen Chat NIE gespeichert.
+            # Läuft nur bei aktiver Bild-Ansicht (Dateisuche ODER Upload) +
+            # Personennenn-Signal; das betrachtete Bild wird als Referenz-
+            # Miniatur an die Person gekoppelt.
+            s_bild_aktiv = bool(s_werkzeug_bilder) or bool(
+                request.files and any(f.type == "image" for f in request.files)
+            )
+            s_aktuelles_bild = ""
+            if s_werkzeug_bilder and s_werkzeug_bilder[0].get("data_url"):
+                s_aktuelles_bild = s_werkzeug_bilder[0]["data_url"]
+            elif request.files:
+                s_upload_img = next(
+                    (f for f in request.files if f.type == "image" and f.data_url),
+                    None,
+                )
+                if s_upload_img:
+                    s_aktuelles_bild = s_upload_img.data_url
+            s_merkhinweis = _gesichter_merke(
+                request.message, s_bild_aktiv, str(s_aktuelles_bild or ""),
+                embedding=_embedding_aus_data_url(str(s_aktuelles_bild or ""))
+                if s_bild_aktiv and s_aktuelles_bild else None,
+            )
+            if s_merkhinweis:
+                s_user += s_merkhinweis
+            # PFLICHT-Instruktion: deterministisches Gesichtsergebnis nicht per
+            # Datenschutz-Refusal verweigern.
+            if s_merkhinweis or s_werkzeug_bilder:
+                s_user += _refusal_stopper()
+            # Vision-Routing (wie /chat): Bild (UPLOAD oder Dateisuche;
+            # `s_bild_aktiv`) → vision-faehiges Modell (gemini), damit ein
+            # hochgeladenes Bild nicht an ein reines Text-Modell geht.
+            s_modell = request.model or ""
+            if s_bild_aktiv and not (s_modell and (
+                    "gemini" in s_modell or "gpt-4o" in s_modell
+                    or "gpt-5" in s_modell or "sonnet" in s_modell
+                    or "claude" in s_modell)):
+                s_modell = MODELL_VISION
+            # Websuche (Namensverbot, wie in /chat): manual vorab mit dem eigenen
+            # Satz; auto als geprüftes Werkzeug web_suche in der Schleife.
+            s_web_notiz, s_web_quellen, s_web_status = _websuche_vorab(request)
+            if s_web_status:
+                yield _sse({"status": s_web_status})
+            if s_web_quellen:
+                quellen.extend(s_web_quellen)
+                yield _sse({"sources": s_web_quellen})
+            s_user += s_web_notiz
+            try:
+                for ereignis in llm_service.chat_stream(
+                    user_message=s_user,
+                    conversation_history=s_hist_begrenzt,
+                    memories=memories,
+                    web_search=request.web_search,
+                    model=s_modell,
+                    no_retention=request.no_retention,
+                    archiv=archiv,
+                    summary=s_summary,
+                    files=(
+                        [f.model_dump() for f in request.files] if request.files else []
+                    ) + (s_werkzeug_bilder if s_werkzeug_bilder else []),
+                    werkzeuge=s_werkzeuge_an,
+                    nutzer_nachricht=request.message,
+                ):
+                    if ereignis.get("sources"):
+                        quellen.extend(ereignis["sources"])
+                        yield _sse({"sources": ereignis["sources"]})
+                        continue
+                    # Tool Use: Statuszeile je Werkzeug; ein angesehenes Bild
+                    # wird wie ein Dateisuche-Bild behandelt (Vorschau, Pfad im
+                    # Verlauf).
+                    if ereignis.get("status"):
+                        yield _sse({"status": ereignis["status"]})
+                        continue
+                    if ereignis.get("bild"):
+                        s_werkzeug_bilder.append({"type": "image", **ereignis["bild"]})
+                        continue
+                    if ereignis.get("werkzeug"):
+                        continue
+                    stueck = ereignis.get("delta")
+                    if stueck:
+                        teile.append(stueck)
+                        yield _sse({"delta": stueck})
+            except Exception as e:
+                logger.error("Streaming fehlgeschlagen: %s", e)
+                # Übersetzt Ablehnungen wegen der Datenschutz-Einstellungen in
+                # einen Satz, der sagt, was zu tun ist.
+                yield _sse({"error": llm_service.fehlertext(e)})
+        finally:
+            # Läuft auch bei Abbruch durch den Client (Bildschirmsperre,
+            # Verbindungsverlust). Hier wird bewusst nichts gesendet – ein
+            # yield waehrend GeneratorExit wuerde einen Fehler ausloesen.
+            anzahl_neu = _finish_exchange(
+                            conversation_id, request.message + _zitat_anhang(request), "".join(teile),
+                            bild_pfad=(
+                                s_werkzeug_bilder[0].get("pfad")
+                                if s_werkzeug_bilder else None
+                            ) or _upload_bild_pfad(request),
+                            user_bild_pfad=_upload_bild_pfad(request),
+                        )
+
+        # Wird uebersprungen, wenn der Client abgebrochen hat.
+        yield _sse({
+            "done": True,
+            "conversation_id": conversation_id,
+            "memories_used": len(memories),
+            "memories_created": anzahl_neu,
+            "memory_count": memory_service.get_memory_count(),
+            "archiv_used": len(archiv),
+            # Nochmals gesammelt – falls ein Zwischenereignis verloren ging.
+            "sources": quellen,
+            # Bild-Vorschau (flüchtig): data_url + Pfad für die Chat-Miniatur.
+            "bild_vorschau": (
+                s_werkzeug_bilder[0]["data_url"] if s_werkzeug_bilder else None
+            ),
+            "bild_pfad": (
+                s_werkzeug_bilder[0].get("pfad") if s_werkzeug_bilder else None
+            ),
+        })
+
+    return StreamingResponse(
+        ereignisse(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # verhindert Pufferung durch Zwischenschichten
+        },
+    )
+
+
+@router.delete("/chat/letzte-runde")
+async def letzte_runde_entfernen(conversation_id: str = ""):
+    """Entfernt die letzte Nutzer-Nachricht samt Antwort aus dem Verlauf.
+
+    **Seit 2026-08-31 gesperrt** (Verlauf ist STRENG append-only,
+    Betreiber-Regel): Liefert immer entfernt=false und entfernt nichts.
+    Der frühere Bearbeiten-Flow entfernte die letzte Runde; jetzt bleibt die
+    alte Runde stehen und neue Formulierung/Antwort werden ANGEHÄNGT.
+    Ohne conversation_id gilt die eine durchlaufende Conversation (conv_main).
+    """
+    cid = conversation_id or chat_verlauf._AKTIVE_CONVERSATION_ID
+    entfernt = chat_verlauf.verlauf_runde_entfernen(cid)
+    return {"entfernt": entfernt, "conversation_id": cid}
+
+
+@router.post("/chat/bild-cache/verwerfen")
+async def bild_cache_verwerfen(conversation_id: str = ""):
+    """Verwirft den flüchtigen Bild-Cache (RAM, 10 Min).
+
+    Ohne conversation_id wird der GESAMTE Cache geleert (Start der
+    Oberfläche/Verlassen des Chats), mit conversation_id nur der Eintrag
+    dieses einen Chats (Chat-Wechsel). Nichts davon berührt den Verlauf:
+    gespeichert bleiben nur die Bild-PFADE an ihren Nachrichten.
+    """
+    cid = (conversation_id or "").strip()
+    return {"verworfen": _bild_cache_verwerfen(cid or None)}
+
+
+@router.get("/conversations")
+async def list_conversations():
+    """List all active conversations."""
+    return {
+        "conversations": [
+            {
+                "id": cid,
+                "message_count": len(msgs),
+                "last_message": msgs[-1]["content"][:100] if msgs else "",
+            }
+            for cid, msgs in conversations.items()
+        ],
+        "total": len(conversations),
+    }
+
+
+@router.get("/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str):
+    """Liefert die Nachrichten eines Gespraechs.
+
+    Seit Stand 2026-09-30 gibt es genau ZWEI dauerhafte Chats (conv_main +
+    conv_code). Eine UNBEKANNTE Kennung (z. B. eine alte conv_8 im
+    localStorage) wird NICHT mehr still auf conv_main umgebogen: Das führte
+    dazu, dass die Oberfläche einen fremden Verlauf als den eigenen anzeigte
+    (der Betreiber-Befund 2026-09-25: „dann kam wieder was ganz anderes").
+    Stattdessen: klare 404-Antwort mit dem Hinweis, welcher Chat nicht
+    existiert — plus Liste der tatsächlich vorhandenen Chats, damit die
+    Oberfläche den richtigen anbieten kann. Der WRITE-Weg bleibt unverändert
+    (unbekannte ids landen weiterhin in conv_main, siehe
+    chat_verlauf._get_or_create_conversation) — es geht hier nur um die
+    ANZEIGE.
+    """
+    # Gültige Whitelist-Chats (conv_main/conv_code) liegen immer in conversations;
+    # für sie NIE auf conv_main mappen (conv_code ist ein eigener, ggf. leerer
+    # Programmier-Chat - nicht den Haupt-Chat zeigen).
+    if conversation_id not in conversations:
+        if conversation_id in chat_verlauf._ERLAUBTE_CHATS:
+            chat_verlauf._get_or_create_conversation(conversation_id)
+        else:
+            # Unbekannte/alte ID: KEIN stiller Fallback auf einen anderen
+            # Verlauf, sondern ein Fehler, den die Oberfläche anzeigen kann.
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "fehler": (
+                        f"Chat '{conversation_id}' existiert nicht "
+                        "(leer oder nicht gefunden)."
+                    ),
+                    "conversation_id": conversation_id,
+                    # Nur Kennung + Anzahl der ANDEREN Chats. Bewusst OHNE
+                    # Textvorschau: In der Fehlerantwort darf kein fremder
+                    # Inhalt stehen (die Liste im Gesprächs-Blatt zeigt die
+                    # Vorschauen, wenn der Betreiber sie sehen will).
+                    "bekannte_chats": [
+                        {
+                            "id": cid,
+                            "message_count": len(msgs),
+                        }
+                        for cid, msgs in conversations.items()
+                    ],
+                },
+            )
+    # Nach dem Chat-Anlegen fehlt die ID nur noch, wenn selbst conv_main fehlt.
+    if conversation_id not in conversations:
+        raise HTTPException(status_code=404, detail="Gespräch nicht gefunden")
+    return {
+        "id": conversation_id,
+        "messages": conversations[conversation_id],
+    }
+
+
+@router.get("/suche")
+async def chat_suche(q: str = Query("", max_length=300)):
+    """Volltextsuche im Gesprächsverlauf (Ein-Chat).
+
+    Durchsucht alle Nachrichten aller Conversations (in der Regel die eine
+    fortlaufende) nach dem Stichwort und liefert Treffer mit Kontext + Uhrzeit.
+    Damit kann man „was haben wir zu X gesagt?" beantworten — ohne Handy-Archiv.
+
+    Liefert max. 20 Treffer, sortiert nach dem neuesten zuerst.
+    """
+    query = q.lower().strip()
+    if not query or len(query) < 2:
+        return {"treffer": [], "anzahl": 0, "hinweis": "Suchbegriff (>=2 Zeichen) angeben"}
+
+    treffer = []
+    for cid, nachrichten in conversations.items():
+        for n in nachrichten:
+            inhalt = (n.get("content") or "")
+            if query in inhalt.lower():
+                treffer.append({
+                    "conversation": cid,
+                    "rolle": n.get("role", "?"),
+                    "text": inhalt[:300],
+                    "zeit": n.get("zeit") or "",
+                })
+    treffer.sort(key=lambda t: t.get("zeit") or "", reverse=True)
+    return {"treffer": treffer[:20], "anzahl": len(treffer), "hinweis": ""}

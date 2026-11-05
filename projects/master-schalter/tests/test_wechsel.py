@@ -1,0 +1,366 @@
+"""Tests für den Wechsel (Sperre → Paket → Zustand) und die CLI-Befehle `master` / `wechsel`."""
+import json
+from dataclasses import replace
+from datetime import datetime, timezone
+
+import pytest
+
+from master_schalter import automatik, besitz, cli, modi, paare, uebergabe, vorgaenge, wechsel, zustand
+
+JETZT = datetime(2026, 10, 14, 21, 50, 7, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def umgebung(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    monkeypatch.setenv("MASTER_SCHALTER_DATEN", str(tmp_path / "daten"))
+    monkeypatch.setenv("MASTER_SCHALTER_CODEX_SESSIONS", str(tmp_path / "codex"))
+    monkeypatch.setenv("MASTER_SCHALTER_REPO", str(repo))
+    monkeypatch.setattr(uebergabe, "_git", lambda r, args: "abc1234 feat: x\n" if args[0] == "log" else " M a.py\n")
+    return repo
+
+
+def _pakete(repo):
+    ordner = repo / ".hermes" / "uebergabe"
+    return sorted(ordner.glob("*.md")) if ordner.is_dir() else []
+
+
+def test_wechsel_schreibt_paket_und_zustand(umgebung):
+    erg = wechsel.wechseln("codex", "Hinweis X", jetzt=JETZT)
+    assert erg.art == "gewechselt" and erg.master == "codex"
+    assert erg.paket in _pakete(umgebung)
+    z = zustand.lesen()
+    assert z.master == "codex"
+    assert z.uebergabe == str(erg.paket)
+    assert z.seit == JETZT.isoformat()
+    assert "Hinweis X" in erg.paket.read_text(encoding="utf-8")
+
+
+def test_dateiname_nennt_von_und_nach(umgebung):
+    wechsel.wechseln("claude", jetzt=JETZT)
+    erg = wechsel.wechseln("codex", jetzt=JETZT)
+    assert erg.paket.name == "2026-10-14_215007_masterwechsel-claude-codex.md"
+
+
+def test_wechsel_nach_hermes_schreibt_paket_und_zustand(umgebung):
+    wechsel.wechseln("claude", jetzt=JETZT)
+    erg = wechsel.wechseln("hermes", jetzt=JETZT)
+    assert erg.art == "gewechselt" and erg.master == "hermes"
+    assert erg.paket.name == "2026-10-14_215007_masterwechsel-claude-hermes.md"
+    assert zustand.lesen().master == "hermes"
+
+
+def test_erster_wechsel_ohne_vorherigen_master(umgebung):
+    erg = wechsel.wechseln("claude", jetzt=JETZT)
+    assert erg.paket.name == "2026-10-14_215007_masterwechsel-unbekannt-claude.md"
+    assert zustand.lesen().master == "claude"
+
+
+def test_gleicher_master_kein_paket_kein_schreiben(umgebung):
+    wechsel.wechseln("codex", jetzt=JETZT)
+    anzahl = len(_pakete(umgebung))
+    zustand_vorher = zustand.lesen()
+    erg = wechsel.wechseln("codex", jetzt=JETZT)
+    assert erg.art == "gleich" and erg.paket is None
+    assert len(_pakete(umgebung)) == anzahl
+    assert zustand.lesen() == zustand_vorher
+
+
+def test_sperr_zeitueberschreitung_kein_paket_zustand_unveraendert(umgebung):
+    zustand.aendern(lambda z: replace(z, master="claude"))
+    with zustand.sperre(frist=1.0):
+        erg = wechsel.wechseln("codex", jetzt=JETZT, frist=0.2)
+    assert erg.art == "fehler"
+    assert "Sperre" in erg.meldung
+    assert _pakete(umgebung) == []
+    assert zustand.lesen().master == "claude"
+
+
+def test_paketfehler_laesst_zustand_unveraendert(umgebung, monkeypatch):
+    zustand.aendern(lambda z: replace(z, master="claude", uebergabe="alt.md"))
+
+    def kaputt(*a, **k):
+        raise uebergabe.UebergabeFehler("Platte voll")
+
+    monkeypatch.setattr(uebergabe, "paket_bauen", kaputt)
+    erg = wechsel.wechseln("codex", jetzt=JETZT)
+    assert erg.art == "fehler" and "Platte voll" in erg.meldung
+    z = zustand.lesen()
+    assert (z.master, z.uebergabe) == ("claude", "alt.md")
+
+
+def test_ohne_repo_wurzel_kein_wechsel(umgebung, monkeypatch):
+    zustand.aendern(lambda z: replace(z, master="claude"))
+    monkeypatch.delenv("MASTER_SCHALTER_REPO")
+    monkeypatch.setattr(uebergabe, "_hat_git", lambda ordner: False)
+    erg = wechsel.wechseln("codex", jetzt=JETZT)
+    assert erg.art == "fehler" and "Repo nicht gefunden" in erg.meldung
+    assert zustand.lesen().master == "claude"
+
+
+def test_unbekannter_master_wird_abgelehnt(umgebung):
+    with pytest.raises(ValueError):
+        wechsel.wechseln("gemini")
+
+
+# --- Themensperre und Entwertung (v0.3.0) -------------------------------------
+
+THREAD = "01a12557-3bb3-7171-a021-53e6ac879534"
+
+
+def _paar_setzen(thema="engineering", aktiv=True):
+    from master_schalter import paare
+    paare.setzen(thema, THREAD, paare.laufend_bilden(thema), aktiv=aktiv)
+
+
+def test_rueckwechsel_wartet_hoechstens_und_meldet_die_sperre(umgebung):
+    from master_schalter import paare
+    _paar_setzen()
+    zustand.aendern(lambda z: replace(z, master="codex"))
+
+    with zustand.thema_sperre("engineering") as frei:
+        assert frei is True
+        erg = wechsel.wechseln("claude", jetzt=JETZT, themen_frist=0.2)
+
+    assert erg.art == "fehler" and erg.meldung == wechsel.MELDUNG_SPERRE
+    assert zustand.lesen().master == "codex"
+    assert _pakete(umgebung) == []
+    assert paare.lesen()   # unverändert
+
+
+def test_rueckwechsel_ohne_paare_laesst_sich_nicht_aufhalten(umgebung):
+    zustand.aendern(lambda z: replace(z, master="codex"))
+    erg = wechsel.wechseln("claude", jetzt=JETZT, themen_frist=0.2)
+    assert erg.art == "gewechselt"
+
+
+def test_rueckwechsel_entwertet_offene_vorgaenge(umgebung):
+    from master_schalter import besitz, paare, vorgaenge
+    _paar_setzen()
+    zustand.aendern(lambda z: replace(z, master="codex"))
+    kennung = "engineering@4102444800"
+    laufend = paare.laufend_bilden("engineering")
+    besitz.schreiben(besitz.pfad(umgebung, laufend), f"codex {kennung} {JETZT.isoformat()}")
+    vorgaenge.aendern(lambda alt: [*alt, vorgaenge.Vorgang(kennung, "engineering", "lauf-1",
+                                                           "gesendet", JETZT.isoformat())])
+
+    erg = wechsel.wechseln("claude", jetzt=JETZT)
+
+    assert erg.art == "gewechselt"
+    assert vorgaenge.finden(kennung).phase == "entwertet"
+    text = besitz.lesen(besitz.pfad(umgebung, laufend))
+    assert text.startswith("claude ") and f"entwertet {kennung}" in text
+
+
+def test_rueckwechsel_auf_claude_schont_hermes_thema_und_offenen_vorgang(umgebung):
+    thema = "personal-ai-agent"
+    laufend = paare.laufend_bilden(thema)
+    paare.setzen(thema, "00000000-0000-4000-8000-000000000001", laufend, aktiv=True)
+    modi.setzen(thema, modi.HERMES_CODEX, repo=umgebung)
+    master = besitz.pfad(umgebung, laufend)
+    before = besitz.lesen(master)
+    vorgaenge.aendern(lambda alt: [*alt, vorgaenge.Vorgang(
+        "late-ack", thema, "run-1", "gesendet", "2026-10-16T00:00:00+00:00")])
+    zustand.aendern(lambda z: replace(z, master="codex"))
+
+    wechsel._entwerten(JETZT)
+
+    assert besitz.lesen(master) == before
+    assert vorgaenge.finden("late-ack").phase == "gesendet"
+
+
+def test_rueckwechsel_schont_eigene_modusmarke_und_offenen_vorgang(umgebung):
+    """F2 Punkt 2: die eigene Zwischenmarke wird im Sammelrückgabeweg nie zurückgesetzt."""
+    thema = "personal-ai-agent"
+    laufend = paare.laufend_bilden(thema)
+    paare.setzen(thema, "00000000-0000-4000-8000-000000000001", laufend, aktiv=True)
+    master = besitz.pfad(umgebung, laufend)
+    marke = modi.zwischenmarke(thema, "claude", JETZT.isoformat())
+    besitz.schreiben(master, marke)
+    vorgaenge.aendern(lambda alt: [*alt, vorgaenge.Vorgang(
+        "late-ack", thema, "run-1", "gesendet", "2026-10-16T00:00:00+00:00")])
+    zustand.aendern(lambda z: replace(z, master="codex"))
+
+    wechsel._entwerten(JETZT)
+
+    assert besitz.lesen(master) == marke                     # bytegleich, keine Rücksetzung
+    assert vorgaenge.finden("late-ack").phase == "gesendet"  # fail-closed: bleibt offen
+
+
+def test_rueckwechsel_entwertet_offenen_vorgang_ohne_paar_und_altes_ack_bleibt_wirkungslos(
+    umgebung, monkeypatch
+):
+    thema = "entferntes-thema"
+    kennung = "entferntes-thema@4102444800"
+    laufend = paare.laufend_bilden(thema)
+    master = besitz.pfad(umgebung, laufend)
+    besitz.schreiben(master, f"codex {kennung} {JETZT.isoformat()}")
+    vorgaenge.aendern(lambda alt: [*alt, vorgaenge.Vorgang(
+        kennung, thema, "lauf-1", "gesendet", JETZT.isoformat())])
+    zustand.aendern(lambda z: replace(z, master="codex"))
+
+    erg = wechsel.wechseln("claude", jetzt=JETZT)
+
+    assert erg.art == "gewechselt"
+    assert vorgaenge.finden(kennung).phase == "entwertet"
+    assert zustand.lesen().master == "claude"
+
+    paare.setzen(thema, THREAD, laufend, aktiv=True)
+    ack_aufrufe = []
+    monkeypatch.setattr(automatik.ack, "pruefen", lambda *a, **k: ack_aufrufe.append(a) or True)
+    assert automatik.bestaetigungen_pruefen(JETZT, repo=umgebung, paare_liste=paare.lesen()) == []
+    assert ack_aufrufe == []
+    assert zustand.lesen().master == "claude"
+
+
+def test_gespeicherter_hermesmodus_ohne_paar_bleibt_beim_rueckwechsel_geschuetzt(umgebung):
+    thema = "verwaistes-hermes-thema"
+    kennung = "verwaistes-hermes-thema@1"
+    modi._speichern(modi.datei(), thema, modi.HERMES_CODEX)
+    vorgaenge.aendern(lambda alt: [*alt, vorgaenge.Vorgang(
+        kennung, thema, "lauf-1", "gesendet", JETZT.isoformat())])
+    zustand.aendern(lambda z: replace(z, master="codex"))
+
+    assert modi.geschuetzt(thema, repo=umgebung)
+    erg = wechsel.wechseln("claude", jetzt=JETZT)
+
+    assert erg.art == "gewechselt"
+    assert vorgaenge.finden(kennung).phase == "gesendet"
+    assert zustand.lesen().master == "claude"
+
+
+def test_wechsel_zu_codex_entwertet_nichts(umgebung):
+    from master_schalter import paare, vorgaenge
+    _paar_setzen()
+    kennung = "engineering@4102444800"
+    vorgaenge.aendern(lambda alt: [*alt, vorgaenge.Vorgang(kennung, "engineering", "lauf-1",
+                                                           "gesendet", JETZT.isoformat())])
+    wechsel.wechseln("codex", jetzt=JETZT)
+    assert vorgaenge.finden(kennung).phase == "gesendet"
+    assert paare.lesen()
+
+
+def test_rueckwechsel_gibt_auch_einen_bestaetigten_besitz_zurueck(umgebung):
+    """Sonst bliebe das Thema für die Automatik dauerhaft „von Codex übernommen"."""
+    from master_schalter import besitz, paare, vorgaenge
+    _paar_setzen()
+    zustand.aendern(lambda z: replace(z, master="codex"))
+    kennung = "engineering@4102444800"
+    laufend = paare.laufend_bilden("engineering")
+    besitz.schreiben(besitz.pfad(umgebung, laufend), f"codex {kennung} {JETZT.isoformat()}")
+    vorgaenge.aendern(lambda alt: [*alt, vorgaenge.Vorgang(kennung, "engineering", "lauf-1",
+                                                           "bestaetigt", JETZT.isoformat())])
+
+    assert wechsel.wechseln("claude", jetzt=JETZT).art == "gewechselt"
+
+    assert vorgaenge.finden(kennung).phase == "bestaetigt"   # die Zustellung war echt
+    text = besitz.lesen(besitz.pfad(umgebung, laufend))
+    assert text.startswith("claude ") and "entwertet" not in text
+    assert zustand.lesen().master == "claude"
+
+
+def test_wechsel_haelt_die_themensperre(umgebung):
+    """Während des Wechsels ist die Themensperre belegt – eine zweite Automatik überspringt das Thema."""
+    _paar_setzen()
+    zwischenstand = {}
+    echt = wechsel.uebergabe.paket_bauen
+
+    def nachsehen(*a, **k):
+        with zustand.thema_sperre("engineering") as frei:
+            zwischenstand["frei"] = frei
+        return echt(*a, **k)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(wechsel.uebergabe, "paket_bauen", nachsehen)
+        wechsel.wechseln("codex", jetzt=JETZT)
+
+    assert zwischenstand["frei"] is False
+
+
+# --- CLI ---------------------------------------------------------------------
+
+def test_cli_master_ohne_zustand(umgebung, capsys):
+    assert cli.main(["master"]) == 0
+    aus = capsys.readouterr().out
+    assert "Master: nicht gesetzt" in aus
+    assert "Lage ?" in aus
+
+
+def test_cli_modus_anzeigen_und_setzen(umgebung, capsys):
+    thema = "personal-ai-agent"
+    paare.setzen(thema, "00000000-0000-4000-8000-000000000001",
+                 paare.laufend_bilden(thema), aktiv=True)
+
+    assert cli.main(["modus", thema, "hermes-codex"]) == 0
+    assert "Hermes führt – Codex nur Ausführer" in capsys.readouterr().out
+    assert cli.main(["modus", thema]) == 0
+    assert f"{thema}: hermes-codex" in capsys.readouterr().out
+
+
+def test_cli_modus_unbekannter_wert_gibt_einfache_fehlermeldung_mit_exit1(umgebung, capsys):
+    assert cli.main(["modus", "personal-ai-agent", "unbekannt"]) == 1
+    aus = capsys.readouterr()
+    assert "Arbeitsmodus nicht geändert" in aus.err
+    assert "Unbekannter Arbeitsmodus" in aus.err
+    assert "usage:" not in aus.out + aus.err
+
+
+def test_cli_wechsel_und_master(umgebung, capsys):
+    assert cli.main(["wechsel", "codex", "--hinweis", "Technik: bitte serve.py lesen"]) == 0
+    aus = capsys.readouterr().out
+    paket = _pakete(umgebung)[0]
+    assert str(paket) in aus
+    assert cli.main(["master"]) == 0
+    aus = capsys.readouterr().out
+    assert "Master: Codex (seit " in aus
+
+
+def test_cli_wechsel_auf_gleichen_master_rc0_hinweis(umgebung, capsys):
+    cli.main(["wechsel", "claude"])
+    capsys.readouterr()
+    assert cli.main(["wechsel", "claude"]) == 0
+    assert "schon" in capsys.readouterr().out
+    assert len(_pakete(umgebung)) == 1
+
+
+def test_cli_wechsel_fehler_rc_ungleich_null(umgebung, capsys, monkeypatch):
+    monkeypatch.delenv("MASTER_SCHALTER_REPO")
+    monkeypatch.setattr(uebergabe, "_hat_git", lambda ordner: False)
+    assert cli.main(["wechsel", "codex"]) == 1
+    assert "Repo nicht gefunden" in capsys.readouterr().err
+    assert zustand.lesen().master is None
+
+
+def test_cli_wechsel_unbekannter_master_rc2(umgebung, capsys):
+    assert cli.main(["wechsel", "gemini"]) == 2
+
+
+def test_cli_status_hat_kopfzeile_statt_masterzeile(umgebung, capsys):
+    cli.main(["wechsel", "claude"])
+    capsys.readouterr()
+    assert cli.main(["status"]) == 0
+    zeilen = capsys.readouterr().out.splitlines()
+    assert zeilen[0].startswith("Master-Status · ") and " · Lage " in zeilen[0]
+    assert not any(z.startswith("Master: ") for z in zeilen)   # die alte Zwei-Zeilen-Ausgabe entfällt
+
+
+def test_cli_master_zeigt_besetzung_bei_bekannter_lage(umgebung, capsys):
+    ende = 4102444800  # 2100
+    from master_schalter import signale
+    signale.claude_schreiben({"five_hour": {"used_percentage": 10, "resets_at": ende},
+                              "seven_day": {"used_percentage": 20, "resets_at": ende}})
+    sitz = umgebung.parent / "codex" / "2026" / "10" / "14"
+    sitz.mkdir(parents=True)
+    (sitz / "rollout-x.jsonl").write_text(json.dumps({
+        "timestamp": "2026-10-14T10:00:00.000Z",
+        "payload": {"type": "token_count", "rate_limits": {
+            "limit_id": "codex",
+            "primary": {"used_percent": 5.0, "resets_at": ende},
+            "secondary": {"used_percent": 6.0, "resets_at": ende}}}}) + "\n", encoding="utf-8")
+    cli.main(["wechsel", "claude"])
+    capsys.readouterr()
+    assert cli.main(["master"]) == 0
+    aus = capsys.readouterr().out
+    assert "Lage 1" in aus
+    assert "Thinker" in aus and "Reviewer" in aus and "Worker" in aus

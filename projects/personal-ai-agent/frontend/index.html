@@ -1,0 +1,824 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <!-- interactive-widget=resizes-content: Das Handy verkleinert beim
+         Tastatur-Oeffnen schon das Layout (statt die Seite hochzuschieben).
+         Wo das nicht unterstuetzt wird, richtet app.js die Huelle ueber
+         visualViewport aus; ohne beides greift 100dvh (style.css). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
+    <meta name="theme-color" content="#0f0f1a">
+    <meta name="description" content="Personal AI Agent – Dein persönlicher KI-Assistent">
+    <!-- API-Schlüssel: Das Backend setzt ihn beim Ausliefern hier ein (P0,
+         12.10.2026). Im Repo bleibt das Feld leer. Fremde Seiten können
+         dieses HTML nicht lesen (kein CORS, CORP same-origin, Host-Prüfung). -->
+    <meta name="agent-schluessel" content="">
+    <title>Personal AI Agent</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="stylesheet" href="style.css?v=20261101A">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header id="header">
+            <div class="header-content">
+                <h1 class="app-title"><span id="agent-face" role="button" tabindex="0" title="Server läuft · Modell bereit">🤖</span> Agent</h1>
+                <span id="chat-modus-badge" class="chat-modus" title="Wem du gerade schreibst"
+                      style="font-size:0;padding:0;border:none;background:transparent;color:#fff"> </span>
+                <span id="agent-tut-zeile" class="agent-tut" style="display:none;font-size:0.78rem;color:#9a9"></span>
+                <!-- Streaming-Geschwindigkeit (Zahnrad oben rechts, ehemaliger
+                     Chat-Auswahl-Ort; Wunsch des Betreibers 2026-09-01). Darf moeglichst
+                     langsam sein - Manche lesen nicht so schnell mit dem Stream mit. -->
+                <button id="stream-settings-btn" class="icon-btn" title="Streaming-Geschwindigkeit"
+                        aria-label="Streaminggeschwindigkeit">
+                    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                        <path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 00-.12-.61l-2.01-1.58zM12 15.6A3.61 3.61 0 018.4 12 3.61 3.61 0 0112 8.4a3.61 3.61 0 013.6 3.6 3.61 3.61 0 01-3.6 3.6z"/>
+                    </svg>
+                </button>
+                <button id="codechat-btn" class="icon-btn" title="Chat umschalten"
+                        aria-pressed="false" style="display:inline-flex;align-items:center;gap:2px">
+                    <span id="sym-sprech" style="font-size:1.0rem;display:none">💬</span>
+                    <span id="sym-code" style="font-family:monospace;font-size:0.9rem;font-weight:700;letter-spacing:-0.5px;display:none">&lt;/&gt;</span>
+                </button>
+                <!-- ZWEI Chats seit 2026-09: Haupt-Chat (conv_main) + separater
+                     Coding-/Hermes-Chat (conv_code), oben umschaltbar. -->
+                <!-- Checks: nur noch über das Roboter-Symbol (#agent-face); der eigene
+                     Knopf entfiel am 02.11.2026 (Wunsch des Betreibers: doppelt, Platz in der Leiste). -->
+                <!-- Update & Neustart (2026-10-16): zieht den aktuellen Stand und startet den Server neu. -->
+                <button id="system-update-btn" class="icon-btn" type="button"
+                        title="Stand holen und Server neu starten"
+                        aria-label="Stand holen und Server neu starten">
+                    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                        <path fill="currentColor" d="M17.65 6.35A7.95 7.95 0 0012 4V1L7 6l5 5V7a5 5 0 11-4.9 6H5.02A7 7 0 1017.65 6.35z"/>
+                    </svg>
+                </button>
+                <!-- Erzähl-Diashow (Auftrag E8a, 28.09.2026): Ereignis
+                     auswählen, sich durch die Diashow klicken und zu jedem
+                     Bild eine Geschichte tippen/sprechen. Eigene Datei
+                     erzaehlen.js — app.js bleibt unangetastet. -->
+                <button id="erzaehlen-btn" class="icon-btn" title="Erzählen – Diashow mit Geschichten"
+                        aria-label="Erzähl-Diashow öffnen">📖</button>
+                <!-- Personen benennen im Gruppenmodus (Plan Foto-Gedächtnis
+                     Schritt 2, 01.10.2026). Eigene Datei gruppen_quiz.js. -->
+                <button id="gruppen-btn" class="icon-btn" title="Personen benennen – Gesichter-Gruppen aus deinen Fotos"
+                        aria-label="Personen benennen öffnen">👥</button>
+            </div>
+        </header>
+        <p id="system-update-status" class="sheet-note" role="status" aria-live="polite" hidden></p>
+
+        <!-- Streaming-Geschwindigkeit-Menue (ueber dem Chat, Zahnrad oben rechts) -->
+        <div id="stream-menu" class="stream-menu" hidden>
+            <div class="stream-menu-label">Streaming-Geschwindigkeit</div>
+            <button class="stream-opt" data-ms="20">Schnell</button>
+            <button class="stream-opt" data-ms="120">Normal</button>
+            <button class="stream-opt" data-ms="400">Entspannt</button>
+            <button class="stream-opt" data-ms="1000">Sehr langsam</button>
+        </div>
+
+        <!-- Chat Messages -->
+        <main id="chat-container">
+            <!-- Sichtbare Chat-Kennzeichnung (Fix 2026-09-25): der Betreiber soll
+                 sich darauf verlassen koennen, WELCHER Chat offen ist - nach
+                 Neuladen, Chat-Wechsel und Aktualisieren identisch. Ohne diese
+                 Zeile war nicht erkennbar, welcher Verlauf gerade zu sehen ist. -->
+            <div id="chat-aktuell" title="Welcher Chat ist gerade offen"
+                 style="font-size:0.72rem;color:#9aa;padding:3px 10px 1px;word-break:break-word">💬 Chat wird geladen …</div>
+            <div id="messages">
+                <!-- Welcome message. Die ID wird gebraucht, damit sie beim
+                     Leeren der Anzeige stehen bleibt. -->
+                <div class="message assistant" id="welcome">
+                    <div class="message-content">
+                        <p>👋 Hallo! Ich bin dein persönlicher KI-Assistent.</p>
+                        <p>Stell mir eine Frage oder erzähl mir etwas – ich merke mir Dinge für dich!</p>
+                        <!-- Vorher stand hier ein erfundenes Fachgebiet, das nie
+                             zum Nutzer passte. Was der Agent wirklich kann, ist
+                             der Zugriff auf die alten Gespraeche. -->
+                        <p class="hint">💡 <em>Ich kenne deine früheren Gespräche – frag mich nach etwas von damals.</em></p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Loading indicator -->
+            <div id="loading" class="hidden">
+                <div class="typing-indicator">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </div>
+                <span class="loading-text">Denke nach...</span>
+            </div>
+        </main>
+
+        <!-- Input Area -->
+        <footer id="input-area">
+            <!-- Vorschau hochgeladener Dateien. Erst sichtbar, wenn welche
+                 ausgewählt wurden. Pro Datei: Miniatur + Name + Entfernen-Knopf. -->
+            <div id="file-preview" class="file-preview hidden">
+                <div id="file-preview-list" class="file-preview-list"></div>
+            </div>
+            <!-- WhatsApp-artige Antwort-Vorschau: gequotet, wenn der Nutzer über
+                 '↩ Antworten' auf eine Nachricht antwortet. Überm Eingabefeld. -->
+            <div id="antwort-vorschau" class="antwort-vorschau hidden"></div>
+            <div class="input-wrapper">
+                <textarea id="message-input" rows="1" placeholder="Nachricht eingeben..." maxlength="10000"></textarea>
+                <button id="upload-btn" class="icon-btn" title="Datei hochladen (Bild/PDF)">
+                    <svg viewBox="0 0 24 24" width="22" height="22">
+                        <path fill="currentColor" d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 015 0v10.5a1 1 0 01-2 0V6H10v9.5a2.5 2.5 0 005 0V5c0-2.76-2.24-5-5-5S5 2.24 5 5v12.5c0 3.59 2.91 6.5 6.5 6.5s6.5-2.91 6.5-6.5V6h-1.5z"/>
+                    </svg>
+                </button>
+                <input type="file" id="file-input" accept="image/*,.pdf" multiple hidden>
+                <button id="mic-btn" class="icon-btn" title="Spracheingabe">
+                    <svg viewBox="0 0 24 24" width="24" height="24">
+                        <path fill="currentColor" d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+                        <path fill="currentColor" d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+                    </svg>
+                </button>
+                <button id="send-btn" class="icon-btn send-btn" title="Nachricht senden" disabled>
+                    <svg viewBox="0 0 24 24" width="24" height="24">
+                        <path fill="currentColor" d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                    </svg>
+                </button>
+            </div>
+            <!-- Sichtbarer Zustand der Spracheingabe (Roadmap D3):
+                 „Mikrofon offen" / „hört zu" / „denkt nach" / „spricht".
+                 Ohne diese Zeile stand der Zustand nur im Tooltip des
+                 Mikrofon-Knopfs — auf dem Handy unsichtbar. Leer = versteckt. -->
+            <div id="mic-status" class="mic-status" role="status" aria-live="polite" hidden></div>
+            <!-- Werkzeugleiste direkt an der Eingabe: Bei geöffneter Tastatur
+                 ist die Kopfzeile auf dem Handy nicht mehr erreichbar. -->
+            <div class="input-tools">
+                <button id="web-btn" class="tool-toggle" aria-pressed="false"
+                        title="Websuche aus – jede Suche kostet rund 0,7 Cent">
+                    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                        <path fill="currentColor" d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zm6.93 6h-2.95a15.65 15.65 0 00-1.38-3.56A8.03 8.03 0 0118.92 8zM12 4.04c.83 1.2 1.48 2.53 1.91 3.96h-3.82c.43-1.43 1.08-2.76 1.91-3.96zM4.26 14C4.1 13.36 4 12.69 4 12s.1-1.36.26-2h3.38c-.08.66-.14 1.32-.14 2s.06 1.34.14 2H4.26zm.82 2h2.95c.32 1.25.78 2.45 1.38 3.56A7.987 7.987 0 015.08 16zm2.95-8H5.08a7.987 7.987 0 014.33-3.56A15.65 15.65 0 008.03 8zM12 19.96c-.83-1.2-1.48-2.53-1.91-3.96h3.82c-.43 1.43-1.08 2.76-1.91 3.96zM14.34 14H9.66c-.09-.66-.16-1.32-.16-2s.07-1.35.16-2h4.68c.09.65.16 1.32.16 2s-.07 1.34-.16 2zm.25 5.56c.6-1.11 1.06-2.31 1.38-3.56h2.95a8.03 8.03 0 01-4.33 3.56zM16.36 14c.08-.66.14-1.32.14-2s-.06-1.34-.14-2h3.38c.16.64.26 1.31.26 2s-.1 1.36-.26 2h-3.38z"/>
+                    </svg>
+                    <span>Web</span>
+                </button>
+                <button id="model-btn" class="tool-toggle" title="Modell wählen">
+                    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                        <path fill="currentColor" d="M12 2l2.4 5.4L20 8.6l-4 3.9.9 5.5-4.9-2.6-4.9 2.6.9-5.5-4-3.9 5.6-1.2z"/>
+                    </svg>
+                    <span id="model-label">Modell</span>
+                </button>
+                <button id="privacy-btn" class="tool-toggle" aria-pressed="false"
+                        title="Datenschutz-Riegel aus – OpenRouter darf zu Anbietern routen, die Prompts speichern">
+                    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                        <path fill="currentColor" d="M12 1L3 5v6c0 5.5 3.8 10.7 9 12 5.2-1.3 9-6.5 9-12V5l-9-4zm0 10.9h7c-.5 4.1-3.2 7.8-7 9V12H5V6.3l7-3.1v8.7z"/>
+                    </svg>
+                    <span id="privacy-label">Riegel</span>
+                </button>
+                <button id="loop-btn" class="tool-toggle" title="Hermes-Modus ein/aus (Chat ueber die lokale Hermes-Session)" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                        <path fill="currentColor" d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0020 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 004 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
+                    </svg>
+                    <span id="loop-label">Hermes</span>
+                </button>
+                <!-- Öffnet das Erinnerungs-Blatt. Hier stand vorher nur der
+                     Text „Gedächtnis aktiv"; app.js ersetzte ihn durch
+                     „N Erinnerungen" - eine ZAHL ohne Inhalt. Befund
+                     2026-09-25 (der Betreiber): „Ich habe einfach nur nix für
+                     Erinnerungen." Jetzt ist der Text ein Knopf, der zeigt,
+                     was tatsächlich im Gedächtnis steht. -->
+                <button id="gedaechtnis-btn" class="footer-note" type="button"
+                        title="Gespeicherte Erinnerungen ansehen"
+                        aria-label="Erinnerungen ansehen">Gedächtnis aktiv</button>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Modellauswahl. Liegt ausserhalb von #app, damit sie den Chat
+         überlagert statt ihn zu verschieben. -->
+    <!-- Frühere Gespräche. Ohne diese Liste lagen sie zwar dauerhaft auf
+         dem Gerät, waren aber nicht erreichbar: Die Oberfläche holte
+         höchstens das zuletzt geführte zurück. -->
+    <div id="chat-sheet" hidden>
+        <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="Frühere Gespräche">
+            <div class="sheet-head">
+                <h2>Frühere Gespräche</h2>
+                <button id="chats-close" class="sheet-close" title="Schließen" aria-label="Schließen">&times;</button>
+            </div>
+            <div id="chat-list" class="sheet-list"></div>
+            <p id="chat-hint" class="sheet-note"></p>
+        </div>
+    </div>
+
+    <!-- Erinnerungen: das, was der Agent über der Betreiber gelernt hat.
+         Bisher gab es dafür KEINE Anzeige (Befund 2026-09-25) - nur die Zahl
+         im Fuß. Das Backend hielt Liste und Einzel-Löschen längst bereit
+         (GET /api/memory, DELETE /api/memory/{id}), die Oberfläche rief
+         diese Wege nie auf. Aufbau bewusst wie das Modell-/Gesprächs-Blatt. -->
+    <div id="memory-sheet" hidden>
+        <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="Erinnerungen">
+            <div class="sheet-head">
+                <h2>Erinnerungen</h2>
+                <button id="memory-close" class="sheet-close" title="Schließen" aria-label="Schließen">&times;</button>
+            </div>
+            <div id="memory-list" class="sheet-list"></div>
+            <p id="memory-hint" class="sheet-note"></p>
+        </div>
+    </div>
+
+    <!-- Checks (bis 20.10.2026 "Selbsttest"; IDs unveraendert): der Zustand des
+         Systems als Klartext-Zeilen (✓/⚠/✗), damit er sich ohne Kabel ablesen
+         und als Bildschirmfoto teilen lässt. Geoeffnet ueber den Haken-Knopf
+         oder das Roboter-Symbol im Kopf. Seit 20.10.2026 (Wunsch des Betreibers)
+         stehen hier auch Server-Zustand, Hintergrund-Leiste, Datenstand und
+         Server-Protokoll (vorher dauerhaft am oberen Rand). Der Selbsttest-Text
+         selbst laedt beim Oeffnen und nur auf Knopfdruck, KEIN Auto-Polling;
+         die Takte von Server-Zustand/Hintergrund-Leiste laufen auch bei
+         geschlossenem Fenster weiter (sie speisen das Roboter-Symbol). -->
+    <div id="selbsttest-sheet" hidden>
+        <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="Checks">
+            <div class="sheet-head">
+                <h2>Checks</h2>
+                <button id="selbsttest-reload" class="sheet-refresh" type="button"
+                        title="Erneut prüfen" aria-label="Erneut prüfen">Aktualisieren</button>
+                <button id="selbsttest-close" class="sheet-close" title="Schließen" aria-label="Schließen">&times;</button>
+            </div>
+            <div class="sheet-list">
+                <!-- Server-Zustand (18.10.2026, Wunsch des Betreibers, To-do Punkt 12):
+                     kleine Anzeige. Seit 20.10.2026 (Wunsch des Betreibers) im Fenster
+                     "Checks" (Roboter-Symbol oben antippen); der Punkt-Zustand steckt
+                     zusaetzlich im Roboter-Symbol im Kopf. Quelle:
+                     GET /api/health, regelmaessig erneuert (app.js). Zeigt Server
+                     (laeuft / nicht erreichbar), Modell (bereit / nicht geladen),
+                     Zahl der Erinnerungen und den Stand. Ohne
+                     Haekchen-/Statussymbole: der farbige Punkt traegt den Zustand,
+                     der Text sagt ihn im Klartext. -->
+                <div id="server-zustand" class="server-zustand" data-zustand="unbekannt"
+                     role="status" aria-live="polite">
+                    <span id="server-punkt" class="server-punkt" aria-hidden="true"></span>
+                    <span id="server-zustand-text">Server wird geprüft …</span>
+                    <button id="server-protokoll-btn" type="button" aria-expanded="false"
+                            title="Server-Protokoll anzeigen">Protokoll</button>
+                    <button id="datenstand-btn" type="button" aria-expanded="false"
+                            title="Datenstand der Fotoquellen anzeigen">Datenstand</button>
+                </div>
+                <!-- Hintergrund-Leiste (10.10.2026, Wunsch des Betreibers: "muss jederzeit
+                     ersichtlich sein, welche Hintergrundprozesse laufen"): Statuszeile,
+                     seit 20.10.2026 (Wunsch des Betreibers: "alles unter Checks im Menue
+                     verstecken") im Fenster "Checks" statt am oberen Rand. Zeigt Name
+                     und Dauer der laufenden Hintergrundarbeit, antippbar fuer
+                     Einzelheiten (Zustand, Start,
+                     Fortschritt, letzte Zeile); ohne Arbeit "Keine Hintergrundarbeit".
+                     Quelle: GET /api/laeuft, regelmaessig selbst erneuert (app.js).
+                     Deutsch, bewusst ohne Symbole. -->
+                <div id="hintergrund-leiste" class="hintergrund-leiste" data-zustand="ruhe">
+                    <button id="hintergrund-kopf" type="button" aria-expanded="false"
+                            title="Einzelheiten anzeigen">
+                        <span id="hintergrund-text">Keine Hintergrundarbeit</span>
+                    </button>
+                    <div id="hintergrund-einzelheiten" hidden></div>
+                </div>
+                <!-- Datenstand der Fotoquellen (18.10.2026, gesamtplan T0): „Fotoquellen
+                     wirklich bis zum Handy nachweisen". Ergebnis für den Nutzer ist eine
+                     Statuszeile je Quelle: entpackt → Bildindex → Gesichtserkennung →
+                     Gruppenbestand → auf diesem Handy. Gemessen wird vom Server auf
+                     DIESEM Gerät (app/services/import_status.py), ein Stand gilt für
+                     eine Weile (rund 250 MB Dateien), „Neu messen" misst frisch.
+                     Nur Zahlen und Klartext, keine Symbole. Seit 20.10.2026 im Fenster
+                     "Checks" (Wunsch des Betreibers), zugeklappt. -->
+                <section id="datenstand" class="datenstand" hidden
+                         aria-label="Datenstand der Fotoquellen">
+                    <div class="datenstand-kopf">
+                        <span id="datenstand-stand">Datenstand wird geladen …</span>
+                        <span class="datenstand-knoepfe">
+                            <button id="datenstand-neu" type="button">Neu messen</button>
+                        </span>
+                    </div>
+                    <div id="datenstand-liste" tabindex="0"></div>
+                    <p id="datenstand-status" class="sheet-note" role="status"
+                       aria-live="polite" hidden></p>
+                </section>
+                <!-- Server-Bereich (18.10.2026, Wunsch des Betreibers, To-do Punkt 16):
+                     "Früher war es so, dass in Termux der Server gesteuert wurde und
+                     ich den Verlauf sehen konnte — die Prompts, eine Liste mit
+                     Verbindungen, so ein Log. Das ist nicht mehr möglich." Ursache:
+                     der Server läuft abgekoppelt im Hintergrund, seine Ausgaben landeten
+                     nirgends. Jetzt schreibt er in ein Protokoll (agent-server.log,
+                     Startweg: termux/server-protokoll.sh); hier stehen die letzten
+                     Zeilen, dazu die Angaben aus /api/health und die Knöpfe
+                     "Aktualisieren" und "Neu starten" — Termux wird nicht mehr gebraucht.
+                     Seit 20.10.2026 (Wunsch des Betreibers) im Fenster "Checks", zugeklappt,
+                     damit der Chat oben den Platz behält. -->
+                <section id="server-protokoll" class="server-protokoll" hidden
+                         aria-label="Server-Protokoll">
+                    <div class="server-protokoll-kopf">
+                        <span id="server-protokoll-stand">Protokoll wird geladen …</span>
+                        <span class="server-protokoll-knoepfe">
+                            <button id="server-protokoll-aktualisieren" type="button">Aktualisieren</button>
+                            <button id="server-protokoll-neustart" type="button">Neu starten</button>
+                        </span>
+                    </div>
+                    <pre id="server-protokoll-zeilen" tabindex="0"></pre>
+                    <p id="server-protokoll-status" class="sheet-note" role="status"
+                       aria-live="polite" hidden></p>
+                </section>
+                <!-- Tagesimport (26.10.2026, C3): der taegliche Lauf am Handy
+                     (tools/handy/tageslauf.py) - Schalter, Kamera-Ordner, letzter Bericht je
+                     Baustein und die Erinnerung an den Gemini-Export. Standard AUS.
+                     Quelle: GET /api/tageslauf, geschrieben ueber
+                     POST /api/tageslauf/einstellungen. Laedt beim Oeffnen und bei
+                     "Aktualisieren" des Fensters, KEIN Polling. Klartext ohne Symbole. -->
+                <section id="tageslauf-block" class="tageslauf-block" aria-label="Tagesimport">
+                    <div class="tageslauf-kopf">
+                        <span id="tageslauf-stand">Tagesimport wird geladen …</span>
+                    </div>
+                    <pre id="tageslauf-text" class="tageslauf-text" tabindex="0"></pre>
+                    <button id="tageslauf-schalter" type="button">Tagesimport einschalten</button>
+                    <div class="tageslauf-ordner-zeile">
+                        <label for="tageslauf-ordner">Kamera-Ordner in der pCloud</label>
+                        <input id="tageslauf-ordner" type="text" autocomplete="off" autocapitalize="off"
+                               spellcheck="false" placeholder="/Pfad/zum/Kamera-Ordner">
+                        <button id="tageslauf-ordner-speichern" type="button">Speichern</button>
+                    </div>
+                    <button id="tageslauf-gemini" type="button">Gemini-Export heute erledigt</button>
+                    <p id="tageslauf-status" class="sheet-note" role="status"
+                       aria-live="polite" hidden></p>
+                </section>
+                <pre id="selbsttest-text" class="selbsttest-text">Prüfe …</pre>
+            </div>
+            <p id="selbsttest-hint" class="sheet-note"></p>
+        </div>
+    </div>
+
+    <!-- Personen benennen (Plan Foto-Gedächtnis Schritt 2): die größte offene
+         Gesichter-Gruppe zuerst, bis zu 8 Ausschnitte, Name / später /
+         kenne ich nicht / rückgängig, bei Zwillingsverdacht gleich/andere. -->
+    <div id="gruppen-sheet" hidden>
+        <div class="sheet-panel gruppen-panel" role="dialog" aria-modal="true" aria-label="Personen benennen">
+            <div class="sheet-head">
+                <h2>👥 Personen benennen</h2>
+                <button id="gruppen-close" class="sheet-close" title="Schließen" aria-label="Schließen">&times;</button>
+            </div>
+            <div class="gruppen-body">
+                <!-- Reiter (02.10.2026, Wunsch des Betreibers): „Offen“ = weiter benennen,
+                     „Benannt“ = schon benannte Personen wieder aufrufen und bearbeiten. -->
+                <div class="gruppen-reiter" role="tablist" aria-label="Ansicht">
+                    <button id="gruppen-reiter-offen" class="gruppen-reiter-knopf aktiv" type="button"
+                            role="tab" aria-selected="true">🆕 Offen</button>
+                    <button id="gruppen-reiter-benannt" class="gruppen-reiter-knopf" type="button"
+                            role="tab" aria-selected="false">👤 Benannt</button>
+                </div>
+                <button id="gruppen-uebersicht" class="gruppen-knopf gruppen-uebersicht-knopf" type="button">☷ Gruppenübersicht</button>
+                <div class="gruppen-filter-groesse-zeile" style="margin: 6px 0; font-size: 13px;">
+                    <label class="gruppen-filter-groesse-label" style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer;">
+                        <input type="checkbox" id="gruppen-filter-groesse" checked>
+                        <span>Nur Gesichter ≥ 50 px (pixelige Mini-Gesichter ausblenden)</span>
+                    </label>
+                </div>
+                <p id="gruppen-fortschritt" class="gruppen-fortschritt"></p>
+                <!-- Außerhalb der Karte: bleibt auch sichtbar, wenn das Backend nach einer
+                     Statusaktion „fertig“ meldet (Karte dann ausgeblendet). -->
+                <button id="gruppen-detail-zurueck" class="gruppen-knopf" type="button" hidden>← Zur Übersicht</button>
+                <section id="gruppen-karte" class="gruppen-karte" hidden>
+                    <div class="gruppen-kopf">
+                        <h3>Wer ist das?</h3>
+                        <span id="gruppen-nummer" class="gruppen-nummer"></span>
+                        <span id="gruppen-offen" class="gruppen-offen"></span>
+                    </div>
+                    <p id="gruppen-meta" class="gruppen-meta"></p>
+                    <div id="gruppen-kacheln" class="gruppen-kacheln"></div>
+                    <!-- Alle Gesichter (02.10.2026, Wunsch des Betreibers): durchsehen und
+                         falsche ausschließen („das ist nicht Jonas, das bin ich“). -->
+                    <button id="gruppen-alle" class="gruppen-knopf" type="button">🔍 Alle Gesichter ansehen</button>
+                    <!-- Per „= dieselbe Person" verbundene Vorschläge (01.10.2026):
+                         der Name gilt beim Speichern für alle. -->
+                    <!-- Lebensabschnitt-Vorschlag fuer offene Gruppen (30.10.2026) -->
+                    <div id="gruppen-phasen-vorschlag" class="gruppen-phasen-vorschlag" hidden></div>
+                    <div id="gruppen-verbunden" class="gruppen-verbunden"></div>
+                    <div id="gruppen-zwillinge" class="gruppen-zwillinge"></div>
+                    <!-- Suchfeld (02.10.2026, Issue #3 B): tippen sucht am Wortanfang in
+                         schon benannten Personen und im Telefonbuch-Auszug; ein Tipp auf
+                         einen Treffer ordnet zu (Kontakt = mit Verknüpfung). Ein neuer
+                         Name geht wie bisher über „Speichern“. -->
+                    <div class="gruppen-eingabe">
+                        <input id="gruppen-name" type="search" maxlength="60" role="combobox"
+                               aria-controls="gruppen-treffer" aria-autocomplete="list"
+                               placeholder="Name suchen oder neu eingeben …" autocomplete="off"
+                               enterkeyhint="next">
+                        <button id="gruppen-speichern" class="gruppen-knopf haupt" type="button">✓ Speichern</button>
+                    </div>
+                    <div id="gruppen-treffer" class="gruppen-treffer" role="listbox" aria-label="Treffer"></div>
+                    <!-- Profil (01.10.2026, Wunsch des Betreibers): Beziehung + Erinnerung
+                         gleich beim Benennen. Reinsprechen über 🎙 (dieselbe Erkennung
+                         wie die Chat-Zeile, starteFeldDiktat aus app.js) oder über das
+                         Tastatur-Mikrofon. -->
+                    <div class="gruppen-profil">
+                        <input id="gruppen-beziehung" type="text" maxlength="80" autocomplete="off"
+                               placeholder="Wer ist das für dich? (z. B. Bruder, Schulfreund)">
+                        <div class="gruppen-notiz-zeile">
+                            <textarea id="gruppen-notiz" rows="3" maxlength="4000"
+                                      placeholder="Erinnerungen, Situationen … (🎙 zum Einsprechen)"></textarea>
+                            <button id="gruppen-notiz-mikro" class="gruppen-mikro" type="button"
+                                    title="Erinnerung einsprechen" aria-label="Erinnerung einsprechen">🎙</button>
+                        </div>
+                        <p id="gruppen-profil-info" class="gruppen-meta"></p>
+                    </div>
+                    <div class="gruppen-leiste">
+                        <button id="gruppen-spaeter" class="gruppen-knopf" type="button">⏭ Weiter (später)</button>
+                        <button id="gruppen-unbekannt" class="gruppen-knopf" type="button">🚫 Kenne ich nicht</button>
+                        <button id="gruppen-zurueck" class="gruppen-knopf" type="button">↩ Rückgängig</button>
+                    </div>
+                </section>
+                <section id="gruppen-liste-ansicht" class="gruppen-liste-ansicht" hidden>
+                    <div class="gruppen-kopf">
+                        <h3>Gruppenübersicht</h3>
+                        <button id="gruppen-liste-quiz" class="gruppen-knopf" type="button">← Zum Quiz</button>
+                    </div>
+                    <p id="gruppen-liste-meldung" class="gruppen-meta" role="status" aria-live="polite"></p>
+                    <p class="gruppen-meta">Die Liste kann sich bei Änderungen auf anderen Geräten verschieben. Aktualisiere sie bei Bedarf.</p>
+                    <div class="gruppen-liste-filter" role="group" aria-label="Gruppenstatus">
+                        <button id="gruppen-liste-status-offen" class="gruppen-reiter-knopf" type="button">Offen</button>
+                        <button id="gruppen-liste-status-spaeter" class="gruppen-reiter-knopf" type="button">Später</button>
+                        <button id="gruppen-liste-status-benannt" class="gruppen-reiter-knopf" type="button">Benannt</button>
+                        <!-- Aufgeloest (To-do Punkt 14, 18.10.2026): einer Person
+                             zugeordnete Gruppen, die nicht mehr als Gruppeneintrag
+                             in der Liste stehen. Die Gesichter bleiben zugeordnet. -->
+                        <button id="gruppen-liste-status-aufgeloest" class="gruppen-reiter-knopf" type="button">Aufgelöst</button>
+                        <button id="gruppen-liste-status-ausgeblendet" class="gruppen-reiter-knopf" type="button">Ausgeblendet</button>
+                    </div>
+                    <div class="gruppen-leiste">
+                        <button id="gruppen-liste-aktualisieren" class="gruppen-knopf" type="button">↻ Aktualisieren</button>
+                        <button id="gruppen-andocken-btn" class="gruppen-knopf" type="button">⚡ Offene Gruppen andocken</button>
+                        <button id="gruppen-neu-vorsortieren-btn" class="gruppen-knopf" type="button" title="Aktualisiert die Phasen-Zentroide und sortiert offene Gruppen neu">⚡ Neu vorsortieren</button>
+                    </div>
+                    <div id="gruppen-andocken-bereich" class="gruppen-andocken-bereich" hidden>
+                        <div class="gruppen-andocken-kopf">
+                            <h4>Offene Gruppen an Lebensabschnitte andocken</h4>
+                            <p id="gruppen-andocken-info" class="gruppen-meta"></p>
+                        </div>
+                        <div id="gruppen-andocken-liste" class="gruppen-andocken-liste"></div>
+                        <div class="gruppen-leiste">
+                            <button id="gruppen-andocken-ausfuehren" class="gruppen-knopf haupt" type="button">✓ Jetzt andocken</button>
+                            <button id="gruppen-andocken-schliessen" class="gruppen-knopf" type="button">Schließen</button>
+                        </div>
+                    </div>
+                    <div id="gruppen-liste" class="gruppen-benannt-liste gruppen-liste" role="group" aria-label="Gruppenliste"></div>
+                    <p id="gruppen-liste-seite" class="gruppen-meta"></p>
+                    <div class="gruppen-liste-seiten">
+                        <button id="gruppen-liste-vorher" class="gruppen-knopf" type="button">← Vorherige</button>
+                        <button id="gruppen-liste-weiter" class="gruppen-knopf" type="button">Weitere →</button>
+                    </div>
+                    <button id="gruppen-liste-undo" class="gruppen-knopf" type="button" hidden>↩ Reaktivieren rückgängig</button>
+                </section>
+                <section id="gruppen-alle-ansicht" class="gruppen-alle-ansicht" hidden>
+                    <div class="gruppen-kopf">
+                        <h3>Alle Gesichter</h3>
+                        <button id="gruppen-alle-zurueck" class="gruppen-knopf" type="button">← Zurück</button>
+                    </div>
+                    <p id="gruppen-alle-info" class="gruppen-meta"></p>
+                    <div class="gruppen-alle-werkzeuge">
+                        <button id="gruppen-alle-ordnung" class="gruppen-knopf" type="button">📅 Nach Jahren</button>
+                        <button id="gruppen-alle-auswahl-ende" class="gruppen-knopf" type="button" hidden>✕ Auswahl beenden</button>
+                    </div>
+                    <div id="gruppen-alle-raster" class="gruppen-kacheln gruppen-alle-raster"></div>
+                    <button id="gruppen-alle-mehr" class="gruppen-knopf" type="button" hidden>Weitere laden</button>
+                    <div class="gruppen-alle-leiste">
+                        <div id="gruppen-alle-namen" class="gruppen-alle-namen" hidden></div>
+                        <button id="gruppen-alle-ausschliessen" class="gruppen-knopf haupt" type="button" disabled>Gesichter antippen zum Ausschließen</button>
+                        <button id="gruppen-alle-zuordnen" class="gruppen-knopf" type="button" disabled>👤 Zuordnen</button>
+                    </div>
+                </section>
+                <section id="gruppen-fertig" class="gruppen-fertig" hidden>
+                    <p>🎉 Alle Gruppen sind erledigt.</p>
+                    <button id="gruppen-zurueck-fertig" class="gruppen-knopf" type="button">↩ Letzte Antwort zurücknehmen</button>
+                </section>
+                <!-- Benannt: Liste der Personen (eine Person = alle Vorschläge mit demselben Namen). -->
+                <section id="gruppen-benannt-ansicht" class="gruppen-benannt-ansicht" hidden>
+                    <div class="gruppen-eingabe gruppen-benannt-filter-zeile">
+                        <input id="gruppen-benannt-filter" type="search" maxlength="60" autocomplete="off"
+                               placeholder="Person suchen …" aria-label="Benannte Person suchen">
+                        <!-- Sortierung der Personenliste (20.10.2026): alphabetisch oder die
+                             meisten Fotos (= erkannte Gesichter) zuerst. Kein Filter. -->
+                        <select id="gruppen-benannt-sortierung" aria-label="Sortierung der Personenliste">
+                            <option value="">Alphabetisch</option>
+                            <option value="meiste">Meiste Fotos zuerst</option>
+                        </select>
+                        <!-- Filter „mit/ohne Erinnerung" (S8-Rest, 18.10.2026): eine Erinnerung ist
+                             eine aufgenommene Sprachnotiz im Profil der benannten Person. -->
+                        <select id="gruppen-benannt-erinnerung" aria-label="Nach vorhandener Erinnerung filtern">
+                            <option value="">Alle Erinnerungen</option>
+                            <option value="mit">Mit Erinnerung</option>
+                            <option value="ohne">Ohne Erinnerung</option>
+                        </select>
+                        <button id="gruppen-benannt-filter-zuruecksetzen" class="gruppen-knopf" type="button">Filter zurücksetzen</button>
+                    </div>
+                    <!-- Sprungleiste der Personenauswahl (S8, 18.10.2026): alphabetisch
+                         sortiert, je Buchstabe ein Knopf zum ersten Eintrag. -->
+                    <div id="gruppen-benannt-sprung" class="gruppen-sprung" role="group"
+                         aria-label="Zu einem Buchstaben springen" hidden></div>
+                    <p id="gruppen-benannt-info" class="gruppen-meta"></p>
+                    <div id="gruppen-benannt-liste" class="gruppen-benannt-liste" role="list"></div>
+                </section>
+                <!-- Person bearbeiten: Vorschläge (Gesichter ansehen/ausschließen, Vorschlag
+                     lösen), Name ändern (gleicher Name = zusammenführen), Profil, Kontakt. -->
+                <section id="gruppen-person" class="gruppen-person" hidden>
+                    <div class="gruppen-kopf">
+                        <h3 id="gruppen-person-titel"></h3>
+                        <button id="gruppen-person-zurueck" class="gruppen-knopf" type="button">← Alle Personen</button>
+                    </div>
+                    <p id="gruppen-person-meta" class="gruppen-meta"></p>
+                    <!-- Wischen zur naechsten/vorherigen Person (S8-Rest 3, 18.10.2026) -->
+                    <p id="gruppen-person-wisch" class="gruppen-meta">Wischen nach links/rechts wechselt zur nächsten bzw. vorherigen Person – am PC gehen auch die Pfeiltasten ← und →.</p>
+                    <!-- Lebensabschnitte & Erinnerungen (30.10.2026) -->
+                    <div id="gruppen-person-lebensabschnitte" class="gruppen-lebensabschnitte" hidden></div>
+                    <div id="gruppen-person-vorschlaege" class="gruppen-person-vorschlaege"></div>
+                    <h4 class="gruppen-abschnitt">Name</h4>
+                    <div class="gruppen-eingabe">
+                        <input id="gruppen-person-name" type="text" maxlength="60" autocomplete="off"
+                               aria-label="Name der Person">
+                        <button id="gruppen-person-umbenennen" class="gruppen-knopf haupt" type="button">✎ Ändern</button>
+                    </div>
+                    <p class="gruppen-meta">Gibt es den neuen Namen schon, werden beide Personen zusammengeführt.</p>
+                    <h4 class="gruppen-abschnitt">Profil</h4>
+                    <div class="gruppen-profil">
+                        <div class="gruppen-namensfelder">
+                            <input id="gruppen-person-vorname" type="text" maxlength="40" autocomplete="off"
+                                   placeholder="Vorname" aria-label="Vorname">
+                            <input id="gruppen-person-nachname" type="text" maxlength="40" autocomplete="off"
+                                   placeholder="Nachname" aria-label="Nachname">
+                            <input id="gruppen-person-spitznamen" type="text" maxlength="300" autocomplete="off"
+                                   placeholder="Spitznamen, mit Komma getrennt (z. B. Mausi, Anni)"
+                                   aria-label="Spitznamen">
+                        </div>
+                        <p id="gruppen-person-namensfelder-hinweis" class="gruppen-meta"></p>
+                        <input id="gruppen-person-beziehung" type="text" maxlength="80" autocomplete="off"
+                               placeholder="Wer ist das für dich? (z. B. Bruder, Schulfreund)">
+                        <div class="gruppen-notiz-zeile">
+                            <textarea id="gruppen-person-notiz" rows="3" maxlength="4000"
+                                      placeholder="Neue Erinnerung … (🎙 zum Einsprechen)"></textarea>
+                            <button id="gruppen-person-mikro" class="gruppen-mikro" type="button"
+                                    title="Erinnerung einsprechen" aria-label="Erinnerung einsprechen">🎙</button>
+                        </div>
+                        <button id="gruppen-person-weiter" class="gruppen-knopf" type="button" hidden>Nächste ohne Erinnerung →</button>
+                        <button id="gruppen-person-speichern" class="gruppen-knopf haupt" type="button">✓ Profil speichern</button>
+                    </div>
+                    <div id="gruppen-person-notizen" class="gruppen-person-notizen"></div>
+                    <h4 class="gruppen-abschnitt">Kontakt</h4>
+                    <p id="gruppen-person-kontakt" class="gruppen-meta"></p>
+                    <div class="gruppen-eingabe">
+                        <input id="gruppen-person-kontaktsuche" type="search" maxlength="60" autocomplete="off"
+                               placeholder="Kontakt suchen und verknüpfen …" aria-label="Kontakt suchen">
+                    </div>
+                    <div id="gruppen-person-kontakttreffer" class="gruppen-treffer" role="listbox" aria-label="Kontakte"></div>
+                    <div class="gruppen-leiste">
+                        <button id="gruppen-person-rueckgaengig" class="gruppen-knopf" type="button">↩ Rückgängig</button>
+                    </div>
+                </section>
+                <p id="gruppen-meldung" class="gruppen-meldung" role="status" aria-live="polite"></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Erzähl-Diashow (Auftrag E8a): links Ereignisliste, rechts Diashow +
+         Geschichten. Am Handy (< 768 px) zwei Stufen statt nebeneinander
+         (erzaehlen.js schaltet per CSS-Klasse .erzaehl-stufe-diashow um). -->
+    <div id="erzaehlen-sheet" hidden>
+        <div class="sheet-panel erzaehl-panel" role="dialog" aria-modal="true" aria-label="Erzählen">
+            <div class="sheet-head">
+                <h2>Erzählen</h2>
+                <button id="erzaehlen-close" class="sheet-close" title="Schließen" aria-label="Schließen">&times;</button>
+            </div>
+            <div id="erzaehl-body" class="erzaehl-body">
+                <section id="erzaehl-liste-spalte" class="erzaehl-spalte erzaehl-liste-spalte">
+                    <div class="erzaehl-filter">
+                        <input id="erzaehl-suche" type="search" placeholder="Ereignis suchen …" autocomplete="off">
+                        <input id="erzaehl-jahr" type="number" placeholder="Jahr" inputmode="numeric">
+                    </div>
+                    <div id="erzaehl-liste" class="erzaehl-liste" role="list"></div>
+                    <p id="erzaehl-liste-hinweis" class="sheet-note"></p>
+                </section>
+                <section id="erzaehl-diashow-spalte" class="erzaehl-spalte erzaehl-diashow-spalte" hidden>
+                    <!-- Zwischen Anlässen blättern (#18, 07.10.2026): ◀ ▶, Pfeiltasten, Wischen in
+                         der Übersicht; Android-Zurück geht eine Ebene hoch statt aus dem Erzählen. -->
+                    <div id="erzaehl-anlass-nav" class="erzaehl-anlass-nav">
+                        <button id="erzaehl-zurueck-zur-liste" class="erzaehl-back" type="button">← Ereignisse</button>
+                        <span class="erzaehl-anlass-blaettern">
+                            <button id="erzaehl-anlass-vor" class="erzaehl-nav erzaehl-anlass-knopf" type="button" title="Voriger Anlass (←)" aria-label="Voriger Anlass">◀</button>
+                            <span id="erzaehl-anlass-zaehler" class="erzaehl-zaehler" aria-live="polite"></span>
+                            <button id="erzaehl-anlass-weiter" class="erzaehl-nav erzaehl-anlass-knopf" type="button" title="Nächster Anlass (→)" aria-label="Nächster Anlass">▶</button>
+                        </span>
+                    </div>
+                    <!-- Eigener Titel (06.10.2026): ✏️ antippen und ändern; leer = automatischer Titel.
+                         Der Name wird später zum Ordnernamen beim Sortieren. -->
+                    <div class="erzaehl-titel-zeile">
+                        <h3 id="erzaehl-titel" class="erzaehl-titel"></h3>
+                        <button id="erzaehl-titel-aendern" class="erzaehl-vorlesen" type="button" title="Titel ändern" aria-label="Titel ändern">✏️</button>
+                        <!-- Vorlesen des ganzen Eintrags (07.10.2026): Tagebuch-Fassung aus
+                             Titel, Bildzahl, Personen und Notizen/Geschichten. -->
+                        <button id="erzaehl-alles-vorlesen" class="erzaehl-vorlesen" type="button" title="Alles vorlesen: Titel, Bilder, Personen, Notizen" aria-label="Alles vorlesen">🔊</button>
+                    </div>
+                    <div id="erzaehl-titel-bearbeiten" class="erzaehl-titel-bearbeiten" hidden>
+                        <input id="erzaehl-titel-eingabe" type="text" maxlength="120" autocomplete="off"
+                               placeholder="Eigener Titel, z. B. Festival 2022 mit Freunden">
+                        <button id="erzaehl-titel-speichern" class="icon-btn" type="button" title="Titel speichern" aria-label="Titel speichern">✔</button>
+                        <button id="erzaehl-titel-abbrechen" class="icon-btn" type="button" title="Abbrechen" aria-label="Abbrechen">✕</button>
+                        <button id="erzaehl-titel-zuruecksetzen" class="erzaehl-back erzaehl-back-immer" type="button" hidden>↺ Automatisch</button>
+                    </div>
+                    <!-- Übersicht (06.10.2026): erst alle Bilder der Gruppe auf einmal,
+                         Geschichte zur ganzen Gruppe; Antippen öffnet ein Bild einzeln. -->
+                    <div id="erzaehl-uebersicht" class="erzaehl-uebersicht">
+                        <div id="erzaehl-uebersicht-kopf" class="erzaehl-zaehler"></div>
+                        <div class="erzaehl-bild-steuerleiste erzaehl-anlass-steuerleiste" style="margin-bottom: 0.5rem;">
+                            <button id="erzaehl-anlass-geschichte-btn" class="erzaehl-steuer-btn" type="button" title="Persönliche Geschichte für diesen gesamten Anlass erstellen und vorlesen">✨ Anlass-Geschichte</button>
+                            <button id="erzaehl-anlass-perspektive-toggle" class="erzaehl-steuer-btn" type="button" title="Perspektive umschalten: Ich-Form oder Erzählersicht">👤 Ich-Form</button>
+                        </div>
+                        <!-- Wer ist auf den Bildern (06.10.2026): Gesichter-Zuordnung + bestätigte Namen. -->
+                        <div id="erzaehl-personen" class="erzaehl-personen" hidden>
+                            <span id="erzaehl-personen-text"></span>
+                            <button id="erzaehl-personen-vorlesen" class="erzaehl-vorlesen" type="button" title="Vorlesen" aria-label="Personen vorlesen">🔊</button>
+                        </div>
+                        <!-- Was und wo (07.10.2026): häufigste Orte der Gruppe aus der Karten-Zuordnung. -->
+                        <div id="erzaehl-orte" class="erzaehl-info" hidden>
+                            <div><span aria-hidden="true">📍</span> <span id="erzaehl-orte-text"></span></div>
+                        </div>
+                        <!-- Anlassgeschichte (G1, 02.11.2026): der erzeugte Text, getrennt von den Notizen. -->
+                        <div id="erzaehl-anlassgeschichte" class="erzaehl-info" hidden>
+                            <div class="erzaehl-geschichten-kopf">
+                                <span class="erzaehl-geschichten-kopf-text">Anlassgeschichte</span>
+                                <button id="erzaehl-anlassgeschichte-vorlesen" class="erzaehl-vorlesen" type="button" title="Anlassgeschichte vorlesen" aria-label="Anlassgeschichte vorlesen">🔊</button>
+                            </div>
+                            <div id="erzaehl-anlassgeschichte-text" class="erzaehl-lese-text" style="white-space:pre-wrap;"></div>
+                        </div>
+                        <div id="erzaehl-gruppen-geschichten-kopf" class="erzaehl-geschichten-kopf" hidden>
+                            <span class="erzaehl-geschichten-kopf-text">Notizen und Geschichten</span>
+                            <button id="erzaehl-gruppen-geschichten-vorlesen" class="erzaehl-vorlesen" type="button" title="Notizen vorlesen" aria-label="Notizen und Geschichten der Gruppe vorlesen">🔊</button>
+                        </div>
+                        <div id="erzaehl-gruppen-geschichten" class="erzaehl-geschichten"></div>
+                        <div id="erzaehl-raster" class="erzaehl-raster" role="list"></div>
+                    </div>
+                    <div id="erzaehl-einzel" class="erzaehl-einzel" hidden>
+                        <button id="erzaehl-zur-uebersicht" class="erzaehl-back erzaehl-back-immer" type="button">← Alle Bilder</button>
+                        <div class="erzaehl-bild-buehne">
+                            <button id="erzaehl-vor" class="erzaehl-nav" type="button" aria-label="Vorheriges Bild">◀</button>
+                            <div id="erzaehl-bild-rahmen" class="erzaehl-bild-rahmen">
+                                <img id="erzaehl-bild" alt="" hidden>
+                                <div id="erzaehl-privat-sperre" class="erzaehl-privat-sperre" hidden>
+                                    <div class="erzaehl-privat-box">
+                                        <span class="erzaehl-privat-text">🔒 Intimer Inhalt verdeckt · Antippen zum Aufdecken</span>
+                                        <button id="erzaehl-privat-aufdecken-btn" class="erzaehl-privat-aufdecken-btn" type="button">Aufdecken</button>
+                                    </div>
+                                </div>
+                                <span id="erzaehl-bild-platzhalter" class="erzaehl-bild-platzhalter">… lädt</span>
+                            </div>
+                            <button id="erzaehl-weiter" class="erzaehl-nav" type="button" aria-label="Nächstes Bild">▶</button>
+                        </div>
+                        <div class="erzaehl-bild-steuerleiste">
+                            <button id="erzaehl-bild-editor-btn" class="erzaehl-steuer-btn" type="button" title="Personen und Gesichter dieses Bildes bearbeiten">✏️ Personen bearbeiten</button>
+                            <button id="erzaehl-beschreibung-toggle-btn" class="erzaehl-steuer-btn" type="button" title="Bildbeschreibung anzeigen und bearbeiten">📝 Beschreibung</button>
+                            <button id="erzaehl-ki-geschichte-btn" class="erzaehl-steuer-btn" type="button" title="Persönliche Bildgeschichte von der KI erzählen lassen">✨ Bildgeschichte</button>
+                            <button id="erzaehl-perspektive-toggle" class="erzaehl-steuer-btn" type="button" title="Perspektive umschalten: Ich-Form oder Erzählersicht">👤 Ich-Form</button>
+                            <button id="erzaehl-privat-toggle" class="erzaehl-steuer-btn" type="button" title="Privat-Schutz für dieses Bild umschalten">🔒 Privat</button>
+                        </div>
+                        <div id="erzaehl-zaehler" class="erzaehl-zaehler">0 / 0</div>
+                        <!-- Was und wo (07.10.2026): Ort und Beschreibung dieses Bildes. -->
+                        <div id="erzaehl-bild-info" class="erzaehl-info" hidden>
+                            <div id="erzaehl-bild-ort" hidden><span aria-hidden="true">📍</span> <span id="erzaehl-bild-ort-text"></span></div>
+                            <div class="erzaehl-beschreibung-zeile" style="display:flex;align-items:flex-start;gap:8px;">
+                                <div id="erzaehl-bild-beschreibung" class="erzaehl-beschreibung" hidden style="flex:1;max-height:120px;overflow-y:auto;line-height:1.4;white-space:pre-wrap;"></div>
+                                <button id="erzaehl-bild-beschreibung-vorlesen" class="erzaehl-vorlesen" type="button" title="Bildbeschreibung vorlesen" aria-label="Bildbeschreibung vorlesen" hidden>🔊</button>
+                            </div>
+                            <div id="erzaehl-beschreibung-editor" class="erzaehl-beschreibung-editor" style="margin-top:6px" hidden>
+                                <textarea id="erzaehl-beschreibung-input" rows="2" maxlength="600" style="width:100%;box-sizing:border-box;border-radius:6px;padding:6px;background:var(--bg-feld, #1a2332);color:inherit;border:1px solid var(--linie, #304562);" placeholder="Bildbeschreibung eingeben oder anpassen..."></textarea>
+                                <div style="display:flex;gap:8px;margin-top:4px;">
+                                    <button id="erzaehl-beschreibung-speichern-btn" class="erzaehl-steuer-btn" type="button">💾 Speichern</button>
+                                    <button id="erzaehl-beschreibung-abbrechen-btn" class="erzaehl-steuer-btn" type="button">Abbrechen</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="erzaehl-bild-personen" class="erzaehl-personen" hidden>
+                            <span id="erzaehl-bild-personen-text"></span>
+                            <button id="erzaehl-bild-personen-vorlesen" class="erzaehl-vorlesen" type="button" title="Vorlesen" aria-label="Personen auf diesem Bild vorlesen">🔊</button>
+                        </div>
+                        <!-- Gesichter auf diesem Bild (#11b, 07.10.2026): antippen = benennen,
+                             „Fremde Person" oder „Ist nicht X" — über die Wege des 👥-Quiz. -->
+                        <div id="erzaehl-gesichter" class="erzaehl-gesichter" hidden></div>
+                        <div id="erzaehl-gesicht-bearbeiten" class="erzaehl-gesicht-bearbeiten" hidden>
+                            <canvas id="erzaehl-gesicht-gross" width="160" height="160" aria-hidden="true"></canvas>
+                            <div class="erzaehl-gesicht-felder">
+                                <div id="erzaehl-gesicht-frage" class="erzaehl-gesicht-frage"></div>
+                                <div id="erzaehl-gesicht-neu" class="erzaehl-gesicht-zeile">
+                                    <input id="erzaehl-gesicht-name" type="text" maxlength="60" autocomplete="off"
+                                           placeholder="Name, z. B. Papa">
+                                    <button id="erzaehl-gesicht-speichern" class="icon-btn" type="button" title="Name speichern" aria-label="Name speichern">✔</button>
+                                </div>
+                                <div id="erzaehl-gesicht-treffer" class="erzaehl-gesicht-treffer"></div>
+                                <div class="erzaehl-gesicht-zeile">
+                                    <button id="erzaehl-gesicht-fremd" class="erzaehl-back erzaehl-back-immer" type="button">Fremde Person</button>
+                                    <button id="erzaehl-gesicht-nicht" class="erzaehl-back erzaehl-back-immer" type="button" hidden>✕ Ist nicht …</button>
+                                    <button id="erzaehl-gesicht-abbrechen" class="erzaehl-back erzaehl-back-immer" type="button">Abbrechen</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="erzaehl-gesicht-meldung" class="erzaehl-gesicht-meldung" hidden>
+                            <span id="erzaehl-gesicht-meldung-text"></span>
+                            <button id="erzaehl-gesicht-rueckgaengig" class="erzaehl-back erzaehl-back-immer" type="button" hidden>↩ Rückgängig</button>
+                        </div>
+                        <!-- Bildgeschichte (G1, 02.11.2026): der erzeugte Text, getrennt von den Notizen;
+                             zeigt die neueste Bildgeschichte zu diesem Bild. -->
+                        <div id="erzaehl-bildgeschichte" class="erzaehl-info" hidden>
+                            <div class="erzaehl-geschichten-kopf">
+                                <span class="erzaehl-geschichten-kopf-text">Bildgeschichte</span>
+                                <button id="erzaehl-bildgeschichte-vorlesen" class="erzaehl-vorlesen" type="button" title="Bildgeschichte vorlesen" aria-label="Bildgeschichte vorlesen">🔊</button>
+                            </div>
+                            <div id="erzaehl-bildgeschichte-text" class="erzaehl-lese-text" style="white-space:pre-wrap;"></div>
+                        </div>
+                        <div id="erzaehl-geschichten-kopf" class="erzaehl-geschichten-kopf" hidden>
+                            <span class="erzaehl-geschichten-kopf-text">Notizen und Geschichten</span>
+                            <button id="erzaehl-geschichten-vorlesen" class="erzaehl-vorlesen" type="button" title="Notizen vorlesen" aria-label="Notizen und Geschichten zu diesem Bild vorlesen">🔊</button>
+                        </div>
+                        <div id="erzaehl-geschichten" class="erzaehl-geschichten"></div>
+                    </div>
+                    <div class="erzaehl-eingabe-fuss">
+                        <div class="erzaehl-eingabe-zeile">
+                            <textarea id="erzaehl-text" rows="2" placeholder="Erzähl etwas zur ganzen Gruppe …" maxlength="20000"></textarea>
+                            <button id="erzaehl-mic-btn" class="icon-btn" type="button" title="Erzählen per Mikrofon" aria-label="Mikrofon">🎤</button>
+                            <button id="erzaehl-speichern-btn" class="icon-btn" type="button" title="Geschichte speichern" aria-label="Speichern">💾</button>
+                        </div>
+                        <div id="erzaehl-mic-status" class="mic-status" role="status" aria-live="polite" hidden></div>
+                    </div>
+                </section>
+            </div>
+            <p id="erzaehl-hinweis" class="sheet-note"></p>
+        </div>
+    </div>
+
+    <div id="model-sheet" hidden>
+        <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="Modell wählen">
+            <div class="sheet-head">
+                <h2>Modell wählen</h2>
+                <button id="model-close" class="sheet-close" title="Schließen" aria-label="Schließen">&times;</button>
+            </div>
+            <div class="sheet-search">
+                <input id="model-search" type="search" placeholder="Alle Modelle durchsuchen …"
+                       autocomplete="off" aria-label="Modelle durchsuchen">
+            </div>
+            <div id="model-filters" class="sheet-filters" role="group" aria-label="Filter">
+                <button class="filter-chip" data-filter="speicherfrei"
+                        title="Nur Modelle, bei denen kein möglicher Anbieter Prompts speichert">Kein Speichern</button>
+                <button class="filter-chip" data-filter="bilder"
+                        title="Versteht Bilder und Dateien">Bilder/Dateien</button>
+                <button class="filter-chip" data-filter="staerke:bilder"
+                        title="Versteht Bild-Eingaben (liest/erkennt Bilder) – erzeugt keine Bilder">Stärke Bildverstehen</button>
+                <button class="filter-chip" data-filter="staerke:coding"
+                        title="Modelle, deren Stärke im Programmieren liegt">Stärke Coding</button>
+                <button class="filter-chip" data-filter="staerke:tool_use"
+                        title="Modelle, die besonders gut Werkzeuge/Agenten nutzen (Tool-Calls, Dateien, mehrere Schritte)">Stärke Tool-Use</button>
+                <button class="filter-chip" data-filter="staerke:reasoning"
+                        title="Modelle, deren Stärke im tiefen Denken/Analysieren liegt">Stärke Reasoning</button>
+                <button class="filter-chip" data-filter="staerke:alltag"
+                        title="Modelle mit ausgewogener Stärke für den Alltag – gut bei vielem, ohne einseitiges Extrem-Profil">Stärke Allrounder</button>
+            </div>
+            <div id="model-list" class="sheet-list"></div>
+            <p id="model-hint" class="sheet-note"></p>
+        </div>
+    </div>
+
+    <div id="hermes-live-status" style="display:none;margin:8px;padding:10px;border-radius:8px;font-size:13px;background:#1a2a1a;border:1px solid #0f0;color:#8f8">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+            <span style="font-size:16px">🤖</span>
+            <b style="color:#0f0">Hermes Live-Status</b>
+            <span id="hermes-live-indicator" style="margin-left:auto;font-size:11px;color:#666">─</span>
+        </div>
+        <div id="hermes-live-msg" style="white-space:pre-wrap;color:#cfc"></div>
+        <div id="hermes-live-meldungen" style="margin-top:4px"></div>
+    </div>
+
+    <!-- Kanban-Board entfernt (2026-09-02): kein sichtbares Auftragsbuch
+         mehr – der Betreiber nutzt den Assistenten direkt über Hermes. -->
+
+    <!-- Anmelden aus dem Heim-WLAN (HTTPS-Plan H2, 14.10.2026): erscheint nur,
+         wenn das Meta-Feld leer ist und der Server Schutz meldet (anmelden.js).
+         Benutzer „agent“ + Passwort = API-Schlüssel, Bitwarden füllt beides aus. -->
+    <section id="anmelden" class="anmelden" hidden aria-labelledby="anmelden-titel">
+        <div class="anmelden-karte">
+            <h2 id="anmelden-titel">Personal AI Agent</h2>
+            <p class="anmelden-untertitel">Anmelden aus dem Heimnetz</p>
+            <form id="anmelden-formular" method="post" action="/api/auth/anmelden" autocomplete="on">
+                <label for="anmelden-benutzer">Benutzer</label>
+                <input id="anmelden-benutzer" name="username" type="text" autocomplete="username" value="agent" readonly>
+                <label for="anmelden-passwort">Passwort</label>
+                <input id="anmelden-passwort" name="password" type="password" autocomplete="current-password" required>
+                <button id="anmelden-knopf" type="submit">Anmelden</button>
+                <p id="anmelden-meldung" class="anmelden-meldung" aria-live="polite"></p>
+            </form>
+            <p id="anmelden-nur-https" class="anmelden-hinweis" hidden>
+                Anmelden geht nur über die verschlüsselte Adresse (https://…:8443).
+                Die Anleitung steht in <code>docs/anleitung-heimnetz-https.md</code>.
+            </p>
+        </div>
+    </section>
+
+    <script src="anmelden.js?v=20261014B"></script>
+    <script src="bild_beschreibung.js?v=20261102A"></script>
+    <script src="app.js?v=20261102E"></script>
+    <script src="erzaehlen.js?v=20261102D"></script>
+    <script src="gruppen_quiz.js?v=20261101G"></script>
+    <!-- Weck-Overlay (wecken.js, 30.09.2026) ist seit 01.10.2026 NICHT mehr
+         eingebunden — Wunsch des Betreibers: der große Sprechknopf unten doppelte nur
+         das Mikrofon in der Eingabeleiste. Gebraucht wird das Hören VON AUSSEN
+         (Weckwort, A1c: eigener Dienst in der Hey-Agent-App). Die Datei bleibt
+         im Repo für diesen Schritt. -->
+</body>
+</html>
