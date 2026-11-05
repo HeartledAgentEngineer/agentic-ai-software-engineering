@@ -17,6 +17,8 @@ If private vulnerability reporting is available in a public version, use GitHub'
 
 The GitHub Actions `actions/checkout@v6`, `actions/setup-python@v6`, and `actions/setup-node@v5` run on Node.js 24.
 
+On pull requests, the secret scan reads the PR commit list with read-only permissions and leaves PR comments disabled.
+
 ## Known limits
 
 - Python dependencies are not pinned to exact versions, so there is no reproducible vulnerability audit yet.
