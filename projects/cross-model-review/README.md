@@ -36,7 +36,6 @@ python pruefkreis.py pruefen --vorlage <file> --thema <id> [--pruefer codex|herm
 
 ## Status
 
-Not built yet: a technical read-only lock for the Hermes reviewer. Until then, only the instruction text keeps it
-from writing files.
+For Codex reviews, `codex exec` runs inside its `--sandbox read-only` mode. For Hermes reviews, `pruefkreis.py` restricts the active toolset via `-t file,todo` alongside the read-only system instruction, and uses the provider configured in the local Hermes profile (`deepseek/deepseek-v4.1-flash` by default). A kernel-level read-only filesystem sandbox for Hermes is not built yet.
 
 ← [Back to overview](../../README.md)

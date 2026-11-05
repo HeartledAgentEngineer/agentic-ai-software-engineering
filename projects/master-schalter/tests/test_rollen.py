@@ -129,6 +129,8 @@ def _agents_md() -> Path | None:
         kandidat = ordner / "AGENTS.md"
         if kandidat.is_file():
             return kandidat
+        if (ordner / ".git").exists():
+            return None
     return None
 
 

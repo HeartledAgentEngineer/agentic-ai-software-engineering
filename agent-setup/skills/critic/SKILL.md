@@ -1,6 +1,6 @@
 ---
 name: critic
-description: Einzusetzen, wenn der Betreiber "critic" oder "/critic" sagt; ebenso in Phase 5 (Testing) und Phase 7 (Refactor), bevor ein Slice committet wird, sowie bei sicherheitsnahem oder nebenläufigem Code. Holt eine unabhängige Zweitmeinung von einem fremden KI-Modell. Einziger gültiger Aufruf ist `node .claude/skills/critic/pruefe.mjs` — niemals `gemini`, niemals `agy exec`. Nicht während Phase 4 einsetzen.
+description: Einzusetzen, wenn der Betreiber "critic" oder "/critic" sagt; ebenso in Phase 5 (Testing) und Phase 7 (Refactor), bevor ein Slice committet wird, sowie bei sicherheitsnahem oder nebenläufigem Code. Holt eine unabhängige Zweitmeinung von einem fremden KI-Modell. Einziger gültiger Aufruf ist `node agent-setup/skills/critic/pruefe.mjs` — niemals `gemini`, niemals `agy exec`. Nicht während Phase 4 einsetzen.
 ---
 
 # Critic — Fremdprüfung durch ein zweites Modell
@@ -16,9 +16,8 @@ Generator-Critic-Muster über zwei Modellfamilien. Ich baue (Generator), ein fre
 ## Der Aufruf
 
 ```bash
-node .claude/skills/critic/pruefe.mjs --diff          # uncommittete Änderungen, Standard-Modell via OpenRouter
-node .claude/skills/critic/pruefe.mjs datei.py        # einzelne Dateien
-node .claude/skills/critic/pruefe.mjs --diff --agy    # dasselbe über Antigravity
+node agent-setup/skills/critic/pruefe.mjs --diff          # uncommittete Änderungen + neue Textdateien, via OpenRouter
+node agent-setup/skills/critic/pruefe.mjs datei.py        # einzelne Dateien
 ```
 
 > [!CAUTION]
@@ -28,19 +27,10 @@ node .claude/skills/critic/pruefe.mjs --diff --agy    # dasselbe über Antigravi
 >
 > **Immer `pruefe.mjs` aufrufen, nie ein CLI-Werkzeug direkt.**
 
-> **Standard-Critic-Modell (seit 20.08.2026):** `google/gemini-3.7-flash` via OpenRouter.
-> Bewusst eine andere Familie als der Generator (DeepSeek/Claude) — anderes "blinder Fleck"-Profil — bei sehr günstigem Preis.
+> **Standard-Critic-Modell (seit 20.08.2026):** `google/gemini-3.7-flash` via OpenRouter (`OPENROUTER_API_KEY`).
+> Bewusst eine andere Familie als der Generator (DeepSeek/Claude) — anderes "blinder Fleck"-Profil — bei sehr günstigem Preis. Das Skript fordert das Format `DATEI:ZEILE | SCHWEREGRAD | PROBLEM | VORSCHLAG` im System-Prompt an und gibt die Modellantwort ungefiltert aus.
 
-### Die zwei Motoren
-
-| | Aufruf | Kontingent | Besonderheit |
-|---|---|---|---|
-| **Gemini-API** (Standard) | ohne Flag | 1.500/Tag | braucht `GEMINI_API_KEY`, kein Umfangslimit |
-| **Antigravity** | `--agy` | 20/Tag | kein Schlüssel nötig, max. 30.000 Zeichen |
-
-Standard ist die API — 75-mal mehr Kontingent. `--agy` als Zweitmeinung, wenn ein Befund strittig ist, oder wenn der API-Schlüssel fehlt.
-
-**Sonderfall Codex** (schärfer bei Nebenläufigkeit, eigenes Monatskontingent):
+**Sonderfall Codex** (schärfer bei Nebenläufigkeit, eigenes Kontingent):
 
 ```bash
 export PATH="$PATH:/c/Users/<user>/AppData/Roaming/npm"
@@ -126,5 +116,5 @@ Vorrang vor `superpowers:requesting-code-review` in diesem Workspace.
 
 ## Dateien
 
-- `pruefe.mjs` — der einzige Einstiegspunkt. Enthält Prompt, Formatvorgabe, beide Motoren und die Fehlerbehandlung.
+- `pruefe.mjs` — der einzige Einstiegspunkt. Enthält Prompt, Formatvorgabe und die Fehlerbehandlung.
 - `protokoll-schema.json` — JSON-Schema für Codex' `--output-schema`

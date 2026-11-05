@@ -38,28 +38,87 @@ harness and by git:
 
 | Layer | Example | Effect |
 |---|---|---|
-| Rule file | one tool-agnostic core file (`AGENTS.md`) read by every agent; domain rules generated from it | describes what the agent *should* do |
+| Rule file | one tool-agnostic core file (`AGENTS.md` in my active workspace, summarized here) read by every agent | describes what the agent *should* do |
 | Permission settings | `deny` for private archives, `ask` for force pushes and package publishing, `allow` for git basics and check commands | enforced by the harness in every permission mode |
-| Pre-commit hook | runs the tests of every project with changed code; blocks commit identities that GitHub would attribute to a foreign account | applies to every agent and to me, because it is git, not an agent feature |
+| Pre-commit hook | runs the tests of every project with changed code when enabled (`git config core.hooksPath agent-setup/githooks`); blocks commit identities that GitHub would attribute to a foreign account | applies to every agent and to me, because it is git, not an agent feature |
 
-One source for the rules, no copies: the domain files only reference the core file, so they cannot drift apart.
+One source for the rules, no copies: domain files in my workspace only reference the core file, so they cannot drift apart.
 → [Agent setup](agent-setup/)
 
-## 3. Planner, reviewer, workers
+## 3. Planner, reviewer, workers — across harnesses and model families
+
+I do not lock my workflow to a single vendor or IDE. Instead, a single tool-agnostic rule set (`AGENTS.md`) and my control-room app **[OrbitDesk (Master-Schalter)](projects/master-schalter/)** (*Leitwarte*) coordinate several agent harnesses and model providers:
+
+| Layer | Tools / Models in daily use | Purpose |
+|---|---|---|
+| **Control room (*Leitwarte*)** | **[OrbitDesk (Master-Schalter)](projects/master-schalter/)** | Tracks live subscription quotas, stores per-project role/model profiles (`masterwechsel profil <topic> --json`), enforces topic locks, and runs structured handovers between agent harnesses |
+| **Agent harnesses** | **Claude Code** · **OpenAI Codex** (CLI & Desktop) · **Google Antigravity** · **Hermes** (open-source agent) | Execute planning, code editing, sandboxed reviews, and isolated worker runs against the same git gates |
+| **Frontier & cloud models** | **Claude** (Opus / Sonnet) · **OpenAI GPT-6** (Sol / Luna / Astra) · **Google Gemini** · **OpenRouter** (e.g. DeepSeek V4.1 Flash) · **Microsoft Foundry** (Azure AI Agent Service) | Frontier models for architecture and cross-family review; fast, cost-controlled models for scoped worker tasks and privacy-routed workflows |
 
 | Role | Does | Typical model |
 |---|---|---|
-| **Planner** | plans, splits the work, accepts results against the plan | the strongest available model |
+| **Planner** | plans, splits the work, accepts results against the plan | the strongest available frontier model |
 | **Reviewer** | reviews the plan before building and the result after building | a model from a **different model family** than the planner |
-| **Worker** | implements small, explicitly assigned changes | a cheaper model |
+| **Worker** | implements small, explicitly assigned changes | a faster, cheaper worker model |
 
-- Which model takes which role depends on which subscription still has quota. A small tray app,
-  [Master-Schalter](projects/master-schalter/), measures the quotas and keeps the role of each project.
+- Which harness and model take which role depends on the topic profile and which subscription has free quota.
+  [OrbitDesk (Master-Schalter)](projects/master-schalter/) is the central *Leitwarte* (control desk) that keeps this state and is being expanded into a full multi-agent orchestration console.
 - Reviewer and worker run in **fresh contexts**. The run that built something never approves it.
 - **No answer is no approval.** A review that times out or returns no verdict line counts as an error, never as
   approved.
-- Private data — personal texts, photos, contacts — is handled by **one dedicated agent only**, through a model
-  gateway with zero-data-retention routing. The coding agents get cleaned-up technical tasks and evidence.
+- Private data — personal texts, photos, contacts — is handled by **one dedicated agent only** (Hermes), configured with
+  privacy-first routing (`data_collection="deny"` on OpenRouter, or explicitly scoped Microsoft Foundry deployments;
+  note that the privacy scan for this portfolio ran under an explicit project-scoped Foundry exception rather than a
+  verified zero-data-retention contract). The coding agents get cleaned-up technical tasks and evidence.
+
+```mermaid
+flowchart LR
+    subgraph Left["Harness Group A"]
+        CC["Claude Code<br/>(Claude Opus / Sonnet)"]
+        AGY["Google Antigravity<br/>(Gemini / Frontier)"]
+    end
+
+    subgraph Center["OrbitDesk · Leitwarte (Control Room)"]
+        QUOTA["Live Quota Monitor<br/>Left bar: Claude · Right bar: Codex<br/>0-79% green · 80%+ yellow · 97%+ red"]
+        PROF["Topic Profile & Lock<br/>masterwechsel profil &lt;topic&gt; --json<br/>Planner · Reviewer · Worker model"]
+        HAND["Handover Engine<br/>.hermes/uebergabe/laufend/&lt;topic&gt;.md<br/>Resume point + ACK check"]
+        QUOTA --> PROF --> HAND
+    end
+
+    subgraph Right["Harness Group B"]
+        CDX["OpenAI Codex<br/>(GPT-6 Sol / Luna / Astra)"]
+    end
+
+    subgraph Private["Privacy & Fallback Lane"]
+        HRM["Hermes Agent<br/>OpenRouter (DeepSeek V4.1 Flash)<br/>Microsoft Foundry (Azure AI)"]
+    end
+
+    CC <-->|"Left ↔ Right Handover<br/>(on quota limit or profile switch)"| HAND
+    AGY <-->|"Shared AGENTS.md + Git state"| HAND
+    HAND <-->|"Technical handover + ACK"| CDX
+    HAND <-->|"Quota fallback & private data"| HRM
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant O as OrbitDesk (Leitwarte)
+    participant P as Planner (e.g. Claude Opus / Antigravity / GPT-6 Sol)
+    participant R as Reviewer (Other Model Family via pruefkreis.py)
+    participant W as Worker (e.g. GPT-6 Luna / Sonnet / DeepSeek)
+    participant G as Verification Gate (pytest / node / clang + CI)
+
+    O->>P: Read topic profile & quota status
+    P->>P: Write plan (.hermes/plans/<topic>.md)
+    P->>R: Plan review in fresh read-only context
+    R-->>P: Protocol + URTEIL: FREI (or EINWAND -> revise)
+    P->>W: Scoped technical task in isolated worktree
+    W->>G: Run project check command (must exit 0)
+    G-->>W: Exit code 0 + git diff
+    P->>R: Result review against plan & diff (other model family)
+    R-->>P: Protocol shown to operator + URTEIL: FREI
+    P->>G: Commit (code + docs) -> Pre-commit hook -> GitHub Actions CI
+```
 
 ## 4. Cross-model review
 

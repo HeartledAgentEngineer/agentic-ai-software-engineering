@@ -35,11 +35,12 @@ Phone (Termux)
   complex reasoning). Standard library only, testable in isolation.
 - **Memory that corrects instead of deletes** (`memory_service.py`): a correction makes the new text active and
   moves the old one into `history`; nothing is deleted. Old entries fade gently instead of disappearing.
-- **Security found by measuring** (`sicherheit.py`): a test showed that any web page opened in the browser could
+- **Security found by measuring** (`sicherheit.py`, `router/auth.py`): a test showed that any web page opened in the browser could
   read the API key from `127.0.0.1:8080` (CORS `*` with credentials, no host check). The middleware now checks
-  host and origin on every response, which also blocks DNS rebinding.
-- **No private names in web searches** (`websuche_schutz.py`): general topics, places and public people may be
-  searched; names of people from my own life are blocked before the query leaves the device.
+  host and origin on every response, which also blocks DNS rebinding; requests authenticate via `X-API-Key` header or
+  `HttpOnly` session cookie (with a query-parameter fallback for browser media/SSE links).
+- **No known private names in web searches** (`websuche_schutz.py`): general topics, places and public people may be
+  searched; full names and multi-word catalog entries from the local contact/person store are blocked before the query leaves the device.
 
 ## Run the tests
 

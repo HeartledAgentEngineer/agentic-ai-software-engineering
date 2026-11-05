@@ -160,6 +160,10 @@ _threading.Thread(target=_idle_watchdog, daemon=True).start()
 def _touch():
     global _last_request
     _last_request = _time.time()
+    if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+        origin = request.headers.get("Origin")
+        if origin and origin not in ("http://localhost:5000", "http://127.0.0.1:5000"):
+            return jsonify({"error": "Cross-origin state change rejected"}), 403
 
 
 @app.route("/")
@@ -3534,4 +3538,5 @@ if __name__ == "__main__":
     # Browser nach kurzem Delay öffnen (Server braucht einen Moment)
     threading.Timer(1.2, lambda: webbrowser.open("http://localhost:5000")).start()
 
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    host = os.getenv("CONCERTIFY_HOST", "127.0.0.1")
+    app.run(host=host, port=5000, debug=False)

@@ -7,7 +7,7 @@
 # Menschen — weil es ein Git-Hook ist, kein Agenten-Feature.
 #
 # Aktivierung (einmalig, pro Klon):
-#     git config core.hooksPath .githooks
+#     git config core.hooksPath agent-setup/githooks
 #
 # Notfall-Bypass (bewusst, dokumentiert im Commit):
 #     git commit --no-verify
@@ -69,8 +69,8 @@ run_gate() {  # $1 = Anzeigename, $2 = Verzeichnis, $3 = Befehl
     fi
 }
 
-P_AGENT="02_Softwareentwicklung_IT/personal_ai_agent"
-P_CONCERTIFY="02_Softwareentwicklung_IT/concertify"
+P_AGENT="projects/personal-ai-agent"
+P_CONCERTIFY="projects/concertify"
 
 if hat_code "$P_AGENT"; then
     PY="$P_AGENT/backend/.venv/Scripts/python.exe"
@@ -78,14 +78,14 @@ if hat_code "$P_AGENT"; then
         # Tor mit Sperre: mehrere Agenten teilen sich einen Arbeitsbaum, zwei
         # gleichzeitige Testlaeufe machen das Tor faelschlich rot.
         if [[ -f "$P_AGENT/tools/gate/tor.py" ]]; then
-            run_gate "personal_ai_agent" "$P_AGENT/backend" \
+            run_gate "personal-ai-agent" "$P_AGENT/backend" \
                 "./.venv/Scripts/python.exe ../tools/gate/tor.py --wartezeit 600"
         else
-            run_gate "personal_ai_agent" "$P_AGENT/backend" \
+            run_gate "personal-ai-agent" "$P_AGENT/backend" \
                 "./.venv/Scripts/python.exe -m pytest tests/ -q"
         fi
     else
-        echo "  ⚠ personal_ai_agent: venv fehlt ($PY) — kein Gate möglich"
+        echo "  ⚠ personal-ai-agent: venv fehlt ($PY) — kein Gate möglich"
     fi
 fi
 
@@ -99,7 +99,7 @@ if hat_code "$P_CONCERTIFY"; then
     fi
 fi
 
-P_SCHALTER="02_Softwareentwicklung_IT/master-schalter"
+P_SCHALTER="projects/master-schalter"
 if hat_code "$P_SCHALTER"; then
     PY="$P_SCHALTER/.venv/Scripts/python.exe"
     if [[ -x "$PY" ]]; then

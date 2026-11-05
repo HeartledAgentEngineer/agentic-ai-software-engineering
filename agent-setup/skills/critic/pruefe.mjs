@@ -8,11 +8,10 @@
 // Der API-Key kommt aus OPENROUTER_API_KEY. Er wird per Header uebertragen,
 // nie ueber die URL, und nie ausgegeben.
 
-import { execSync, spawnSync } from "node:child_process";
+import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const OPENROUTER_STANDARD_MODELL = "google/gemini-3.7-flash"; // Criticism-Modell (gewählt 20.08.2026): andere Familie als Generator (DeepSeek/Claude), stark beim Reasoning/Coding, sehr günstig
-const AGY_PFAD = "C:\\Users\\<user>\\AppData\\Local\\agy\\bin\\agy.exe";
 
 const ANWEISUNG = `Du bist ein strenger Senior Code Reviewer. Pruefe den folgenden Code.
 

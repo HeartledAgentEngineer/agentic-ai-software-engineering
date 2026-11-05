@@ -7,17 +7,19 @@ live setlists (setlist.fm).
 **Stack:** Python · Flask (blueprints) · Server-Sent Events · SQLite · Spotify, Ticketmaster, setlist.fm, Tavily
 and Gemini APIs · pytest
 
-## Architecture
+## Architecture & Evolution
 
-Layered, and every layer has its own test folder:
+Concertify started in April 2026 as a fast-moving prototype with root-level scripts (`app.py`, `main.py`, and API client modules `spotify_client.py`, `setlist_client.py`, `ticketmaster_client.py`, `festival_scraper.py`, `web_concert_finder.py`). When that initial layout grew harder to test, I introduced a **5-layer architecture** alongside the existing entry point using the [Dual Engineering System](docs/dual_engineering_system.md) (an *Architect* role for clean boundaries and a *Guardian* role for risk and regression checks):
 
-| Layer | Folder | Responsibility |
+| Layer | Folder / Files | Responsibility |
 |---|---|---|
 | Domain | `domain/` | plain data models (artist, concert, setlist, song), no framework |
-| Repositories | `repositories/` | persistence behind interfaces: a JSON file for concert data, SQLite for setlist snapshots |
-| Services | `services/` | logic: playlist import/save, setlists, song state, support-act order |
-| Routes | `routes/` | Flask blueprints (HTTP only) |
-| External | `external/` | guards for third-party APIs, e.g. the setlist.fm daily quota |
+| Repositories | `repositories/`, `db/` | persistence behind interfaces: a JSON file for concert data, SQLite for setlist snapshots |
+| Services | `services/` | logic: playlist import/save, setlists, song state, support-act order, concert search |
+| Routes | `routes/` | Flask blueprints (HTTP only) registered into `app.py` |
+| External & Clients | `external/`, `*_client.py` | third-party API clients and quota guards (e.g. `external/setlistfm_quota.py`) |
+
+Every extracted layer has its own mirrored unit and integration test suite under `tests/`.
 
 ## Decisions
 
@@ -31,7 +33,7 @@ Layered, and every layer has its own test folder:
   reserve; on `429` the client honours the retry header; fetched setlists are cached.
 - **Distance filter against false positives.** Tour pages list dates worldwide. A date is only accepted if it
   appears within 400 characters of a keyword for the searched city (`_extract_date_near_city`).
-- **Schema ready for more users.** The snapshot table carries a `user_id` (default `local`) from the start.
+- **Local-only single-user scope.** The server binds to `127.0.0.1:5000` by default (`CONCERTIFY_HOST`) and rejects cross-origin `POST`/`DELETE` requests; the SQLite snapshot table carries a `user_id` (default `local`) from the start.
 
 ## Run it
 
@@ -39,8 +41,8 @@ Layered, and every layer has its own test folder:
 pip install -r requirements.txt
 # create .env with SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_REDIRECT_URI,
 # TICKETMASTER_API_KEY, TAVILY_API_KEY, GEMINI_API_KEY, CONCERT_CITIES, ACTIVE_FESTIVALS
-python app.py      # http://localhost:5000
-pytest tests/      # 188 passed, 2 skipped; also run in CI
+python app.py      # http://127.0.0.1:5000
+pytest tests/      # 193 passed, 2 skipped; also run in CI
 ```
 
 ← [Back to overview](../../README.md)

@@ -5,3 +5,5 @@ google-generativeai
 requests
 python-dotenv
 python-multipart
+markdown
+pywebview; sys_platform == "win32"

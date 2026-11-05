@@ -10,8 +10,7 @@ They are written for Claude Code and kept tool-agnostic where possible. The text
 | [`skills/critic`](skills/critic/SKILL.md) | independent second opinion from a model of another family; `pruefe.mjs` runs it, `review.py` and `protokoll-schema.json` keep the verdict machine-readable | before a slice is committed, for security-related or concurrent code |
 | [`agents/tester`](agents/tester.md) | runs the project's check command and reports only the result | testing and after refactoring, so test logs stay out of the main context |
 | [`agents/rechercheur`](agents/rechercheur.md) | searches the workspace and returns only the finding | before a search would pull many files into the main context |
-| [`githooks/pre-commit`](githooks/pre-commit) | no commit without a green check command for the touched project; blocks author addresses that GitHub would assign to a foreign account | every commit, for every agent and for me |
-| [`sync-rules.ps1`](sync-rules.ps1) | builds each project's agent instructions from one global rule file plus a small per-project extension | after a rule change |
+| [`githooks/pre-commit`](githooks/pre-commit) | no commit without a green check command for the touched project (`git config core.hooksPath agent-setup/githooks`); blocks author addresses that GitHub would assign to a foreign account | every commit once the hook path is configured |
 
 ## Why these exist
 
@@ -19,9 +18,6 @@ They are written for Claude Code and kept tool-agnostic where possible. The text
   description, a fixed procedure and, where possible, a script with an exit code.
 - **Sub-agents for throw-away context.** Test output and search results are large and needed once. A sub-agent
   reads them and returns three lines.
-- **A git hook is not an agent feature.** It runs for Claude Code, other agents and humans alike, so the gate does
-  not depend on any agent remembering it.
-- **One rule source.** `sync-rules.ps1` treats the global file like a base class and each project file like an
-  extension, so rules don't drift apart in copies.
+- **A git hook is not an agent feature.** Once configured (`git config core.hooksPath agent-setup/githooks`), it runs for Claude Code, other agents and humans alike, so the gate does not depend on any agent remembering it. If a project's local `.venv` is not set up yet, the hook prints a warning and lets the commit pass so a fresh clone remains usable.
 
 ← [Back to overview](../README.md)

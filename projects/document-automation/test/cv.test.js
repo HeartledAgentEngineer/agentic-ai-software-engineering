@@ -9,6 +9,7 @@ const path = require('path');
 const { pruefeLebenslauf } = require('../src/cv_model');
 const { renderLebenslauf, maskiere, monat } = require('../src/render_html');
 const { main } = require('../build');
+const { mergePdfs, defaultFiles } = require('../merge_pdfs');
 
 const BEISPIEL = path.join(__dirname, '..', 'data', 'beispiel_person.json');
 const beispiel = () => JSON.parse(fs.readFileSync(BEISPIEL, 'utf-8'));
@@ -83,5 +84,29 @@ test('Kommandozeile: unlesbare Datei -> Exit 2', async () => {
     assert.equal(await main([path.join(os.tmpdir(), 'gibt-es-nicht.json'), '--nur-html']), 2);
   } finally {
     console.error = stderr;
+  }
+});
+
+test('merge_pdfs: nutzt lebenslauf.pdf aus build.js und liefert Exit 1 bei fehlenden/defekten PDFs', async () => {
+  assert.ok(defaultFiles.some((f) => path.basename(f) === 'lebenslauf.pdf'));
+  const stderr = console.error;
+  const stdout = console.log;
+  console.error = () => {};
+  console.log = () => {};
+  try {
+    assert.equal(await mergePdfs([path.join(os.tmpdir(), 'fehlt.pdf')]), 1);
+    const ordner = fs.mkdtempSync(path.join(os.tmpdir(), 'pdf-'));
+    const kaputt = path.join(ordner, 'kaputt.pdf');
+    fs.writeFileSync(kaputt, 'kein-pdf');
+    const fakeLib = {
+      PDFDocument: {
+        create: async () => ({}),
+        load: async () => { throw new Error('ungültiges PDF'); }
+      }
+    };
+    assert.equal(await mergePdfs([kaputt], path.join(ordner, 'out.pdf'), fakeLib), 1);
+  } finally {
+    console.error = stderr;
+    console.log = stdout;
   }
 });

@@ -65,7 +65,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[4]
+REPO = Path(__file__).resolve().parents[2]
 HERMES_MODELL = "deepseek/deepseek-v4.1-flash"
 CODEX_GRUENDLICH_MODELL = "gpt-6-astra"
 ZEITGRENZE_STANDARD = 900

@@ -7,6 +7,7 @@
 #               Chatbot und den manuellen PDF-Upload bereit.
 # ==============================================================================
 
+import html
 import os
 import shutil
 import psycopg2
@@ -26,17 +27,32 @@ from ingest import ingest_file
 load_dotenv()
 
 SUPABASE_CONNECTION_STRING = os.getenv("SUPABASE_CONNECTION_STRING")
+PCLOUD_DIR = os.getenv("RAG_DOCUMENTS_DIR", r"P:\RAG_Documents")
+ALLOWED_EXTENSIONS = {".pdf", ".md", ".txt", ".json"}
 
 app = FastAPI(title="Persönlicher RAG Wissensassistent")
 
-# CORS aktivieren (erleichtert den Zugriff z. B. vom Smartphone im selben WLAN)
+# CORS auf localhost begrenzen (lokaler Single-User-Server)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:8000", "http://127.0.0.1:8000"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
+
+
+def _safe_doc_path(file_name: str, base_dir: str = PCLOUD_DIR) -> str:
+    """Stellt sicher, dass der Dateiname keinen Pfad-Ausbruch (../) enthält und im Dokumentenordner liegt."""
+    raw = (file_name or "").strip()
+    safe_name = os.path.basename(raw)
+    if not safe_name or safe_name != raw or safe_name in (".", ".."):
+        raise HTTPException(status_code=400, detail="Ungültiger Dateiname.")
+    base_real = os.path.realpath(base_dir)
+    target_real = os.path.realpath(os.path.join(base_real, safe_name))
+    if os.path.commonpath([base_real, target_real]) != base_real or target_real == base_real:
+        raise HTTPException(status_code=400, detail="Pfad liegt außerhalb des Dokumentenordners.")
+    return target_real
 
 # Chat-Request Modell
 class ChatRequest(BaseModel):
@@ -116,16 +132,17 @@ async def chat(request: ChatRequest):
 
 @app.post("/sync")
 async def sync_file(file: UploadFile = File(...)):
+    safe_name = os.path.basename(file.filename or "")
     # Validierung der Dateiendung
-    ext = os.path.splitext(file.filename)[1].lower()
-    if ext not in [".pdf", ".md", ".txt", ".json"]:
+    ext = os.path.splitext(safe_name)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Nur PDF-, MD-, TXT- und JSON-Dateien werden unterstützt.")
         
     # pCloud-Zielverzeichnis sicherstellen
-    pcloud_dir = r"P:\RAG_Documents"
+    pcloud_dir = PCLOUD_DIR
     os.makedirs(pcloud_dir, exist_ok=True)
     
-    file_path = os.path.join(pcloud_dir, file.filename)
+    file_path = _safe_doc_path(safe_name, pcloud_dir)
     
     try:
         # Datei direkt nach pCloud schreiben
@@ -136,10 +153,12 @@ async def sync_file(file: UploadFile = File(...)):
         success = ingest_file(file_path)
         
         if success:
-            return {"status": "success", "message": f"'{file.filename}' wurde erfolgreich indiziert."}
+            return {"status": "success", "message": f"'{safe_name}' wurde erfolgreich indiziert."}
         else:
-            raise HTTPException(status_code=500, detail=f"Fehler bei der Indizierung von {file.filename}.")
+            raise HTTPException(status_code=500, detail=f"Fehler bei der Indizierung von {safe_name}.")
             
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -226,21 +245,21 @@ async def reindex_document(file_name: str):
 
 @app.get("/view-doc/{file_name}", response_class=HTMLResponse)
 async def view_document_html(file_name: str):
-    pcloud_dir = r"P:\RAG_Documents"
-    file_path = os.path.join(pcloud_dir, file_name)
+    file_path = _safe_doc_path(file_name, PCLOUD_DIR)
+    safe_title = html.escape(os.path.basename(file_path))
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Datei nicht auf dem PC gefunden.")
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
             
-        ext = os.path.splitext(file_name)[1].lower()
+        ext = os.path.splitext(file_path)[1].lower()
         if ext == ".md":
-            # Markdown in HTML übersetzen
-            html_content = markdown.markdown(content, extensions=['fenced_code', 'tables'])
+            # Markdown in HTML übersetzen (Rohes HTML zuerst escapen)
+            html_content = markdown.markdown(html.escape(content), extensions=['fenced_code', 'tables'])
         else:
             # Für txt und sonstige Textdateien
-            html_content = f"<pre style='white-space: pre-wrap; word-break: break-word; font-family: monospace;'>{content}</pre>"
+            html_content = f"<pre style='white-space: pre-wrap; word-break: break-word; font-family: monospace;'>{html.escape(content)}</pre>"
             
         # Ästhetisches Dark-Mode Reader Template (ohne f-Prefix!)
         styled_html = r"""<!DOCTYPE html>
@@ -385,24 +404,26 @@ async def view_document_html(file_name: str):
         }
     </script>
 </body>
-</html>""".replace("{file_name}", file_name).replace("{html_content}", html_content)
+</html>""".replace("{file_name}", safe_title).replace("{html_content}", html_content)
         return HTMLResponse(content=styled_html)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/open-file")
 async def open_file(path: str):
-    # Self-healing Fallback: falls Originalpfad nicht existiert, nutze pCloud-Backup
-    if not os.path.exists(path):
-        file_name = os.path.basename(path)
-        backup_path = os.path.join(r"P:\RAG_Documents", file_name)
-        if os.path.exists(backup_path):
-            path = backup_path
-        else:
-            raise HTTPException(status_code=404, detail="Datei nicht auf dem PC gefunden.")
+    # Nur Dateien aus dem freigegebenen Dokumentenordner mit erlaubter Endung öffnen
+    file_name = os.path.basename(path or "")
+    ext = os.path.splitext(file_name)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Dateityp nicht freigegeben.")
+    safe_path = _safe_doc_path(file_name, PCLOUD_DIR)
+    if not os.path.exists(safe_path):
+        raise HTTPException(status_code=404, detail="Datei nicht auf dem PC gefunden.")
     try:
         # Öffnet die Datei nativ in Windows (z. B. Adobe Acrobat, VS Code, Word)
-        os.startfile(path)
+        os.startfile(safe_path)
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Fehler beim Öffnen der Datei: {str(e)}")
@@ -410,17 +431,13 @@ async def open_file(path: str):
 @app.post("/open-folder")
 async def open_folder(path: str):
     import subprocess
-    # Self-healing Fallback: falls Originalpfad nicht existiert, nutze pCloud-Backup
-    if not os.path.exists(path):
-        file_name = os.path.basename(path)
-        backup_path = os.path.join(r"P:\RAG_Documents", file_name)
-        if os.path.exists(backup_path):
-            path = backup_path
-        else:
-            raise HTTPException(status_code=404, detail="Datei nicht auf dem PC gefunden.")
+    file_name = os.path.basename(path or "")
+    safe_path = _safe_doc_path(file_name, PCLOUD_DIR)
+    if not os.path.exists(safe_path):
+        raise HTTPException(status_code=404, detail="Datei nicht auf dem PC gefunden.")
     try:
-        # Öffnet den Windows Explorer und markiert die Datei direkt
-        subprocess.Popen(f'explorer /select,"{path}"')
+        # Öffnet den Windows Explorer und markiert die Datei direkt (Argumentliste statt Shell-String)
+        subprocess.Popen(["explorer", f"/select,{safe_path}"])
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Fehler beim Öffnen des Explorers: {str(e)}")
@@ -436,9 +453,9 @@ if os.path.exists(static_dir):
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 # pCloud-Verzeichnis statisch bereitstellen unter /files/
-pcloud_dir = r"P:\RAG_Documents"
-os.makedirs(pcloud_dir, exist_ok=True)
-app.mount("/files", StaticFiles(directory=pcloud_dir), name="files")
+pcloud_dir = PCLOUD_DIR
+if os.path.exists(pcloud_dir):
+    app.mount("/files", StaticFiles(directory=pcloud_dir), name="files")
 
 @app.get("/")
 async def read_index():
@@ -450,4 +467,4 @@ async def read_index():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

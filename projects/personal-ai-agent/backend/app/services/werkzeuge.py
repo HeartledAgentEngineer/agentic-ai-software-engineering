@@ -4,8 +4,9 @@ Das Modell bekommt diese Werkzeuge als Funktions-Schemata (OpenAI-Format) und
 entscheidet selbst, welche es aufruft. Jedes Werkzeug ist eine duenne Huelle um
 einen bestehenden Dienst - es gibt hier keinen neuen Datenzugriff.
 
-Regeln (E3/E6/E9 der Spec):
-- Nur lesend. Kein Werkzeug schreibt, loescht, sendet oder kostet Geld.
+Regeln (E3/E6/E9 der Spec, erweitert um gezielte Speicher-Werkzeuge):
+- Lesende Nachschlage-Werkzeuge plus explizite Schreib-Werkzeuge fuer Gedächtnis, Personenprofile und Notizen
+  (``erinnerung_speichern``, ``erinnerung_loeschen``, ``person_profil_aendern``, ``notiz_speichern``); kein Werkzeug sendet nach aussen.
 - Ergebnisse sind Text, hoechstens ``MAX_ZEICHEN`` Zeichen; Bilder laufen getrennt
   (``Ergebnis.bilder``), weil Tool-Nachrichten im Chat-Format nur Text tragen.
 - Fehler werden nie geworfen, sondern als Text an das Modell zurueckgegeben.

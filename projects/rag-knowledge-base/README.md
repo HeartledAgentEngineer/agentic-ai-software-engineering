@@ -41,6 +41,8 @@ call without a timeout, so a hanging API froze the whole query. It now has 30 s 
 `test_embeddings.py` is a separate, manual plausibility check against the live API: a related pair (dog/cat) must
 come out closer than an unrelated pair (dog/car).
 
+**Local-only scope.** `main.py` binds to `127.0.0.1:8000` with localhost CORS and checks that uploaded or opened files stay inside the configured document folder (`RAG_DOCUMENTS_DIR`, default `P:\RAG_Documents`).
+
 ## Run it
 
 ```powershell
@@ -49,7 +51,7 @@ pip install -r requirements.txt
 python init_db.py
 python ingest.py <file>
 python main.py
-python -m pytest -q tests    # offline, no keys needed
+python -m pytest -q tests    # 13 offline tests, no keys needed
 ```
 
 ← [Back to overview](../../README.md)

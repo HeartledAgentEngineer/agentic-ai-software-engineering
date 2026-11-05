@@ -33,12 +33,13 @@ Node.js ADS bridge to a 3D HMI in the browser, the bridge between my OT backgrou
 - Worked with ChatGPT: personalised chatbots and system prompts written like a specification: inputs, constraints, expected output.
 - **What I learned:** a model behaves like a new colleague — the clearer the brief, the better the result.
 
-## January – May 2026 — AI agents in my day job
+## January – May 2026 — AI agents in my day job & building a 3D PLC Digital Twin
 
-- Started with **Claude Code** in a professional team setting.
-- Used it in automation work: TwinCAT 3, a VB.NET HMI, generating I/O lists, comparing wiring diagrams.
+- Started with **Claude Code** in a professional team setting and used it in automation work: TwinCAT 3, a VB.NET HMI, generating I/O lists, and comparing wiring diagrams.
+- **From a 2D TIA Portal / WinCC exercise to a 3D Digital Twin:** in December 2025 at my previous company, I had rebuilt a classic TIA Portal / WinCC simulation exercise in **TwinCAT 3** to prepare for Beckhoff PLCs. In January – February 2026 at home, I set up TwinCAT 3 on my own machine and took that idea further — replacing the flat WinCC screen with my own **3D physical simulation (Digital Twin)**: a real TwinCAT 3 PLC (Structured Text) coupled via a Node.js ADS bridge and WebSockets to a Three.js 3D elevator HMI in the browser (hardware-in-the-loop at 20 Hz).
 - **What I learned:** the agent did not make me slower at learning a new tool — it made me faster, as long as I
   checked every result against the real system.
+- 🔗 Evidence: [Elevator digital twin](projects/elevator-digital-twin/)
 
 ## April – July 2026 — First products of my own
 
@@ -46,8 +47,7 @@ Node.js ADS bridge to a 3D HMI in the browser, the bridge between my OT backgrou
 - **Concertify**: a Flask web app that builds concert playlists from setlists (Spotify and Ticketmaster APIs).
 - A hybrid-search **knowledge base** (PostgreSQL + pgvector), a declarative **document generator**
   (Word/PDF), and a small canvas game as a rapid-prototyping exercise.
-- May – June 2026: tried Google Antigravity (Gemini) as a cheaper agent platform and dropped it again: too little
-  control over what the agent actually touched.
+- May – June 2026: first look at Google Antigravity (Gemini) before I had a shared rule and gate system — without explicit guardrails, an autonomous IDE agent had too little control over what it touched, which pushed me to build tool-agnostic rules and hard verification gates first.
 - **What I learned:** speed is easy; keeping a project understandable after the third iteration is the real work.
 - 🔗 [Concertify](projects/concertify/) · [RAG knowledge base](projects/rag-knowledge-base/) ·
   [Document automation](projects/document-automation/) · [Squirrel game](projects/squirrel-game/)
@@ -88,13 +88,22 @@ Node.js ADS bridge to a 3D HMI in the browser, the bridge between my OT backgrou
   reviews).
 - A **cross-model review loop**: every result is checked by another model and reworked until it is approved; the
   review protocol is shown to me after each round.
-- **Master-Schalter**, a Windows tray app that measures the quotas of my agents, keeps the role of each project and
-  hands a project from one agent to another — with a handover assistant, a visible log and automatic switching
-  when a limit is reached.
-- Passed **Microsoft AZ-900** (Azure Fundamentals) and **AI-901** (Azure AI Fundamentals); AI-103 is next.
+- **OrbitDesk** (formerly *Master-Schalter*), a SCADA-inspired Windows control-room app (*Leitwarte*) that tracks the live quotas of my agents,
+  keeps the role and model profile of each project, and hands a project from one agent harness to another — with a handover assistant, a visible
+  log and automatic switching when a limit is reached.
+- Passed **Microsoft AZ-900** (Azure Fundamentals) and **AI-901** (Azure AI Fundamentals).
 - **What I learned:** autonomy needs transparency. The more an agent does on its own, the more important it is
   that every step is visible and reversible.
-- 🔗 [Master-Schalter](projects/master-schalter/) · [Cross-model review](projects/cross-model-review/)
+- 🔗 [OrbitDesk (Master-Schalter)](projects/master-schalter/) · [Cross-model review](projects/cross-model-review/)
+
+## November 2026 — Multi-harness orchestration, cloud agents & privacy-first hardening
+
+- Brought **Google Antigravity** back into active daily use alongside **Claude Code**, **OpenAI Codex** (ChatGPT), and **Hermes** — now governed by one shared rule and verification system (`AGENTS.md` + **OrbitDesk** as the central *Leitwarte*), which solved the control problem I had seen in May.
+- Connected **Microsoft Foundry** models directly to **Hermes** (using the 30-day / \$200 Azure Foundry trial) to test enterprise model deployments, privacy-scoped routing, and cross-family review/worker runs hands-on alongside **OpenRouter** (DeepSeek V4.1 Flash) and frontier models.
+- Working through **Microsoft AI-103** (*Developing AI Apps and Agents on Azure*): building with **Microsoft Foundry** and the **Azure AI Agent Service** (stateful threads, Code Interpreter, File Search, custom tool calls, RAG, Model Context Protocol / MCP, and multi-agent orchestration), alongside privacy-first routing concepts (GDPR / Zero Data Retention) and token cost control.
+- Hardened this portfolio for release: automated secret scanning (Gitleaks), CI test matrices across Windows and Linux, and strict data-privacy / PII checks before publication.
+- **What I learned:** whether in industrial PLCs or cloud agent pipelines, reliability comes from explicit state boundaries, deterministic checks, and knowing exactly where data goes.
+- 🔗 [Agent setup](agent-setup/) · [CI workflow](.github/workflows/ci.yml) · [Security policy](SECURITY.md)
 
 ---
 
