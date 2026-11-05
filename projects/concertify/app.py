@@ -156,16 +156,12 @@ def _idle_watchdog():
 
 _threading.Thread(target=_idle_watchdog, daemon=True).start()
 
+import html as _html
+import secrets as _secrets
+
 _ALLOWED_ORIGINS = ("http://localhost:5000", "http://127.0.0.1:5000")
 _ALLOWED_HOSTS = ("localhost", "127.0.0.1")
-_PROTECTED_GET_PATHS = {
-    "/stream",
-    "/preview_stream",
-    "/refresh_stream",
-    "/quick_refresh",
-    "/spotify_token",
-    "/spotify_connect",
-}
+_PUBLIC_GET_PATHS = {"/", "/health", "/callback"}
 
 @app.before_request
 def _touch():
@@ -175,26 +171,27 @@ def _touch():
     if host and host not in _ALLOWED_HOSTS:
         return jsonify({"error": "Invalid Host header"}), 403
 
-    is_state_or_action = (
-        request.method in ("POST", "PUT", "DELETE", "PATCH")
-        or request.path in _PROTECTED_GET_PATHS
+    is_public_get = (
+        request.method == "GET"
+        and (request.path in _PUBLIC_GET_PATHS or request.path.startswith("/static/"))
     )
-    if is_state_or_action:
+    if not is_public_get:
         sec_site = (request.headers.get("Sec-Fetch-Site") or "").lower()
         if sec_site and sec_site not in ("same-origin", "none"):
             return jsonify({"error": "Cross-site request rejected"}), 403
         sec_mode = (request.headers.get("Sec-Fetch-Mode") or "").lower()
-        if request.path in _PROTECTED_GET_PATHS and request.path != "/spotify_connect" and sec_mode == "navigate":
-            return jsonify({"error": "Direct browser navigation to action stream rejected"}), 403
+        if request.method == "GET" and sec_mode == "navigate":
+            return jsonify({"error": "Direct browser navigation to API endpoint rejected"}), 403
         origin = (request.headers.get("Origin") or "").rstrip("/")
         if origin and origin not in _ALLOWED_ORIGINS:
-            return jsonify({"error": "Cross-origin state change rejected"}), 403
+            return jsonify({"error": "Cross-origin request rejected"}), 403
         referer = request.headers.get("Referer") or ""
-        if referer and not any(referer.startswith(o + "/") or referer == o for o in _ALLOWED_ORIGINS):
+        referer_ok = any(referer.startswith(o + "/") or referer == o for o in _ALLOWED_ORIGINS)
+        if referer and not referer_ok:
             return jsonify({"error": "Cross-origin Referer rejected"}), 403
         if not app.testing and not os.environ.get("PYTEST_CURRENT_TEST"):
-            if not origin and not referer and sec_site != "same-origin":
-                return jsonify({"error": "Missing local Origin/Referer header"}), 403
+            if origin not in _ALLOWED_ORIGINS and not referer_ok:
+                return jsonify({"error": "Missing local Origin or Referer header"}), 403
 
 
 @app.route("/")
@@ -2249,16 +2246,19 @@ def spotify_connect():
     """Gibt die Spotify Auth-URL zurück. Callback kommt zu /callback."""
     env = dotenv_values(BASE_DIR / ".env")
     from spotipy.oauth2 import SpotifyOAuth
+    oauth_state = _secrets.token_urlsafe(16)
     auth = SpotifyOAuth(
         client_id=env.get("SPOTIFY_CLIENT_ID", ""),
         client_secret=env.get("SPOTIFY_CLIENT_SECRET", ""),
         redirect_uri=_SPOTIFY_CONNECT_REDIRECT,
         scope=_SPOTIFY_SCOPE,
+        state=oauth_state,
         cache_path=str(BASE_DIR / ".cache"),
         open_browser=False,
     )
     auth_url = auth.get_authorize_url()
     _spotify_connect_status["status"] = "pending"
+    _spotify_connect_status["state"] = oauth_state
     return jsonify({"status": "pending", "url": auth_url})
 
 
@@ -2267,9 +2267,15 @@ def spotify_callback():
     """Empfängt Spotify OAuth Callback, tauscht Code gegen Token."""
     code  = request.args.get("code")
     error = request.args.get("error")
+    state = request.args.get("state") or ""
+    expected_state = _spotify_connect_status.get("state") or ""
     if error or not code:
         _spotify_connect_status["status"] = "error"
-        return "<h3>Spotify Auth fehlgeschlagen: " + str(error) + "</h3><p>Bitte schließe dieses Fenster.</p>", 400
+        safe_err = _html.escape(str(error or "missing code"))
+        return f"<h3>Spotify Auth fehlgeschlagen: {safe_err}</h3><p>Bitte schließe dieses Fenster.</p>", 400
+    if _spotify_connect_status.get("status") != "pending" or not expected_state or not _secrets.compare_digest(state, expected_state):
+        _spotify_connect_status["status"] = "error"
+        return "<h3>Ungültiger oder abgelaufener OAuth-State.</h3><p>Bitte schließe dieses Fenster.</p>", 403
 
     env = dotenv_values(BASE_DIR / ".env")
     from spotipy.oauth2 import SpotifyOAuth
@@ -2284,6 +2290,7 @@ def spotify_callback():
     try:
         auth.get_access_token(code, as_dict=False, check_cache=False)
         _spotify_connect_status["status"] = "connected"
+        _spotify_connect_status["state"] = ""
         return """<html><body style="background:#121212;color:#1db954;font-family:sans-serif;text-align:center;padding:60px;">
             <h2>✅ Spotify verbunden!</h2>
             <p style="color:#888;">Dieses Fenster kann geschlossen werden.</p>
@@ -2291,7 +2298,7 @@ def spotify_callback():
         </body></html>"""
     except Exception as e:
         _spotify_connect_status["status"] = "error"
-        return f"<h3>Fehler: {e}</h3>", 500
+        return f"<h3>Fehler: {_html.escape(str(e))}</h3>", 500
 
 
 def _get_spotify_with_library_scope() -> tuple:
