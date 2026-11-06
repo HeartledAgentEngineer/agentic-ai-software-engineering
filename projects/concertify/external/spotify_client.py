@@ -5,7 +5,7 @@ import os
 import time
 from pathlib import Path
 
-_CACHE_FILE = Path(__file__).parent / ".track_cache.json"
+_CACHE_FILE = Path(__file__).resolve().parent.parent / ".track_cache.json"
 
 
 def _load_cache() -> dict:

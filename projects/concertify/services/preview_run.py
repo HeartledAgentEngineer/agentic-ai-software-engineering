@@ -1,5 +1,5 @@
 """
-SetlistMixPrepper — Vorschau / Trockenlauf
+Concertify — Vorschau / Trockenlauf
 =====================================
 Zeigt welche Künstler und Songs ausgewählt würden,
 ohne Spotify oder andere APIs aufzurufen.
@@ -18,7 +18,10 @@ from dotenv import load_dotenv
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent.parent
+for _sub in (BASE_DIR, BASE_DIR / "external", BASE_DIR / "services"):
+    if str(_sub) not in sys.path:
+        sys.path.insert(0, str(_sub))
 
 
 def _norm(title: str) -> str:

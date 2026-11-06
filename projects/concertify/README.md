@@ -7,24 +7,24 @@ live setlists (setlist.fm).
 **Stack:** Python · Flask (blueprints) · Server-Sent Events · SQLite · Spotify, Ticketmaster, setlist.fm, Tavily
 and Gemini APIs · pytest
 
-## Architecture & Evolution
+## Architecture & Structure
 
-Concertify started in April 2026 as a fast-moving prototype with root-level scripts (`app.py`, `main.py`, and API client modules `spotify_client.py`, `setlist_client.py`, `ticketmaster_client.py`, `festival_scraper.py`, `web_concert_finder.py`). When that initial layout grew harder to test, I introduced a **5-layer architecture** alongside the existing entry point using the [Dual Engineering System](docs/dual_engineering_system.md) (an *Architect* role for clean boundaries and a *Guardian* role for risk and regression checks):
+Concertify started in April 2026 as a fast-moving prototype and was structured into a **5-layer architecture** using the [Dual Engineering System](docs/dual_engineering_system.md) (an *Architect* role for clean boundaries and a *Guardian* role for risk and regression checks). At the project root sits only `app.py` (the Flask web entry point); all domain models, repositories, services, HTTP blueprints, and external API clients live in dedicated layers:
 
-| Layer | Folder / Files | Responsibility |
+| Layer | Folder | Responsibility |
 |---|---|---|
-| Domain | `domain/` | plain data models (artist, concert, setlist, song), no framework |
-| Repositories | `repositories/`, `db/` | persistence behind interfaces: a JSON file for concert data, SQLite for setlist snapshots |
-| Services | `services/` | logic: playlist import/save, setlists, song state, support-act order, concert search |
-| Routes | `routes/` | Flask blueprints (HTTP only) registered into `app.py` |
-| External & Clients | `external/`, `*_client.py` | third-party API clients and quota guards (e.g. `external/setlistfm_quota.py`) |
-
-Every extracted layer has its own mirrored unit and integration test suite under `tests/`.
+| Entry point | `app.py`, `templates/` | Flask web server (`127.0.0.1:5000`), SSE streaming endpoints, UI template |
+| Domain | `domain/` | Plain data models (`artist.py`, `concert.py`, `setlist.py`, `song.py`, `saved_playlist.py`), no framework |
+| Repositories | `repositories/`, `db/` | Persistence behind interfaces: `json_repo.py` for concert data, `snapshot_repository.py` + SQLite (`db/connection.py`) for setlist snapshots |
+| Services | `services/` | Business logic & runners: playlist import/save, setlist & snapshot services, song state, support-act order & search, artist matcher, festival year rollover, and background runners (`fetch_data.py`, `main.py`, `preview_run.py`) |
+| Routes | `routes/` | Flask blueprints (`playlists.py`, `songs.py`, `imports.py` under `/api/v2/...`) |
+| External | `external/` | Third-party API clients (`spotify_client.py`, `setlist_client.py`, `ticketmaster_client.py`, `eventim_client.py`, `songkick_client.py`, `festival_client.py`, `rock_im_park.py`, `tavily_*`, `gemini_*`, `claude_*`, `serper_*`) and quota guard (`setlistfm_quota.py`) |
+| Tests | `tests/` | Mirrored unit and integration test suites (`193 passed, 2 skipped`) |
 
 ## Decisions
 
 - **Long searches as a stream.** The concert search can take minutes because of API quotas. It runs as a
-  subprocess, and its output reaches the browser line by line as Server-Sent Events. If the tab is closed, the
+  subprocess (`services/fetch_data.py`, `services/main.py`, `services/preview_run.py`), and its output reaches the browser line by line as Server-Sent Events. If the tab is closed, the
   server catches `GeneratorExit` and terminates the subprocess.
 - **Atomic writes.** Web requests and the background search share one JSON file. Every write goes through one
   function: thread lock, write to a temporary file, then `Path.replace()`.

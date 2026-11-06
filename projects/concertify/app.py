@@ -16,6 +16,9 @@ from dotenv import dotenv_values
 from flask import Flask, Response, render_template, request, jsonify
 
 BASE_DIR = Path(__file__).parent
+for _sub in (BASE_DIR / "external", BASE_DIR / "services"):
+    if str(_sub) not in sys.path:
+        sys.path.insert(0, str(_sub))
 app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 
@@ -362,8 +365,9 @@ def _stream_script(script: str, done_msg: str):
             return
         proc = None
         try:
+            script_path = (BASE_DIR / "services" / script) if (BASE_DIR / "services" / script).exists() else (BASE_DIR / script)
             proc = subprocess.Popen(
-                [sys.executable, str(BASE_DIR / script)],
+                [sys.executable, str(script_path)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 env=_build_env(),

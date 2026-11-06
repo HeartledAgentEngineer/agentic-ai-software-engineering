@@ -123,7 +123,8 @@ def _load_api_key(name: str) -> str:
         return key
     try:
         from dotenv import dotenv_values as _dv
-        return _dv(os.path.join(os.path.dirname(__file__), ".env")).get(name, "") or ""
+        from pathlib import Path as _Path
+        return _dv(_Path(__file__).resolve().parent.parent / ".env").get(name, "") or ""
     except Exception:
         return ""
 
