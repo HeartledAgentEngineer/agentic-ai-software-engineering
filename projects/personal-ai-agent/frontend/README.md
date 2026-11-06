@@ -24,10 +24,10 @@ This directory contains the browser client of the Personal AI Agent. It is built
 - **Fixed Origin (`API_BASE = location.origin`)**: Earlier prototypes allowed overriding `api_base` via `localStorage`, which meant any injected script could redirect requests (including the API key) to an external host. `app.js` deletes any legacy `localStorage.api_base` entry on startup and strictly binds to `location.origin`.
 - **Loopback Meta-Tag Injection**: The backend injects the API key into `<meta name="agent-schluessel">` when serving `index.html` to a loopback client (`127.0.0.1` / `::1`). A single `window.fetch` wrapper in `app.js` attaches `X-API-Key` only to same-origin `/api/*` requests.
 
-### 2. Dual-Chat Architecture (`conv_main` vs. `conv_code`)
+### 2. Dual-Chat Architecture & Evolution to OrbitView (`conv_main` vs. `conv_code`)
 - The header button `#codechat-btn` toggles between two persistent conversation contexts:
   - **`💬` Main Assistant (`conv_main`)**: Everyday personal chat, memory lookup, archive search, and photo/note tools.
-  - **`</>` Hermes Coding Chat (`conv_code`)**: Dedicated engineering channel that routes directly to a persistent local Termux Hermes session (`hermes_code` in `tmux`), preserving multi-step coding context separately from personal conversations.
+  - **`</>` Hermes Coding Chat (`conv_code`)**: Originally built as an experimental on-device coding channel routing to a local Termux session (`hermes_code` in `tmux`) for vacation programming without a PC. As heavy coding proved impractical on phone hardware, this slot is evolving into a direct **Live Voice Mode** and mobile **OrbitView (MCP-connected OrbitDesk)** interface.
 - An explicit status banner (`#chat-aktuell`) above the message list always displays which conversation is currently active and persists the selection across page reloads.
 
 ### 3. Live SSE Streaming, Collapsible Thought Bubbles & Zero-Jump Scroll (`app.js`)

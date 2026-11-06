@@ -12,7 +12,9 @@ A Windows tray and control-room app (*Leitwarte*) for orchestrating several AI c
 - **Handover assistant:** "topic X: old chat → new chat". It writes a handover package (technical metadata only),
   delivers it to the target chat, waits for an acknowledgement and logs every decision.
 - **Automatic switch (off by default):** when Claude reaches its limit on an enabled topic pair, the topic is handed over to Codex (`v0.3.0+`, at most one switch per quota window).
-- **Multi-agent orchestration roadmap:** evolving from quota switching and role profiles into a full SCADA-like operator console (*Leitwarte*) for parallel agent sessions, review loops, and cross-harness telemetry.
+- **Multi-agent orchestration roadmap & OrbitView (Mobile MCP Companion):** evolving from quota switching and role profiles into a full SCADA-like operator console (*Leitwarte*):
+  - **MCP Integration (Model Context Protocol):** Exposing OrbitDesk's live quotas, topic ownership locks, and handover queues as standard MCP resources and tools, enabling agents across Claude Code, Antigravity, and Codex to query system state deterministically.
+  - **OrbitView (Mobile Frontend):** A responsive, mobile-first companion view for smartphones that gives me full visibility into the workstation's agent fleet on the go — visual quota bars, active project locks, and handover status right from the phone browser without needing Remote Desktop or Termux terminal sessions.
 
 ```mermaid
 flowchart LR

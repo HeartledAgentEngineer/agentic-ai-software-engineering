@@ -62,6 +62,8 @@ Node.js ADS bridge to a 3D HMI in the browser, the bridge between my OT backgrou
 - **typeFREE**, a system-wide dictation tool for Windows that I use every day — most of my instructions to my
   agents are dictated with it.
 - A **personal AI assistant** on Android (Termux): chat, long-term memory and tool calls.
+- **The mobile engineering experiment (vacation coding):** I experimented with running an open-source autonomous coding harness (Hermes CLI inside `tmux`) entirely locally on my Android phone in Termux. It was an ambitious attempt to do full autonomous engineering on the go, but the reality was sobering: phone battery drain, Termux background daemon kills by the OS, tiny touchscreens, and thermal throttling during long runs.
+- **The architectural lesson:** heavy software engineering (compilation, full test suites, git hooks, multi-file AST parsing) belongs on a dedicated workstation. The smartphone is ideal as an *orchestration and voice cockpit*, not a build server.
 - Switched my main setup to an open-source agent (Hermes) with a model gateway (OpenRouter) — several models,
   each for what it does best and at the right price.
 - Rebuilt the rules: one tool-agnostic core file (`AGENTS.md`), executable skills instead of prose, permission
@@ -96,9 +98,12 @@ Node.js ADS bridge to a 3D HMI in the browser, the bridge between my OT backgrou
   that every step is visible and reversible.
 - 🔗 [OrbitDesk (Master-Schalter)](projects/master-schalter/) · [Cross-model review](projects/cross-model-review/)
 
-## November 2026 — Multi-harness orchestration, cloud agents & privacy-first hardening
+## November 2026 — Multi-harness orchestration, cloud agents & the hybrid Leitwarte
 
 - Brought **Google Antigravity** back into active daily use alongside **Claude Code**, **OpenAI Codex** (ChatGPT), and **Hermes** — now governed by one shared rule and verification system (`AGENTS.md` + **OrbitDesk** as the central *Leitwarte*), which solved the control problem I had seen in May.
+- **The Hybrid Leitwarte architecture:** crystallized the clear separation between compute and control:
+  - **Workstation:** the heavy-duty engine running test matrices, compiler runs, isolated git worktrees, and desktop agent harnesses (Claude Code, Codex, Antigravity, local Hermes gateway).
+  - **Smartphone as the mobile control cockpit:** replacing clumsy mobile coding terminals with a **universal Live Voice Mode** (full-duplex Web Audio / WebSocket, hands-free interaction across all tools) and building **OrbitView** — an **MCP (Model Context Protocol)** server and responsive mobile frontend for OrbitDesk that lets me monitor subscription quotas, topic ownership locks, and agent transitions on the go from any browser, Telegram, or mobile agent client.
 - Connected **Microsoft Foundry** models directly to **Hermes** (using the 30-day / \$200 Azure Foundry trial) to test enterprise model deployments, privacy-scoped routing, and cross-family review/worker runs hands-on alongside **OpenRouter** (DeepSeek V4.1 Flash) and frontier models.
 - Working through **Microsoft AI-103** (*Developing AI Apps and Agents on Azure*): building with **Microsoft Foundry** and the **Azure AI Agent Service** (stateful threads, Code Interpreter, File Search, custom tool calls, RAG, Model Context Protocol / MCP, and multi-agent orchestration), alongside privacy-first routing concepts (GDPR / Zero Data Retention) and token cost control.
 - Hardened this portfolio for release: automated secret scanning (Gitleaks), CI test matrices across Windows and Linux, and strict data-privacy / PII checks before publication.

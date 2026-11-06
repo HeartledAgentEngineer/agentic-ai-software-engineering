@@ -73,15 +73,27 @@ flowchart TB
 
 ## Core Engineering Mechanisms (Included in This Repo)
 
-### 1. Deterministic Capability Boundaries & 3-Track Hermes Routing (`faehigkeiten.py`, `chat_routing.py`)
+### 1. Deterministic Capability Boundaries & The Evolution of Mobile Coding (`faehigkeiten.py`, `chat_routing.py`)
 Instead of letting an LLM hallucinate that it executed a shell command or promising a tool it does not have, the backend evaluates a deterministic capability manifest (`FAEHIGKEITEN`) **before** calling the chat model:
 - **What the agent handles itself (`kann`)**: Dialog, long-term memory (`gedaechtnis`), direct personal data/contact updates (`daten_aendern`), web search (`websuche`), chat archive lookup (`archiv`), document/image analysis (`dokument_text`), face catalog updates (`gesichter_merken`), and voice I/O (`tts_stt`).
-- **What crosses the boundary (`kann_nicht` → Hermes)**: Terminal commands (`terminal`), repository file writes (`dateien_schreiben`), package installations (`tool_install`), `git` operations (`commit`/`push`/`pull`/`merge`), and system/Docker/PLC tasks (`system_zugriff`).
-- **Read vs. Write Disambiguation**: Pure read requests (`"lies meine Datei"`, `"was steht in"`, `"zeig mir"`) and personal data care (`"ändere den Geburtstag im Telefonbuch"`) are explicitly exempted in `stoesst_an_grenze()` so the agent answers them directly via its own tools instead of falsely delegating to Hermes.
-- **3-Track Hermes Cascade (`route_auftrag()`)**:
-  1. **Track A (`pc`)**: Sends the task (enriched with conversation and memory context) to the PC Hermes HTTP gateway if reachable.
-  2. **Track C (`handy`)**: If the PC is offline — or if the user explicitly selects the phone target or writes inside the dedicated `conv_code` coding chat — the backend launches/attaches to the local Hermes CLI in Termux (`tmux` session `hermes_code` or inbox daemon) and streams every thought (`🧠`) and tool action (`🔧`) live into the browser via SSE.
-  3. **Track B (`buch`)**: If neither worker is reachable, `bereit_reply_text()` queues the task in the `Auftragsbuch` and states the exact reason (`kein_helfer_text()`) rather than pretending a background job is running.
+- **What crosses the boundary (`kann_nicht` → Hermes / Workstation)**: Terminal commands (`terminal`), repository file writes (`dateien_schreiben`), package installations (`tool_install`), `git` operations (`commit`/`push`/`pull`/`merge`), and system/Docker/PLC tasks (`system_zugriff`).
+- **Read vs. Write Disambiguation**: Pure read requests (`"lies meine Datei"`, `"was steht in"`, `"zeig mir"`) and personal data care (`"ändere den Geburtstag im Telefonbuch"`) are explicitly exempted in `stoesst_an_grenze()` so the agent answers them directly via its own tools instead of falsely delegating to a coding agent.
+
+#### The 3-Track Cascade & The Shift from Local Termux Coding to OrbitDesk
+In the codebase, `route_auftrag()` routes recognized engineering tasks through three tracks:
+1. **Track A (`pc`)**: Direct HTTP dispatch to the workstation's Hermes gateway when the PC is reachable.
+2. **Track C (`handy`)**: A local Hermes CLI instance inside Termux (`tmux` session `hermes_code`).
+3. **Track B (`buch`)**: The `Auftragsbuch` queue when no worker is currently active.
+
+> **Why the local Hermes coding integration is being phased out:**
+> I originally designed Track C during vacation as an ambitious experiment: *Can I build a completely standalone mobile coding harness on my phone, so I can engineer software while traveling without having my desktop PC turned on?*
+> 
+> The real-world experience was a critical engineering lesson: while simple scripts run fine, running full autonomous coding loops locally on an Android phone hits hard operational limits — Android OS aggressively kills background Termux daemons to save power, battery drains rapidly, and complex projects lack the full desktop toolchains, compilers, and fast test matrices.
+> 
+> **The new architecture:**
+> Consequently, the local Hermes coding integration inside the phone app is being stepped down in favor of a much cleaner division of labor:
+> - **The PC remains the execution engine:** Heavy coding, tests, and git gates run where the compute lives.
+> - **The phone becomes the mobile cockpit:** The engineering chat is transitioning into a **universal Live Voice Mode** (hands-free full-duplex speech access to all tools) and an **MCP (Model Context Protocol) connection to OrbitDesk**, giving me a dedicated mobile Leitwarte (`OrbitView`) to monitor and steer the workstation fleet remotely.
 
 ### 2. Multi-Round Tool Loop Harness (`werkzeug_schleife.py`, `werkzeuge.py`)
 `werkzeug_schleife.laufe()` implements a dependency-injected OpenAI-format streaming tool loop:
