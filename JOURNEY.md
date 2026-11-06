@@ -45,8 +45,8 @@ Node.js ADS bridge to a 3D HMI in the browser, the bridge between my OT backgrou
 
 - Moved to Claude and built my first apps on top of a model API.
 - **Concertify**: a Flask web app that builds concert playlists from setlists (Spotify and Ticketmaster APIs).
-- A hybrid-search **knowledge base** (PostgreSQL + pgvector), a declarative **document generator**
-  (Word/PDF), and a small canvas game as a rapid-prototyping exercise.
+- A hybrid-search **RAG knowledge base** (PostgreSQL + `pgvector`, Mistral `mistral-embed` & OCR): started as a hands-on exercise from an **Everlast AI** RAG tutorial in **n8n**, which I then rebuilt as a standalone Python pipeline to get away from paid n8n cloud nodes and keep chunking and Reciprocal Rank Fusion in code.
+- A declarative **document generator** (Word/PDF), and a small canvas game as a rapid-prototyping exercise.
 - May – June 2026: first look at Google Antigravity (Gemini) before I had a shared rule and gate system — without explicit guardrails, an autonomous IDE agent had too little control over what it touched, which pushed me to build tool-agnostic rules and hard verification gates first.
 - **What I learned:** speed is easy; keeping a project understandable after the third iteration is the real work.
 - 🔗 [Concertify](projects/concertify/) · [RAG knowledge base](projects/rag-knowledge-base/) ·
