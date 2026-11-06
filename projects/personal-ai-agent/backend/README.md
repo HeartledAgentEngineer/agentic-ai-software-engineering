@@ -33,7 +33,7 @@ backend/
 │       ├── werkzeug_schleife.py    # Multi-round streaming tool loop harness & <｜DSML｜> filter
 │       ├── werkzeuge.py            # 13 registered agent tools, OpenAI schema generator & invariant check
 │       ├── faehigkeiten.py         # Deterministic capability manifest & Hermes boundary detector
-│       ├── chat_routing.py         # 3-track Hermes delegation (Track A: PC, Track C: Phone, Track B: Queue)
+│       ├── chat_routing.py         # Workstation delegation (Track A: PC gateway, Track B: Queue; retired Track C prototype)
 │       ├── modell_router.py        # Task-category classifier & cost-optimal OpenRouter model selector
 │       ├── memory_service.py       # Fact extraction, correction-vs-duplicate logic, temporal Top-K ranking
 │       ├── llm_service.py          # OpenRouter client, 3-stage STT fallback chain, PII-shielded text polish
@@ -125,10 +125,10 @@ backend/
   - **`stoesst_an_grenze(text)`**: Word-boundary regex matcher (`\b...\b`, preventing false positives like `"git"` in `"digital"` or `"run"` in `"darunter"`). Suppresses delegation when `_DATEI_LESE_SIGNALE` (reading files) or `_PERSOENLICHE_DATEN_SIGNALE` (editing contacts/notes/memories without system keywords) are present.
   - **`faehigkeits_block()`**: Generates the system-prompt section explaining the agent's exact capabilities and boundaries.
 - **[`app/services/chat_routing.py`](app/services/chat_routing.py)**
-  - **`route_auftrag(...)`**: Executes the 3-track cascade:
-    - **Track A (`pc`)**: Calls `hermes_gateway.sende_auftrag()` unless `ziel == "handy"`.
-    - **Track C (`handy`)**: Calls `starte_lokale_hermes()` if Termux Hermes is available (`hermes_local_ist_verfuegbar()`).
-    - **Track B (`buch`)**: Queues the task in `auftrag_service` and returns `bereit_reply_text()` + `kein_helfer_text()` explaining why no worker is currently active.
+  - **`route_auftrag(...)`**: Dispatches engineering tasks to the workstation:
+    - **Track A (`pc`)**: Direct HTTP call to the PC gateway when the workstation is reachable on LAN/Tailscale.
+    - **Track B (`buch`)**: Queues the task in `auftrag_service` with an honest status explanation (`bereit_reply_text()`) when offline.
+    - *(Note: Track C in the code was an early offline prototype for spawning a local Hermes process in Termux that was never used productively and has been stepped down).*
 - **[`app/services/modell_router.py`](app/services/modell_router.py)**
   - **`erkenne_kategorie(frage)`**: Classifies prompts into `BILDER`, `EMOTIONAL`, `ERINNERUNG`, `CODING`, `KOMPLEX`, `ALLTAG`, or `SCHNELL`.
   - **`modell_fuer(kategorie, aktuelles_modell)`**: Maps categories to verified OpenRouter IDs (`MODELL_FLASH`, `MODELL_VISION`, `MODELL_CODING`, `MODELL_PRO`). Preserves manual user model selection except when an image task requires a vision-capable model (`ist_vision_faehig()`).

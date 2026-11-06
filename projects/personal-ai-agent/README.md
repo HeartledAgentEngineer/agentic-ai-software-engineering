@@ -1,10 +1,10 @@
 # Personal AI Agent
 
-My personal assistant and the largest software system in this portfolio. It runs **phone-first**: a FastAPI backend inside **Termux on Android** (`127.0.0.1:8080` / LAN / Tailscale), an installable Progressive Web App (PWA) in the mobile browser, language and vision models routed through **OpenRouter**, and an autonomous **Hermes coding & operations harness** that takes over whenever a request requires shell execution, file changes, or git workflows.
+My personal assistant and the largest software system in this portfolio. It runs **phone-first**: a FastAPI backend inside **Termux on Android** (`127.0.0.1:8080` / LAN / Tailscale), an installable Progressive Web App (PWA) in the mobile browser, language and vision models routed through **OpenRouter**, and a deterministic boundary router that delegates engineering and system tasks to the workstation whenever a request requires shell execution, file changes, or git workflows.
 
 > **Why this folder is an architectural excerpt:**
 > Everything that touches personal data stays strictly in my private workspace: photo and face-recognition pipelines, WhatsApp/chat archive imports, pCloud storage clients, daily well-being logs, and live handovers. Names in examples and unit tests are fictional.
-> This repository contains the **complete architectural core** (chat router, multi-round tool harness, Hermes delegation router, task-based model router, correction-preserving memory service, privacy guards, ASGI security middleware, and PWA frontend) along with **53 offline unit tests** that run in CI without private data or API keys.
+> This repository contains the **complete architectural core** (chat router, multi-round tool harness, workstation delegation router, task-based model router, correction-preserving memory service, privacy guards, ASGI security middleware, and PWA frontend) along with **53 offline unit tests** that run in CI without private data or API keys.
 
 **Stack:** Python 3.12 · FastAPI · Raw ASGI Security Middleware · Server-Sent Events (SSE) · OpenRouter (DeepSeek V4 Flash/Pro, Gemini Flash, Claude Sonnet, MAI-Transcribe-2, Whisper Large v3) · SQLite (FTS5 + vectors) · Vanilla JS PWA · Termux & tmux · pytest
 
@@ -26,7 +26,7 @@ Every message sent from the phone or desktop browser passes through four determi
 ```mermaid
 flowchart TB
     subgraph Client["📱 Mobile Browser / Desktop PWA (frontend/)"]
-        UI["Chat UI · Voice (AudioWorklet WAV) · Image Upload\nDual Chat: conv_main (Assistant) & conv_code (Hermes Coding)"]
+        UI["Chat UI · Voice (AudioWorklet WAV) · Image Upload\nPWA frontend running on phone / desktop"]
     end
 
     subgraph Security["🛡️ ASGI Security Perimeter (app/sicherheit.py & router/auth.py)"]
@@ -37,12 +37,10 @@ flowchart TB
         Boundary{"Boundary Check\nstoesst_an_grenze() &\nist_auftrag()"}
     end
 
-    subgraph Hermes["🤖 Hermes Coding & System Delegation (services/chat_routing.py)"]
-        TrackA["Track A · PC Hermes\nDirect HTTP call if workstation is online in WLAN/Tailnet"]
-        TrackC["Track C · Local Phone Hermes (Termux)\nRuns Hermes CLI in persistent tmux / inbox daemon;\nstreams live thoughts (🧠) & tool steps (🔧) via SSE"]
-        TrackB["Track B · Auftragsbuch (Task Queue)\nHonest fallback queue if neither PC nor local Hermes is running"]
-        TrackA -->|PC offline or target='handy'| TrackC
-        TrackC -->|Daemon unavailable| TrackB
+    subgraph Workstation["💻 Workstation Delegation (services/chat_routing.py)"]
+        PC["PC Engineering Gateway\nDirect HTTP call to workstation in WLAN/Tailnet"]
+        Queue["Auftragsbuch (Task Queue)\nQueued for later execution if workstation is offline"]
+        PC -.->|Offline| Queue
     end
 
     subgraph AgentCore["🧠 Personal Agent Core (services/)"]
@@ -59,7 +57,7 @@ flowchart TB
 
     UI -->|"POST /api/chat/stream (SSE)"| SecMW
     SecMW --> Boundary
-    Boundary -->|"Needs terminal, git, repo edits,\npackages, Docker, or PLC"| TrackA
+    Boundary -->|"Needs terminal, git, repo edits,\npackages, Docker, or PLC"| PC
     Boundary -->|"Conversational, memory, archive,\nphotos, web, or personal data care"| ModRouter
     ModRouter --> Context
     Context --> ToolLoop
@@ -73,27 +71,19 @@ flowchart TB
 
 ## Core Engineering Mechanisms (Included in This Repo)
 
-### 1. Deterministic Capability Boundaries & The Evolution of Mobile Coding (`faehigkeiten.py`, `chat_routing.py`)
+### 1. Deterministic Capability Boundaries & Workstation Delegation (`faehigkeiten.py`, `chat_routing.py`)
 Instead of letting an LLM hallucinate that it executed a shell command or promising a tool it does not have, the backend evaluates a deterministic capability manifest (`FAEHIGKEITEN`) **before** calling the chat model:
 - **What the agent handles itself (`kann`)**: Dialog, long-term memory (`gedaechtnis`), direct personal data/contact updates (`daten_aendern`), web search (`websuche`), chat archive lookup (`archiv`), document/image analysis (`dokument_text`), face catalog updates (`gesichter_merken`), and voice I/O (`tts_stt`).
-- **What crosses the boundary (`kann_nicht` → Hermes / Workstation)**: Terminal commands (`terminal`), repository file writes (`dateien_schreiben`), package installations (`tool_install`), `git` operations (`commit`/`push`/`pull`/`merge`), and system/Docker/PLC tasks (`system_zugriff`).
+- **What crosses the boundary (`kann_nicht` → Workstation)**: Terminal commands (`terminal`), repository file writes (`dateien_schreiben`), package installations (`tool_install`), `git` operations (`commit`/`push`/`pull`/`merge`), and system/Docker/PLC tasks (`system_zugriff`).
 - **Read vs. Write Disambiguation**: Pure read requests (`"lies meine Datei"`, `"was steht in"`, `"zeig mir"`) and personal data care (`"ändere den Geburtstag im Telefonbuch"`) are explicitly exempted in `stoesst_an_grenze()` so the agent answers them directly via its own tools instead of falsely delegating to a coding agent.
 
-#### The 3-Track Cascade & The Shift from Local Termux Coding to OrbitDesk
-In the codebase, `route_auftrag()` routes recognized engineering tasks through three tracks:
-1. **Track A (`pc`)**: Direct HTTP dispatch to the workstation's Hermes gateway when the PC is reachable.
-2. **Track C (`handy`)**: A local Hermes CLI instance inside Termux (`tmux` session `hermes_code`).
-3. **Track B (`buch`)**: The `Auftragsbuch` queue when no worker is currently active.
+#### Workstation Delegation & Architecture Clean-Up
+When an engineering task is detected, `chat_routing.py` dispatches it to the desktop workstation (`Track A` via HTTP) where full test suites, compilers, and isolated git worktrees live. If the workstation is offline, the task is safely queued in the `Auftragsbuch` (`Track B`) with an honest status explanation rather than pretending background work is running.
 
-> **Why the local Hermes coding integration is being phased out:**
-> I originally designed Track C during vacation as an ambitious experiment: *Can I build a completely standalone mobile coding harness on my phone, so I can engineer software while traveling without having my desktop PC turned on?*
+> **Note on the retired mobile Termux prototype:**
+> In an earlier development phase, an experimental branch attempted to spawn a local coding agent directly inside Termux on the phone (`Track C` via `tmux`). While I used Hermes directly from the Termux terminal for manual experimentation, running an autonomous coding daemon *through the agent web app* never worked reliably in practice (Android aggressively terminates background processes, battery drains rapidly, and phone hardware lacks the required build environment).
 > 
-> The real-world experience was a critical engineering lesson: while simple scripts run fine, running full autonomous coding loops locally on an Android phone hits hard operational limits — Android OS aggressively kills background Termux daemons to save power, battery drains rapidly, and complex projects lack the full desktop toolchains, compilers, and fast test matrices.
-> 
-> **The new architecture:**
-> Consequently, the local Hermes coding integration inside the phone app is being stepped down in favor of a much cleaner division of labor:
-> - **The PC remains the execution engine:** Heavy coding, tests, and git gates run where the compute lives.
-> - **The phone becomes the mobile cockpit:** The engineering chat is transitioning into a **universal Live Voice Mode** (hands-free full-duplex speech access to all tools) and an **MCP (Model Context Protocol) connection to OrbitDesk**, giving me a dedicated mobile Leitwarte (`OrbitView`) to monitor and steer the workstation fleet remotely.
+> That prototype has been retired from active use. The Personal AI Agent focuses entirely on its core role as an intelligent personal companion (**Live Voice Mode**, memory, personal tools), while engineering tasks are orchestrated from the workstation and will be monitored via the upcoming **OrbitDesk MCP integration**.
 
 ### 2. Multi-Round Tool Loop Harness (`werkzeug_schleife.py`, `werkzeuge.py`)
 `werkzeug_schleife.laufe()` implements a dependency-injected OpenAI-format streaming tool loop:
