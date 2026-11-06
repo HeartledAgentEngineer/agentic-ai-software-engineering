@@ -29,7 +29,7 @@ here**.
 ## Multi-Agent Ecosystem & Control Room (*Leitwarte*)
 
 Coming from industrial automation, I treat multi-agent software engineering like a **control room (*Leitwarte*)**:
-multiple specialized harnesses and frontier/cloud models operate under one tool-agnostic rule set (`AGENTS.md`),
+multiple specialized harnesses and frontier/cloud models operate under one tool-agnostic rule set ([`AGENTS.md`](agent-setup/AGENTS.md)),
 steered by **[OrbitDesk (Master-Schalter)](projects/master-schalter/)** and verified by **[Cross-model review](projects/cross-model-review/)** and automated gates.
 
 - **Agent harnesses:** **Claude Code** · **OpenAI Codex** (ChatGPT CLI & Desktop) · **Google Antigravity** · **Hermes** (open-source agent for private data and cost-controlled runs)

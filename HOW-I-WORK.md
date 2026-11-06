@@ -38,16 +38,16 @@ harness and by git:
 
 | Layer | Example | Effect |
 |---|---|---|
-| Rule file | one tool-agnostic core file (`AGENTS.md` in my active workspace, summarized here) read by every agent | describes what the agent *should* do |
+| Rule file | one tool-agnostic core file ([`agent-setup/AGENTS.md`](agent-setup/AGENTS.md), in German as in daily use) read by every agent | describes what the agent *should* do |
 | Permission settings | `deny` for private archives, `ask` for force pushes and package publishing, `allow` for git basics and check commands | enforced by the harness in every permission mode |
 | Pre-commit hook | runs the check commands for changed Python/Node projects when enabled (`git config core.hooksPath agent-setup/githooks`, using each project's `.venv` or local runtime, while CI runs the full matrix unconditionally); blocks commit identities that GitHub would attribute to a foreign account | applies to every agent and to me, because it is git, not an agent feature |
 
-One source for the rules, no copies: domain files in my workspace only reference the core file, so they cannot drift apart.
+One source for the rules, no copies: compiled via [`agent-setup/sync-rules.ps1`](agent-setup/sync-rules.ps1), domain files in my workspace only reference the core file, so they cannot drift apart.
 → [Agent setup](agent-setup/)
 
 ## 3. Planner, reviewer, workers — across harnesses and model families
 
-I do not lock my workflow to a single vendor or IDE. Instead, a single tool-agnostic rule set (`AGENTS.md`) and my control-room app **[OrbitDesk (Master-Schalter)](projects/master-schalter/)** (*Leitwarte*) coordinate several agent harnesses and model providers:
+I do not lock my workflow to a single vendor or IDE. Instead, a single tool-agnostic rule set ([`AGENTS.md`](agent-setup/AGENTS.md)) and my control-room app **[OrbitDesk (Master-Schalter)](projects/master-schalter/)** (*Leitwarte*) coordinate several agent harnesses and model providers:
 
 | Layer | Tools / Models in daily use | Purpose |
 |---|---|---|

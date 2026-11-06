@@ -5,6 +5,8 @@ They are written for Claude Code and kept tool-agnostic where possible. The text
 
 | Part | What it does | When it is used |
 |---|---|---|
+| [`AGENTS.md`](AGENTS.md) | the tool-agnostic master instruction file defining core rules: verification gates, code+docs, cross-model cascade, multi-agent collision protection, and privacy boundaries | read by every agent harness (Claude Code, Codex, Antigravity, Hermes) at session start |
+| [`sync-rules.ps1`](sync-rules.ps1) | rule compiler using OOP-style inheritance: compiles domain/project `CLAUDE.md` from local `CLAUDE_EXTENDS.md` pointing to `AGENTS.md` | whenever rules are updated, keeping a single source of truth without drift |
 | [`skills/fehlersuche`](skills/fehlersuche/SKILL.md) | root-cause debugging: find the cause before proposing a fix | every error, failed test or unexpected behaviour, especially when the fix looks obvious |
 | [`skills/grill-me`](skills/grill-me/SKILL.md) | the agent asks me questions until the goal is unambiguous, with a question catalogue and an alignment template | before planning, at design forks, when a wish could mean several things |
 | [`skills/critic`](skills/critic/SKILL.md) | independent second opinion from a model of another family; `pruefe.mjs` runs it, `review.py` and `protokoll-schema.json` keep the verdict machine-readable | before a slice is committed, for security-related or concurrent code |
