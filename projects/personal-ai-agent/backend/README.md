@@ -131,7 +131,7 @@ backend/
     - *(Note: Track C in the code was an early offline prototype for spawning a local Hermes process in Termux that was never used productively and has been stepped down).*
 - **[`app/services/modell_router.py`](app/services/modell_router.py)**
   - **`erkenne_kategorie(frage)`**: Classifies prompts into `BILDER`, `EMOTIONAL`, `ERINNERUNG`, `CODING`, `KOMPLEX`, `ALLTAG`, or `SCHNELL`.
-  - **`modell_fuer(kategorie, aktuelles_modell)`**: Maps categories to verified OpenRouter IDs (`MODELL_FLASH`, `MODELL_VISION`, `MODELL_CODING`, `MODELL_PRO`). Preserves manual user model selection except when an image task requires a vision-capable model (`ist_vision_faehig()`).
+  - **`modell_fuer(kategorie, aktuelles_modell)`**: Maps categories to OpenRouter models; in daily practice on the mobile agent, **DeepSeek V4.1 Flash** serves as the universal fast default, dynamically engaging **Gemini Flash** only when images are provided (`ist_vision_faehig()`). Heavy models are reserved for workstation development via OrbitDesk.
 
 #### Memory, Context, LLM & Privacy
 - **[`app/services/memory_service.py`](app/services/memory_service.py)**

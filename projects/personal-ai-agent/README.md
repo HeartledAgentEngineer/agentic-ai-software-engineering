@@ -26,30 +26,25 @@ Every message sent from the phone or desktop browser passes through four determi
 ```mermaid
 flowchart TB
     subgraph Client["📱 Mobile Browser / Desktop PWA (frontend/)"]
-        UI["Chat UI · Voice (AudioWorklet WAV) · Image Upload\nPWA frontend running on phone / desktop"]
+        UI["Chat UI · Live Voice · Photo & Story Views\nClean PWA running on phone / desktop"]
     end
 
     subgraph Security["🛡️ ASGI Security Perimeter (app/sicherheit.py & router/auth.py)"]
         SecMW["SicherheitsMiddleware\n• Host allowlist (Loopback, LAN, Tailscale 100.64.0.0/10)\n• Sec-Fetch-Site & Origin checks (blocks cross-site & DNS rebinding)\n• X-API-Key / HttpOnly Session Cookie + strict CSP/CORP"]
     end
 
-    subgraph Router["🔀 Chat & Boundary Router (router/chat.py & services/faehigkeiten.py)"]
-        Boundary{"Boundary Check\nstoesst_an_grenze() &\nist_auftrag()"}
+    subgraph Router["🔀 Capability Boundary Guard (services/faehigkeiten.py)"]
+        Boundary{"Boundary Check\nstoesst_an_grenze()"}
+        BoundaryOut["Boundary: Outside Scope\nRejects system/coding tasks or guides to PC Leitwarte (OrbitDesk)\nNo shell/git/system access on device"]
     end
 
-    subgraph Workstation["💻 Workstation Delegation (services/chat_routing.py)"]
-        PC["PC Engineering Gateway\nDirect HTTP call to workstation in WLAN/Tailnet"]
-        Queue["Auftragsbuch (Task Queue)\nQueued for later execution if workstation is offline"]
-        PC -.->|Offline| Queue
-    end
-
-    subgraph AgentCore["🧠 Personal Agent Core (services/)"]
-        ModRouter["Model Router (modell_router.py)\nSelects cheapest capable model:\nemotional/alltag/erinnerung → DeepSeek V4 Flash\nbilder → Gemini Flash (Vision)\ncoding → Claude Sonnet · komplex → DeepSeek Pro"]
+    subgraph AgentCore["🧠 Personal Agent Core"]
+        Model["Language & Vision Models (via OpenRouter)\n• Text, Reasoning & Tools: DeepSeek V4.1 Flash (daily workhorse)\n• Multimodal / Vision: Gemini Flash for images"]
         Context["Context & Memory (memory_service.py & kontext_service.py)\n• Top-K semantic + keyword memory retrieval (k=8)\n• Temporal boost for upcoming events, gentle decay >90d\n• Hybrid archive snippet injection"]
         ToolLoop["Tool Loop Harness (werkzeug_schleife.py)\nStreams LLM deltas, filters <｜DSML｜> markup,\nexecutes up to 5 tool rounds (max 4 calls/round),\nforces final answer via tool_choice='none'"]
     end
 
-    subgraph Tools["🔧 Registered Agent Tools (services/werkzeuge.py)"]
+    subgraph Tools["🔧 Registered Personal Tools (services/werkzeuge.py)"]
         ReadTools["Read & Lookup Tools (10)\ndateien_suchen · datei_ansehen · archiv_suchen\nnotizen_suchen · erinnerungen_suchen\nfotos_uebersicht · fotos_mit_person\npersonen_liste · person_auskunft · wer_war_wann"]
         WebTool["Privacy-Guarded Web Search\nweb_suche + websuche_schutz.py\n(blocks private contact/person names before leaving device)"]
         WriteTools["Direct Data-Care Tools (4)\nerinnerung_speichern · erinnerung_loeschen\nperson_profil_aendern · notiz_speichern"]
@@ -57,9 +52,9 @@ flowchart TB
 
     UI -->|"POST /api/chat/stream (SSE)"| SecMW
     SecMW --> Boundary
-    Boundary -->|"Needs terminal, git, repo edits,\npackages, Docker, or PLC"| PC
-    Boundary -->|"Conversational, memory, archive,\nphotos, web, or personal data care"| ModRouter
-    ModRouter --> Context
+    Boundary -->|"Needs terminal, git, repo edits,\npackages, Docker, or PLC"| BoundaryOut
+    Boundary -->|"Conversational, memory, archive,\nphotos, web, or personal data care"| Model
+    Model --> Context
     Context --> ToolLoop
     ToolLoop <--> ReadTools
     ToolLoop <--> WebTool
@@ -71,36 +66,35 @@ flowchart TB
 
 ## Core Engineering Mechanisms (Included in This Repo)
 
-### 1. Deterministic Capability Boundaries & Workstation Delegation (`faehigkeiten.py`, `chat_routing.py`)
+### 1. Deterministic Capability Boundaries (`faehigkeiten.py`)
 Instead of letting an LLM hallucinate that it executed a shell command or promising a tool it does not have, the backend evaluates a deterministic capability manifest (`FAEHIGKEITEN`) **before** calling the chat model:
 - **What the agent handles itself (`kann`)**: Dialog, long-term memory (`gedaechtnis`), direct personal data/contact updates (`daten_aendern`), web search (`websuche`), chat archive lookup (`archiv`), document/image analysis (`dokument_text`), face catalog updates (`gesichter_merken`), and voice I/O (`tts_stt`).
-- **What crosses the boundary (`kann_nicht` → Workstation)**: Terminal commands (`terminal`), repository file writes (`dateien_schreiben`), package installations (`tool_install`), `git` operations (`commit`/`push`/`pull`/`merge`), and system/Docker/PLC tasks (`system_zugriff`).
-- **Read vs. Write Disambiguation**: Pure read requests (`"lies meine Datei"`, `"was steht in"`, `"zeig mir"`) and personal data care (`"ändere den Geburtstag im Telefonbuch"`) are explicitly exempted in `stoesst_an_grenze()` so the agent answers them directly via its own tools instead of falsely delegating to a coding agent.
+- **What is strictly outside scope (`kann_nicht` → PC Workstation / OrbitDesk)**: Terminal commands (`terminal`), repository file writes (`dateien_schreiben`), package installations (`tool_install`), `git` operations (`commit`/`push`/`pull`/`merge`), and system/Docker/PLC tasks (`system_zugriff`).
+- **Read vs. Write Disambiguation**: Pure read requests (`"lies meine Datei"`, `"was steht in"`, `"zeig mir"`) and personal data care (`"ändere den Geburtstag im Telefonbuch"`) are explicitly exempted in `stoesst_an_grenze()` so the agent answers them directly via its own tools instead of rejecting them.
+- **Why engineering belongs on the workstation (retiring legacy chat_routing.py)**: An earlier version of this project included a legacy router (`chat_routing.py`) that attempted to dispatch coding tasks directly from the chat to an HTTP gateway or queue them in an `Auftragsbuch`. In daily practice, that approach proved obsolete: heavy engineering and multi-agent workflows are far more cleanly and securely orchestrated on the desktop workstation via **OrbitDesk**. The personal agent focuses strictly on personal assistance, voice interaction, and upcoming mobile telemetry through OrbitDesk MCP.
 
-#### Workstation Delegation & Architecture Clean-Up
-When an engineering task is detected, `chat_routing.py` dispatches it to the desktop workstation (`Track A` via HTTP) where full test suites, compilers, and isolated git worktrees live. If the workstation is offline, the task is safely queued in the `Auftragsbuch` (`Track B`) with an honest status explanation rather than pretending background work is running.
+### 2. Pragmatic Model Selection: DeepSeek V4.1 Flash & Gemini Flash
+While the codebase includes a generic model router, in daily production on the Personal AI Agent I intentionally do **not** route between expensive frontier models like Claude Sonnet or DeepSeek Pro:
+- **DeepSeek V4.1 Flash (via OpenRouter)** is my primary, consistent daily workhorse: it is fast, highly capable in German conversation, executes multi-turn tool calling reliably, and costs fractions of a cent.
+- **Gemini Flash (via OpenRouter)** is dynamically engaged only when multimodal tasks require vision (analyzing photos, documents, or screenshots).
+- Heavy reasoning, planning, and coding models (Claude Opus/Sonnet, GPT-6 Sol/Luna) are reserved for the workstation-based development environments governed by OrbitDesk.
 
-> **Note on the retired mobile Termux prototype:**
-> In an earlier development phase, an experimental branch attempted to spawn a local coding agent directly inside Termux on the phone (`Track C` via `tmux`). While I used Hermes directly from the Termux terminal for manual experimentation, running an autonomous coding daemon *through the agent web app* never worked reliably in practice (Android aggressively terminates background processes, battery drains rapidly, and phone hardware lacks the required build environment).
-> 
-> That prototype has been retired from active use. The Personal AI Agent focuses entirely on its core role as an intelligent personal companion (**Live Voice Mode**, memory, personal tools), while engineering tasks are orchestrated from the workstation and will be monitored via the upcoming **OrbitDesk MCP integration**.
-
-### 2. Multi-Round Tool Loop Harness (`werkzeug_schleife.py`, `werkzeuge.py`)
+### 3. Multi-Round Tool Loop Harness (`werkzeug_schleife.py`, `werkzeuge.py`)
 `werkzeug_schleife.laufe()` implements a dependency-injected OpenAI-format streaming tool loop:
 - **Streaming + Tool Collection**: Streams text tokens (`{"delta": ...}`) immediately to the UI while reassembling fragmented `tool_calls` and provider `reasoning_details` across chunks.
 - **DSML Markup Shield (`_DsmlFilter`)**: Some models occasionally leak raw tool-call syntax (`<｜DSML｜` or `<|DSML|`) as plain text. `_DsmlFilter` buffers suspicious prefixes at chunk boundaries and strips leaked markup before it can reach the user.
 - **Concrete Live Status Lines**: When the model invokes a tool, `werkzeuge.status_text(name, args)` generates a human-readable status with the actual arguments (e.g., `🔧 sucht Fotos mit einer Person (Person „Lena“) …` instead of a generic spinner).
 - **Bounded Execution & Invariant Check**: Caps execution at `MAX_RUNDEN = 5` (up to `MAX_AUFRUFE_JE_RUNDE = 4` tool calls and `MAX_BILDER_JE_RUNDE = 3` images per round), then forces a final synthesis call with `tool_choice="none"`. `pruefe_register()` enforces in CI that every schema offered to the model maps 1:1 to a callable handler in `REGISTER`.
 
-### 3. Long-Term Memory That Corrects Instead of Deleting (`memory_service.py`, `db/chroma_client.py`)
+### 4. Long-Term Memory That Corrects Instead of Deleting (`memory_service.py`, `db/chroma_client.py`)
 - **Duplicate vs. Correction Detection**: Naive similarity thresholds (>0.90) reject fact corrections because `"Mein Hund heißt Rex"` and `"Mein Hund heißt Max"` have >0.93 string similarity. `memory_service.py` compares the non-filler tokens (`FUELLWOERTER`): if only stop words differ, it skips the duplicate; if a substantive token (name, number, date) changed, it updates the active fact and appends the old version to the entry's `history` list. Nothing is ever overwritten destructively.
 - **Top-K Relevance & Temporal Ranking**: Instead of dumping all memories into every prompt, `retrieve_relevant_memories()` scores entries by cosine similarity (OpenRouter `text-embedding-3-small`) or keyword overlap, adds a temporal bonus for upcoming events (`TERMIN_BONUS_NAH = +0.30` within 14 days, `+0.15` within 60 days), and applies a gentle age discount after 90 days (`ALTER_FREI_TAGE = 90`, capped at `-0.10`) so old memories fade in priority without disappearing.
 
-### 4. Privacy-First Web Search & PII Shield (`websuche_schutz.py`, `llm_service.py`)
+### 5. Privacy-First Web Search & PII Shield (`websuche_schutz.py`, `llm_service.py`)
 - **Name Blacklist Before Network Egress (`websuche_schutz.py`)**: General topics, places, and public figures can be searched online, but **never people from my private life**. `bestand_bauen()` indexes known first/last names from the photo catalog and full multi-word names from the contact list (normalized for German umlauts `ä→ae`, `ß→ss`, and genitive `-s`). If `enthaelt_namen()` matches a query — unless explicitly authorized for a public namesake in the user's prompt via `freigaben()` — `web_suche.py` blocks the request before it leaves the phone.
 - **Pre-Flight PII Masking in Voice Polishing**: Dictated audio is transcribed via a 3-stage OpenRouter fallback chain (`microsoft/mai-transcribe-2` at 0.3% German WER → `mai-transcribe-1.5` → `openai/whisper-large-v3`) and polished by `gemini-2.5-flash` with `PIIShield` token substitution (`[PERSON_01]`, `[LOC_01]`).
 
-### 5. Security Found by Testing (`sicherheit.py`, `router/auth.py`)
+### 6. Security Found by Testing (`sicherheit.py`, `router/auth.py`)
 An automated security test revealed that `allow_origins=["*"]` combined with an unguarded config endpoint allowed any website opened in the phone's browser to read `http://127.0.0.1:8080` and extract the API key. `SicherheitsMiddleware` fixes this at the raw ASGI layer (without buffering SSE streams):
 - Rejects unknown `Host` headers (`HTTP 400`) to block DNS-rebinding attacks; allows only loopback (`127.0.0.1`, `::1`, `localhost`), RFC-1918 LAN IPs, Tailscale (`100.64.0.0/10`), and configured `ERLAUBTE_HOSTS`.
 - Rejects cross-origin browser requests (`Sec-Fetch-Site: cross-site` / `same-site` or foreign `Origin` → `HTTP 403`).
