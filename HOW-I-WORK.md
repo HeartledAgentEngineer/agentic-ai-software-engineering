@@ -42,7 +42,7 @@ harness and by git:
 | Permission settings | `deny` for private archives, `ask` for force pushes and package publishing, `allow` for git basics and check commands | enforced by the harness in every permission mode |
 | Pre-commit hook | runs the check commands for changed Python/Node projects when enabled (`git config core.hooksPath agent-setup/githooks`, using each project's `.venv` or local runtime, while CI runs the full matrix unconditionally); blocks commit identities that GitHub would attribute to a foreign account | applies to every agent and to me, because it is git, not an agent feature |
 
-One source for the rules, no copies: compiled via [`agent-setup/sync-rules.ps1`](agent-setup/sync-rules.ps1), domain files in my workspace only reference the core file, so they cannot drift apart.
+One source for the rules, no copies: [`agent-setup/AGENTS.md`](agent-setup/AGENTS.md) serves as the tool-agnostic single source of truth that every agent harness reads directly, so rules cannot drift apart.
 → [Agent setup](agent-setup/)
 
 ## 3. Planner, reviewer, workers — across harnesses and model families
@@ -119,6 +119,18 @@ sequenceDiagram
     R-->>P: Protocol shown to operator + URTEIL: FREI
     P->>G: Commit (code + docs) -> Pre-commit hook -> GitHub Actions CI
 ```
+
+### Evolution: From the Dual Engineering System to Multi-Agent Orchestration
+
+The roots of this structure go back to the **[Dual Engineering System](projects/concertify/docs/dual_engineering_system.md)** developed during Concertify. 
+
+At that time, I realized that AI coding quickly degrades into unmaintainable spaghetti code without strict architectural separation. The original concept operated with two complementary roles:
+1. **The Architect (Creation):** Enforced Clean Architecture, strict layering (`routes` → `services` → `domain` → `repositories` → `external`), no globals, and Constructor Dependency Injection so all business logic can be tested in isolation with fake repositories.
+2. **The Guardian (Verification):** Static and dynamic sanity checks, stopping architectural drift immediately, and enforcing 100% testability with unit tests before any code commit.
+
+Originally executed as a sequential 4-to-8 phase cycle (Brainstorming → Alignment/Plan → Implementation → Verification), this evolved into today's dynamic **Multi-Agent Cascade**:
+- The **Architect** evolved into the **Planner / Master** (system design) and decoupled **Worker agents** (scoped implementation in isolated worktrees).
+- The **Guardian** evolved into **automated Pre-Commit & CI Gates** (blocking regressions mechanically) combined with an independent **Reviewer / Critic** from a different model family.
 
 ## 4. Cross-model review
 

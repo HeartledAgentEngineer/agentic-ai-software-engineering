@@ -12,10 +12,7 @@ der Kernregeln — Änderungen nur hier.
 | Bereich | `01_IT-OT_Integration/CLAUDE.md`, `02_Softwareentwicklung_IT/CLAUDE.md` | sobald Dateien aus dem Bereich gelesen werden |
 | Projekt | z. B. `02_Softwareentwicklung_IT/typeFREE/CLAUDE.md` | sobald Dateien des Projekts gelesen werden |
 
-**Bereichs- und Projekt-`CLAUDE.md` erzeugt `sync-rules.ps1` aus der jeweiligen
-`CLAUDE_EXTENDS.md`.** Nicht von Hand bearbeiten — Änderungen gehen beim nächsten
-Lauf verloren. Stattdessen die `CLAUDE_EXTENDS.md` ändern und das Skript erneut
-ausführen.
+**Zentrale Vorgabe:** Die Kernregeln in dieser `AGENTS.md` gelten als maßgebliche Quelle für alle Werkzeuge ohne redundante Kopien. Lokale Projekt-Erweiterungen referenzieren die Basis direkt.
 
 ## Sprache
 

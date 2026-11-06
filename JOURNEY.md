@@ -41,15 +41,17 @@ Node.js ADS bridge to a 3D HMI in the browser, the bridge between my OT backgrou
   checked every result against the real system.
 - 🔗 Evidence: [Elevator digital twin](projects/elevator-digital-twin/)
 
-## April – July 2026 — First products of my own
+## April – July 2026 — First products & Origin of the Dual Engineering System
 
 - Moved to Claude and built my first apps on top of a model API.
 - **Concertify**: a Flask web app that builds concert playlists from setlists (Spotify and Ticketmaster APIs).
+  - 🔗 **Where the engineering methodology was born:** During Concertify, I realized that AI coding without architectural boundaries quickly collapses into spaghetti code. To solve this, I designed the **[Dual Engineering System](projects/concertify/docs/dual_engineering_system.md)**: splitting the process into two complementary roles — the *Architect* (Clean Architecture, strict layering, dependency injection) and the *Guardian* (static verification, no globals, 100% test isolation with fake repositories).
+  - This originally ran as a structured 4-to-8 phase cycle (Brainstorming → Alignment → Implementation → Verification) and served as the direct conceptual foundation for my later multi-agent system.
 - A hybrid-search **RAG knowledge base** (PostgreSQL + `pgvector`, Mistral `mistral-embed` & OCR): started as a hands-on exercise from an **Everlast AI** RAG tutorial in **n8n**, which I then rebuilt as a standalone Python pipeline to get away from paid n8n cloud nodes and keep chunking and Reciprocal Rank Fusion in code.
 - A declarative **document generator** (Word/PDF), and a small canvas game as a rapid-prototyping exercise.
 - May – June 2026: first look at Google Antigravity (Gemini) before I had a shared rule and gate system — without explicit guardrails, an autonomous IDE agent had too little control over what it touched, which pushed me to build tool-agnostic rules and hard verification gates first.
 - **What I learned:** speed is easy; keeping a project understandable after the third iteration is the real work.
-- 🔗 [Concertify](projects/concertify/) · [RAG knowledge base](projects/rag-knowledge-base/) ·
+- 🔗 [Concertify](projects/concertify/) · [Dual Engineering System](projects/concertify/docs/dual_engineering_system.md) · [RAG knowledge base](projects/rag-knowledge-base/) ·
   [Document automation](projects/document-automation/) · [Squirrel game](projects/squirrel-game/)
 
 ## July 2026 — A rule set instead of a prompt
