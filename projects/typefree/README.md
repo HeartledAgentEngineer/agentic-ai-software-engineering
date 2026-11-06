@@ -23,6 +23,16 @@ release → WAV in memory → speech-to-text → LLM clean-up → private clipbo
   back until the next block shows whether the sentence goes on.
 - **Tray icon** shows the state by colour (ready, recording, transcribing, cleaning up, error).
 
+## Demo in Action
+
+![typeFREE Tray & Dictation Demo](../../assets/demos/typefree-demo.gif)
+
+*System-wide dictation lifecycle shown above:*
+1. **Idle (Grey Icon):** typeFREE waits quietly in the Windows system tray.
+2. **Recording (Green Icon):** Hotkey pressed and held — live microphone capture into memory.
+3. **Transcribing & Clean-Up (Orange / Blue Icon):** Speech-to-text API call followed by LLM punctuation and filler removal.
+4. **Pasting at Cursor (Back to Grey):** Private clipboard paste directly into the active editor (`Notepad`).
+
 ## Decisions and lessons
 
 - **Microphone only while the key is held**, and released before the API call.

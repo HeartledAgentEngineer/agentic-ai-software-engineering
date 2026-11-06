@@ -25,8 +25,8 @@ Every message sent from the phone or desktop browser passes through four determi
 
 ```mermaid
 flowchart TB
-    subgraph Client["📱 Mobile Browser / Desktop PWA (frontend/)"]
-        UI["Chat UI · Live Voice · Photo & Story Views\nClean PWA running on phone / desktop"]
+    subgraph Client["📱 Installed Mobile App (PWA) / Desktop (frontend/)"]
+        UI["Installed Standalone App\nFull-screen native feel, voice recording, memory inspector\n(display: standalone, manifest.json, zero CDN frameworks)"]
     end
 
     subgraph Security["🛡️ ASGI Security Perimeter (app/sicherheit.py & router/auth.py)"]
