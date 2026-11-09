@@ -9,7 +9,7 @@ and Gemini APIs · pytest
 
 ## Architecture & Structure
 
-Concertify started in April 2026 as a fast-moving prototype and was structured into a **5-layer architecture** using the [Dual Engineering System](docs/dual_engineering_system.md) (an *Architect* role for clean boundaries and a *Guardian* role for risk and regression checks). At the project root sits only `app.py` (the Flask web entry point); all domain models, repositories, services, HTTP blueprints, and external API clients live in dedicated layers:
+Concertify started in April 2026 as a fast-moving prototype and is being migrated to a **5-layer architecture** using the [Dual Engineering System](docs/dual_engineering_system.md) (an *Architect* role for clean boundaries and a *Guardian* role for risk and regression checks). The migration is unfinished: `app.py` still holds 66 of the 76 routes and 6 `global` statements. At the project root sits only `app.py` (the Flask web entry point); all domain models, repositories, services, HTTP blueprints, and external API clients live in dedicated layers:
 
 | Layer | Folder | Responsibility |
 |---|---|---|

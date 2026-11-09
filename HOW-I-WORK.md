@@ -125,8 +125,10 @@ sequenceDiagram
 The roots of this structure go back to the **[Dual Engineering System](projects/concertify/docs/dual_engineering_system.md)** developed during Concertify. 
 
 At that time, I realized that AI coding quickly degrades into unmaintainable spaghetti code without strict architectural separation. The original concept operated with two complementary roles:
-1. **The Architect (Creation):** Enforced Clean Architecture, strict layering (`routes` → `services` → `domain` → `repositories` → `external`), no globals, and Constructor Dependency Injection so all business logic can be tested in isolation with fake repositories.
-2. **The Guardian (Verification):** Static and dynamic sanity checks, stopping architectural drift immediately, and enforcing 100% testability with unit tests before any code commit.
+1. **The Architect (Creation):** Aimed for Clean Architecture, strict layering (`routes` → `services` → `domain` → `repositories` → `external`), no globals, and Constructor Dependency Injection so business logic can be tested in isolation with fake repositories.
+2. **The Guardian (Verification):** Static and dynamic sanity checks to catch architectural drift early, and unit tests before a commit.
+
+These were targets, not the finished state: Concertify's `app.py` still holds 66 of its 76 routes and 6 `global` statements, so that migration is unfinished.
 
 Originally executed as a sequential 4-to-8 phase cycle (Brainstorming → Alignment/Plan → Implementation → Verification), this evolved into today's dynamic **Multi-Agent Cascade**:
 - The **Architect** evolved into the **Planner / Master** (system design) and decoupled **Worker agents** (scoped implementation in isolated worktrees).
