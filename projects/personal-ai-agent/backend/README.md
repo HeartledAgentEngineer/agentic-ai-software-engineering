@@ -2,7 +2,7 @@
 
 This directory contains the FastAPI backend of the Personal AI Agent. It is designed to run inside **Termux on Android** (`serve.py` / `uvicorn app.main:app --port 8080`) as well as on a desktop workstation.
 
-Because this repository is a privacy-safe architectural excerpt of my daily-driver assistant, private data connectors (raw photo/face stores, WhatsApp SQLite importers, pCloud credentials) are omitted. All core orchestration, routing, tool execution, memory, and security modules are included in full and covered by **53 offline unit tests**.
+Because this repository is a privacy-safe architectural excerpt of my daily-driver assistant, private data connectors (raw photo/face stores, WhatsApp SQLite importers, pCloud credentials) are omitted. All core orchestration, routing, tool execution, memory, and security modules are included in full and covered by **57 offline unit tests**.
 
 ---
 
