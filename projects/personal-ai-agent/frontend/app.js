@@ -6018,7 +6018,7 @@ function macheQuizLabel(text) {
 // Befund der Betreiber 2026-09-25 (sinngemäß): "Wenn ich eine Person suche, soll er
 // ja durch so eine Antwortauswahl kommen mit den Accounts. Den finde ich nicht.
 // Das passiert nicht. Nur bei einigen Personen. Personen sollen auftauchen —
-// nicht Daniel ausblenden."
+// nicht die Person ausblenden."
 // Ursache: die drei Suchfelder (Gruppenbild / selbst gezogener Rahmen /
 // Einzelbild) wurden NUR mit den Kandidaten der laufenden Runde gefüttert — die
 // Namen des Personenkatalogs kamen dort nie an.
