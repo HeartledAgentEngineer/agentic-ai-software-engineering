@@ -163,5 +163,6 @@ pytest -q tests    # 57 passed
 | [`tests/test_faehigkeiten_prompt.py`](tests/test_faehigkeiten_prompt.py) | System prompt capability block generation (`faehigkeits_block()`) and honesty rules |
 | [`tests/test_gedaechtnis_qualitaet.py`](tests/test_gedaechtnis_qualitaet.py) | Memory deduplication vs. fact correction (`history` preservation), temporal event boosting, gentle decay after 90 days, and Top-K selection |
 | [`tests/test_chat_verlauf_service.py`](tests/test_chat_verlauf_service.py) | Conversation persistence, atomic writes, backup recovery on corrupted JSON, and append-only invariants |
+| [`tests/test_auth_kein_url_schluessel.py`](tests/test_auth_kein_url_schluessel.py) | The API key is accepted only in the `X-API-Key` header: `?key=` and `?token=` return 401, as does a request without a key |
 
 ← [Back to Personal AI Agent overview](../README.md)
