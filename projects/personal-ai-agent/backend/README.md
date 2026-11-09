@@ -2,7 +2,7 @@
 
 This directory contains the FastAPI backend of the Personal AI Agent. It is designed to run inside **Termux on Android** (`serve.py` / `uvicorn app.main:app --port 8080`) as well as on a desktop workstation.
 
-Because this repository is a privacy-safe architectural excerpt of my daily-driver assistant, private data connectors (raw photo/face stores, WhatsApp SQLite importers, pCloud credentials) are omitted. All core orchestration, routing, tool execution, memory, and security modules are included in full and covered by **53 offline unit tests**.
+Because this repository is a privacy-safe architectural excerpt of my daily-driver assistant, private data connectors (raw photo/face stores, WhatsApp SQLite importers, pCloud credentials) are omitted. All core orchestration, routing, tool execution, memory, and security modules are included in full and covered by **57 offline unit tests**.
 
 ---
 
@@ -43,7 +43,7 @@ backend/
 │       ├── web_suche.py            # Web search wrapper enforcing websuche_schutz before network calls
 │       ├── sse.py                  # Server-Sent Events serializer & live Hermes job stream multiplexer
 │       └── protokoll.py            # Rotating server log buffer for mobile inspection
-└── tests/                          # 53 unit tests (capabilities, edge cases, prompt rules, memory, history)
+└── tests/                          # 57 unit tests (capabilities, edge cases, prompt rules, memory, history)
 ```
 
 ---
@@ -153,7 +153,7 @@ backend/
 From inside `backend/`:
 
 ```powershell
-pytest -q tests    # 53 passed
+pytest -q tests    # 57 passed
 ```
 
 | Test File | What It Verifies |
@@ -163,5 +163,6 @@ pytest -q tests    # 53 passed
 | [`tests/test_faehigkeiten_prompt.py`](tests/test_faehigkeiten_prompt.py) | System prompt capability block generation (`faehigkeits_block()`) and honesty rules |
 | [`tests/test_gedaechtnis_qualitaet.py`](tests/test_gedaechtnis_qualitaet.py) | Memory deduplication vs. fact correction (`history` preservation), temporal event boosting, gentle decay after 90 days, and Top-K selection |
 | [`tests/test_chat_verlauf_service.py`](tests/test_chat_verlauf_service.py) | Conversation persistence, atomic writes, backup recovery on corrupted JSON, and append-only invariants |
+| [`tests/test_auth_kein_url_schluessel.py`](tests/test_auth_kein_url_schluessel.py) | The API key is accepted only in the `X-API-Key` header: `?key=` and `?token=` return 401, as does a request without a key |
 
 ← [Back to Personal AI Agent overview](../README.md)

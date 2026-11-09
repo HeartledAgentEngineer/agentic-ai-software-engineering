@@ -70,7 +70,7 @@ flowchart TB
 | [Cross-model review](projects/cross-model-review/) | Review loop: a plan or result is checked by a fresh run of another model family; the verdict is a machine-readable line, the protocol is shown to me | Python, Codex CLI, Hermes | In daily use |
 | [Personal AI agent](projects/personal-ai-agent/) | Personal assistant on Android: chat, long-term memory, tool calls, coding-agent routing | Python, FastAPI, web frontend, Termux | In daily use |
 | [typeFREE](projects/typefree/) | System-wide dictation tool for Windows with selectable speech-to-text providers and text clean-up | Python, keyboard hooks, pytest | In daily use |
-| [Concertify](projects/concertify/) | Web app that builds concert playlists from live setlists, evolved into a 5-layer architecture | Python, Flask, SQLite, Server-Sent Events, Spotify / Ticketmaster APIs | Working prototype |
+| [Concertify](projects/concertify/) | Web app that builds concert playlists from live setlists; migration from prototype to a 5-layer architecture in progress (10 of 76 routes moved) | Python, Flask, SQLite, Server-Sent Events, Spotify / Ticketmaster APIs | Working prototype |
 | [RAG knowledge base](projects/rag-knowledge-base/) | Semantic knowledge base with hybrid search (vector + full-text reciprocal rank fusion) | Python, FastAPI, PostgreSQL + pgvector, Mistral / Gemini | Working prototype |
 | [Document automation](projects/document-automation/) | Data-driven CV generator: JSON → validated, escaped HTML → A4 PDF, plus PDF merging | Node.js, Puppeteer, pdf-lib, node:test | Stable local tool |
 | [Elevator digital twin](projects/elevator-digital-twin/) | Real TwinCAT 3 PLC logic driving a simulated elevator with a 3D HMI in the browser (hardware-in-the-loop) | Structured Text, Node.js ADS bridge, WebSockets, Three.js | Working prototype |
@@ -110,11 +110,11 @@ Every push to `main`, pull request, and manual workflow dispatch runs [CI](.gith
 |---|---|---|---|
 | OrbitDesk (Master-Schalter) | 2,043 pytest tests (+ 1 skipped) | yes (Windows) | tray/UI interactions use fakes in headless test runs |
 | typeFREE | 659 pytest tests (658 passed, 1 skipped on CI) | yes (Windows) | hotkeys and audio are mocked; real devices are tested by hand |
-| Concertify | 193 pytest tests (+ 2 skipped) | yes (Linux) | external APIs are stubbed |
-| Personal AI agent | 53 pytest tests | yes (Linux) | this is an excerpt; the full private suite is larger and not published |
+| Concertify | 193 pytest tests (+ 2 skipped) | yes (Linux) | external APIs are stubbed; `app.py` still holds 66 of 76 routes and 6 `global` statements |
+| Personal AI agent | 57 pytest tests | yes (Linux) | this is an excerpt; the full private suite is larger and not published |
 | Cross-model review | 96 pytest tests | yes (Linux) | CLI agents are replaced by stand-ins; real review runs are logged in protocols |
 | RAG knowledge base | 13 pytest tests (chunking + query path with fakes) | yes (Linux) | ingestion (`ingest.py`) and the real database are not tested; `test_embeddings.py` is a manual check against the live API |
-| Document automation | 11 node:test tests (CV data model, HTML rendering, PDF merge error paths) | yes (Linux) | the browser PDF print step (Puppeteer) is checked by hand |
+| Document automation | 11 node:test tests (CV data model, HTML rendering, PDF merge error paths) | yes (Linux) | the browser PDF print step (Puppeteer) is checked by hand; `npm audit` reports 10 high-severity advisories, all through Puppeteer 21 (fix needs the major upgrade to 25, still open) |
 | University foundations (C, 2020) | 12 checks in C against the unchanged 2020 code | yes (Windows, clang) | two of the checks pin known bugs on purpose; see the review |
 | Elevator digital twin | — | JS syntax only (ADS bridge) | PLC logic needs the TwinCAT runtime and is checked by hand there, not in CI |
 | Squirrel game | — | no | single HTML file with inline script, not covered by the JS check |
