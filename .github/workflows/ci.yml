@@ -122,6 +122,9 @@ jobs:
         run: |
           find projects -name '*.js' -not -path '*/node_modules/*' -print0 \
             | xargs -0 -n1 node --check
-      - name: Tests · document-automation (node:test, no install needed)
+      - name: Lockfile in sync · document-automation (no install scripts)
+        working-directory: projects/document-automation
+        run: npm ci --ignore-scripts
+      - name: Tests · document-automation (node:test)
         working-directory: projects/document-automation
         run: node --test

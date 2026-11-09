@@ -114,7 +114,7 @@ Every push to `main`, pull request, and manual workflow dispatch runs [CI](.gith
 | Personal AI agent | 57 pytest tests | yes (Linux) | this is an excerpt; the full private suite is larger and not published |
 | Cross-model review | 96 pytest tests | yes (Linux) | CLI agents are replaced by stand-ins; real review runs are logged in protocols |
 | RAG knowledge base | 13 pytest tests (chunking + query path with fakes) | yes (Linux) | ingestion (`ingest.py`) and the real database are not tested; `test_embeddings.py` is a manual check against the live API |
-| Document automation | 11 node:test tests (CV data model, HTML rendering, PDF merge error paths) | yes (Linux) | the browser PDF print step (Puppeteer) is checked by hand |
+| Document automation | 11 node:test tests (CV data model, HTML rendering, PDF merge error paths) | yes (Linux) | the browser PDF print step (Puppeteer) is checked by hand; `npm audit` reports 10 high-severity advisories, all through Puppeteer 21 (fix needs the major upgrade to 25, still open) |
 | University foundations (C, 2020) | 12 checks in C against the unchanged 2020 code | yes (Windows, clang) | two of the checks pin known bugs on purpose; see the review |
 | Elevator digital twin | — | JS syntax only (ADS bridge) | PLC logic needs the TwinCAT runtime and is checked by hand there, not in CI |
 | Squirrel game | — | no | single HTML file with inline script, not covered by the JS check |
