@@ -39,7 +39,7 @@ harness and by git:
 | Layer | Example | Effect |
 |---|---|---|
 | Rule file | one tool-agnostic core file ([`agent-setup/AGENTS.md`](agent-setup/AGENTS.md), in German as in daily use) read by every agent | describes what the agent *should* do |
-| Permission settings | `deny` for private archives, `ask` for force pushes and package publishing, `allow` for git basics and check commands | enforced by the harness in every permission mode |
+| Permission settings | `deny` for private archives, `ask` for force pushes and package publishing, `allow` for git basics and check commands ([sanitized example](agent-setup/settings.example.json)) | enforced by the harness in every permission mode |
 | Pre-commit hook | runs the check commands for changed Python/Node projects when enabled (`git config core.hooksPath agent-setup/githooks`, using each project's `.venv` or local runtime, while CI runs the full matrix unconditionally); blocks commit identities that GitHub would attribute to a foreign account | applies to every agent and to me, because it is git, not an agent feature |
 
 One source for the rules, no copies: [`agent-setup/AGENTS.md`](agent-setup/AGENTS.md) serves as the tool-agnostic single source of truth that every agent harness reads directly, so rules cannot drift apart.

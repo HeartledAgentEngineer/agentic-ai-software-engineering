@@ -12,6 +12,7 @@ They are written for Claude Code and kept tool-agnostic where possible. The text
 | [`skills/critic`](skills/critic/SKILL.md) | independent second opinion from a model of another family; `pruefe.mjs` runs it, `review.py` and `protokoll-schema.json` keep the verdict machine-readable | before a slice is committed, for security-related or concurrent code |
 | [`agents/tester`](agents/tester.md) | runs the project's check command and reports only the result | testing and after refactoring, so test logs stay out of the main context |
 | [`agents/rechercheur`](agents/rechercheur.md) | searches the workspace and returns only the finding | before a search would pull many files into the main context |
+| [`settings.example.json`](settings.example.json) | my Claude Code permission rules (allow / ask / deny) as a sanitized example: the two private deny paths are replaced by placeholders | copy to `.claude/settings.json` and adapt the deny paths |
 | [`githooks/pre-commit`](githooks/pre-commit) | no commit without a green check command for the touched project (`git config core.hooksPath agent-setup/githooks`); blocks author addresses that GitHub would assign to a foreign account | every commit once the hook path is configured |
 
 ## Staging & Synchronization Workflow

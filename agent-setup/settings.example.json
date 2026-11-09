@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(node .claude/skills/critic/pruefe.mjs:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(PYTHONPATH=. python -m pytest:*)",
+      "Bash(npm test:*)"
+    ],
+    "ask": [
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push --force-with-lease:*)",
+      "Bash(git push * --force*)",
+      "Bash(git push * -f *)",
+      "Bash(git push * +*)",
+      "Bash(npm publish:*)",
+      "Bash(docker push:*)"
+    ],
+    "deny": [
+      "Read(./private-archive/**)",
+      "Edit(./private-archive/**)",
+      "Read(~/private-index/**)",
+      "Edit(~/private-index/**)"
+    ]
+  }
+}
