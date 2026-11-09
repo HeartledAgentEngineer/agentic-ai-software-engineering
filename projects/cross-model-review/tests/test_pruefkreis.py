@@ -754,3 +754,26 @@ def test_wahl_ohne_pruefer_waehlen_parameter_bleibt_kompatibel(pk):
     assert pk.pruefer_waehlen("hermes", False, "claude", "codex") == "hermes"
     with pytest.raises(pk.PruefkreisFehler, match="Unbekannte Prueferwahl"):
         pk.pruefer_waehlen(None, False, "claude", "gpt")
+
+
+HILFSPROZESS = ("import subprocess, sys\n"
+                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(8)'], "
+                "stdout=sys.stdout, stderr=sys.stderr)\n")
+
+
+def test_starte_wartet_nicht_auf_zurueckgelassene_hilfsprozesse(pk):
+    """Ein Pruefer endet, sein Hilfsprozess haelt die Ausgabe offen: Das Ergebnis muss trotzdem sofort da sein."""
+    import sys
+    beginn = time.monotonic()
+    code, aus, _ = pk.starte([sys.executable, "-c", HILFSPROZESS + "print('fertig', flush=True)\n"], zeitgrenze=30)
+    assert code == 0 and "fertig" in aus
+    assert time.monotonic() - beginn < 5
+
+
+def test_starte_haelt_die_zeitgrenze_trotz_hilfsprozess_ein(pk):
+    """Laeuft der Pruefer in die Zeitgrenze, darf ein Hilfsprozess das Ende nicht verzoegern."""
+    import sys
+    beginn = time.monotonic()
+    code, _, _ = pk.starte([sys.executable, "-c", HILFSPROZESS + "import time; time.sleep(30)\n"], zeitgrenze=1)
+    assert code == -1
+    assert time.monotonic() - beginn < 5
