@@ -4,7 +4,7 @@ My personal assistant and the largest software system in this portfolio. It runs
 
 > **Why this folder is an architectural excerpt:**
 > Everything that touches personal data stays strictly in my private workspace: photo and face-recognition pipelines, WhatsApp/chat archive imports, pCloud storage clients, daily well-being logs, and live handovers. Names in examples and unit tests are fictional.
-> This repository contains the **complete architectural core** (chat router, multi-round tool harness, workstation delegation router, task-based model router, correction-preserving memory service, privacy guards, ASGI security middleware, and PWA frontend) along with **53 offline unit tests** that run in CI without private data or API keys.
+> This repository contains the **complete architectural core** (chat router, multi-round tool harness, workstation delegation router, task-based model router, correction-preserving memory service, privacy guards, ASGI security middleware, and PWA frontend) along with **57 offline unit tests** that run in CI without private data or API keys.
 
 **Stack:** Python 3.12 · FastAPI · Raw ASGI Security Middleware · Server-Sent Events (SSE) · OpenRouter (DeepSeek V4 Flash/Pro, Gemini Flash, Claude Sonnet, MAI-Transcribe-2, Whisper Large v3) · SQLite (FTS5 + vectors) · Vanilla JS PWA · Termux & tmux · pytest
 
@@ -120,12 +120,12 @@ In daily production on my phone and PC, `app/main.py` mounts 26 routers. Alongsi
 
 ## Run the Included Unit Tests
 
-All 53 unit tests included in this portfolio excerpt run offline (using dependency injection and temporary directories, with zero network calls):
+All 57 unit tests included in this portfolio excerpt run offline (using dependency injection and temporary directories, with zero network calls):
 
 ```powershell
 cd backend
 pip install -r requirements.txt -r requirements-dev.txt
-pytest -q tests    # 53 passed
+pytest -q tests    # 57 passed
 ```
 
 The source code, identifiers, and docstrings are written in German, matching my daily engineering environment.

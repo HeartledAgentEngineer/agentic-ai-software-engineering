@@ -43,7 +43,7 @@ backend/
 │       ├── web_suche.py            # Web search wrapper enforcing websuche_schutz before network calls
 │       ├── sse.py                  # Server-Sent Events serializer & live Hermes job stream multiplexer
 │       └── protokoll.py            # Rotating server log buffer for mobile inspection
-└── tests/                          # 53 unit tests (capabilities, edge cases, prompt rules, memory, history)
+└── tests/                          # 57 unit tests (capabilities, edge cases, prompt rules, memory, history)
 ```
 
 ---
@@ -153,7 +153,7 @@ backend/
 From inside `backend/`:
 
 ```powershell
-pytest -q tests    # 53 passed
+pytest -q tests    # 57 passed
 ```
 
 | Test File | What It Verifies |
