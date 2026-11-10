@@ -58,6 +58,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -265,6 +266,11 @@ def _baum_beenden(prozess: subprocess.Popen) -> None:
                            stderr=subprocess.DEVNULL, timeout=15, check=False)
         except (OSError, subprocess.TimeoutExpired):
             pass
+    else:
+        try:
+            os.killpg(prozess.pid, signal.SIGKILL)   # eigene Prozessgruppe, siehe start_new_session
+        except OSError:
+            pass
     try:
         prozess.kill()
         prozess.wait(timeout=5)
@@ -283,7 +289,8 @@ def starte(befehl: list[str], zeitgrenze: float) -> tuple[int, str, str]:
         aus_datei, err_datei = Path(ordner) / "stdout.txt", Path(ordner) / "stderr.txt"
         try:
             with open(aus_datei, "wb") as aus, open(err_datei, "wb") as err:
-                prozess = subprocess.Popen(befehl, cwd=str(REPO), stdin=subprocess.DEVNULL, stdout=aus, stderr=err)
+                prozess = subprocess.Popen(befehl, cwd=str(REPO), stdin=subprocess.DEVNULL, stdout=aus, stderr=err,
+                                           start_new_session=os.name != "nt")
         except OSError as fehler:
             return -2, "", str(fehler)
         try:

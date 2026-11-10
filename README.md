@@ -112,7 +112,7 @@ Every push to `main`, pull request, and manual workflow dispatch runs [CI](.gith
 | typeFREE | 659 pytest tests (658 passed, 1 skipped on CI) | yes (Windows) | hotkeys and audio are mocked; real devices are tested by hand |
 | Concertify | 193 pytest tests (+ 2 skipped) | yes (Linux) | external APIs are stubbed; `app.py` still holds 66 of 76 routes and 6 `global` statements |
 | Personal AI agent | 57 pytest tests | yes (Linux) | this is an excerpt; the full private suite is larger and not published |
-| Cross-model review | 98 pytest tests | yes (Linux) | CLI agents are replaced by stand-ins; real review runs are logged in protocols |
+| Cross-model review | 99 pytest tests | yes (Linux) | CLI agents are replaced by stand-ins; real review runs are logged in protocols |
 | RAG knowledge base | 13 pytest tests (chunking + query path with fakes) | yes (Linux) | ingestion (`ingest.py`) and the real database are not tested; `test_embeddings.py` is a manual check against the live API |
 | Document automation | 11 node:test tests (CV data model, HTML rendering, PDF merge error paths) | yes (Linux) | the browser PDF print step (Puppeteer) is checked by hand; `npm audit` reports 10 high-severity advisories, all through Puppeteer 21 (fix needs the major upgrade to 25, still open) |
 | University foundations (C, 2020) | 12 checks in C against the unchanged 2020 code | yes (Windows, clang) | two of the checks pin known bugs on purpose; see the review |
