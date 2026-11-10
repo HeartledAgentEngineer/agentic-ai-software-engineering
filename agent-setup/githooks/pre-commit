@@ -99,14 +99,14 @@ if hat_code "$P_CONCERTIFY"; then
     fi
 fi
 
-P_SCHALTER="projects/master-schalter"
+P_SCHALTER="projects/orbitdesk"
 if hat_code "$P_SCHALTER"; then
     PY="$P_SCHALTER/.venv/Scripts/python.exe"
     if [[ -x "$PY" ]]; then
-        run_gate "master-schalter" "$P_SCHALTER" \
+        run_gate "orbitdesk" "$P_SCHALTER" \
             "./.venv/Scripts/python.exe -m pytest -q"
     else
-        echo "  ⚠ master-schalter: venv fehlt ($PY) — kein Gate möglich"
+        echo "  ⚠ orbitdesk: venv fehlt ($PY) — kein Gate möglich"
     fi
 fi
 

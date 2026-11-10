@@ -98,7 +98,7 @@ Node.js ADS bridge to a 3D HMI in the browser, the bridge between my OT backgrou
 - Passed **Microsoft AZ-900** (Azure Fundamentals) and **AI-901** (Azure AI Fundamentals).
 - **What I learned:** autonomy needs transparency. The more an agent does on its own, the more important it is
   that every step is visible and reversible.
-- 🔗 [OrbitDesk (Master-Schalter)](projects/master-schalter/) · [Cross-model review](projects/cross-model-review/)
+- 🔗 [OrbitDesk](projects/orbitdesk/) · [Cross-model review](projects/cross-model-review/)
 
 ## November 2026 — Multi-harness orchestration, cloud agents & the hybrid Leitwarte
 
