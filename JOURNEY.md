@@ -108,9 +108,10 @@ Node.js ADS bridge to a 3D HMI in the browser, the bridge between my OT backgrou
   - **Smartphone as the mobile control cockpit:** replacing clumsy mobile coding terminals with a **universal Live Voice Mode** (full-duplex Web Audio / WebSocket, hands-free interaction across all tools) and building **OrbitView** — an **MCP (Model Context Protocol)** server and responsive mobile frontend for OrbitDesk that lets me monitor subscription quotas, topic ownership locks, and agent transitions on the go from any browser, Telegram, or mobile agent client.
 - Connected **Microsoft Foundry** models directly to **Hermes** (using the 30-day / \$200 Azure Foundry trial) to test enterprise model deployments, privacy-scoped routing, and cross-family review/worker runs hands-on alongside **OpenRouter** (DeepSeek V4.1 Flash) and frontier models.
 - Working through **Microsoft AI-103** (*Developing AI Apps and Agents on Azure*): building with **Microsoft Foundry** and the **Azure AI Agent Service** (stateful threads, Code Interpreter, File Search, custom tool calls, RAG, Model Context Protocol / MCP, and multi-agent orchestration), alongside privacy-first routing concepts (GDPR / Zero Data Retention) and token cost control.
+- **readFREE**, the counterpart to typeFREE: select text anywhere, press a key, listen. With four or five agent chats running in parallel, the stream of text to read became the bottleneck; moving part of it to the ears gives the eyes a break.
 - Hardened this portfolio for release: automated secret scanning (Gitleaks), CI test matrices across Windows and Linux, and strict data-privacy / PII checks before publication.
 - **What I learned:** whether in industrial PLCs or cloud agent pipelines, reliability comes from explicit state boundaries, deterministic checks, and knowing exactly where data goes.
-- 🔗 [Agent setup](agent-setup/) · [CI workflow](.github/workflows/ci.yml) · [Security policy](SECURITY.md)
+- 🔗 [readFREE](projects/readfree/) · [Agent setup](agent-setup/) · [CI workflow](.github/workflows/ci.yml) · [Security policy](SECURITY.md)
 
 ---
 
