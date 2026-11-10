@@ -7,7 +7,7 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "ads-client": "^1.14.0",
+    "ads-client": "^2.2.0",
     "ws": "^8.21.3"
   }
 }
