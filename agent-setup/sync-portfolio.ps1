@@ -57,7 +57,7 @@ Write-Host ""
 $Whitelist = @(
     "projects/concertify",
     "projects/personal-ai-agent",
-    "projects/master-schalter",
+    "projects/orbitdesk",
     "projects/typefree",
     "projects/cross-model-review",
     "agent-setup",

@@ -7,7 +7,7 @@ updates:
       interval: monthly
   - package-ecosystem: pip
     directories:
-      - /projects/master-schalter
+      - /projects/orbitdesk
       - /projects/typefree/windows
       - /projects/concertify
       - /projects/personal-ai-agent/backend
