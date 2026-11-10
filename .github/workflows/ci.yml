@@ -94,6 +94,19 @@ jobs:
       - run: ${{ matrix.install }}
       - run: ${{ matrix.test }}
 
+  shotreader:
+    name: ShotReader · PowerShell self-test
+    needs: secrets
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: projects/shotreader
+    steps:
+      - uses: actions/checkout@v6
+      - name: Self-test (rules, fingerprint, local OCR and speech; no network)
+        shell: powershell
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\ShotReader.ps1 -Test
+
   c-university:
     name: C · university foundations (2020 code, characterization tests)
     needs: secrets
