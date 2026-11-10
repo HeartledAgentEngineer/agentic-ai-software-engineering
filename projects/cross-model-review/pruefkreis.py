@@ -58,6 +58,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -257,16 +258,48 @@ def befehl_hermes(programm: str, auftrag: str, nutzung: Path) -> list[str]:
             "-t", "file,todo", "--in", str(REPO)]
 
 
-def starte(befehl: list[str], zeitgrenze: float) -> tuple[int, str, str]:
-    """Pruefer-Prozess starten -> (Exit, stdout, stderr). Zeitgrenze => -1, Startfehler => -2."""
+def _baum_beenden(prozess: subprocess.Popen) -> None:
+    """Pruefer samt Unterprozessen beenden; ein bereits beendeter Prozess ist kein Fehler."""
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(prozess.pid)], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=15, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        try:
+            os.killpg(prozess.pid, signal.SIGKILL)   # eigene Prozessgruppe, siehe start_new_session
+        except OSError:
+            pass
     try:
-        lauf = subprocess.run(befehl, cwd=str(REPO), stdin=subprocess.DEVNULL, capture_output=True,
-                              text=True, encoding="utf-8", errors="replace", timeout=zeitgrenze)
-        return lauf.returncode, lauf.stdout or "", lauf.stderr or ""
-    except subprocess.TimeoutExpired:
-        return -1, "", ""
-    except OSError as fehler:
-        return -2, "", str(fehler)
+        prozess.kill()
+        prozess.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def starte(befehl: list[str], zeitgrenze: float) -> tuple[int, str, str]:
+    """Pruefer-Prozess starten -> (Exit, stdout, stderr). Zeitgrenze => -1, Startfehler => -2.
+
+    Die Ausgabe laeuft ueber temporaere Dateien statt Pipes: Laesst ein Pruefer einen Hilfsprozess zurueck,
+    der die Ausgabe geerbt hat, wuerde das Lesen einer Pipe bis zu dessen Ende blockieren, auch ueber die
+    Zeitgrenze hinaus.
+    """
+    with tempfile.TemporaryDirectory(prefix="pruefkreis-", ignore_cleanup_errors=True) as ordner:
+        aus_datei, err_datei = Path(ordner) / "stdout.txt", Path(ordner) / "stderr.txt"
+        try:
+            with open(aus_datei, "wb") as aus, open(err_datei, "wb") as err:
+                prozess = subprocess.Popen(befehl, cwd=str(REPO), stdin=subprocess.DEVNULL, stdout=aus, stderr=err,
+                                           start_new_session=os.name != "nt")
+        except OSError as fehler:
+            return -2, "", str(fehler)
+        try:
+            code = prozess.wait(timeout=zeitgrenze)
+        except subprocess.TimeoutExpired:
+            _baum_beenden(prozess)
+            return -1, "", ""
+        return (code, aus_datei.read_text(encoding="utf-8", errors="replace"),
+                err_datei.read_text(encoding="utf-8", errors="replace"))
 
 
 def fehlerzeile(stderr: str) -> str:

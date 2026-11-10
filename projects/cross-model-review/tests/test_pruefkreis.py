@@ -754,3 +754,57 @@ def test_wahl_ohne_pruefer_waehlen_parameter_bleibt_kompatibel(pk):
     assert pk.pruefer_waehlen("hermes", False, "claude", "codex") == "hermes"
     with pytest.raises(pk.PruefkreisFehler, match="Unbekannte Prueferwahl"):
         pk.pruefer_waehlen(None, False, "claude", "gpt")
+
+
+HILFSPROZESS = ("import subprocess, sys\n"
+                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(8)'], "
+                "stdout=sys.stdout, stderr=sys.stderr)\n")
+
+
+def test_starte_wartet_nicht_auf_zurueckgelassene_hilfsprozesse(pk):
+    """Ein Pruefer endet, sein Hilfsprozess haelt die Ausgabe offen: Das Ergebnis muss trotzdem sofort da sein."""
+    import sys
+    beginn = time.monotonic()
+    code, aus, _ = pk.starte([sys.executable, "-c", HILFSPROZESS + "print('fertig', flush=True)\n"], zeitgrenze=30)
+    assert code == 0 and "fertig" in aus
+    assert time.monotonic() - beginn < 5
+
+
+def test_starte_haelt_die_zeitgrenze_trotz_hilfsprozess_ein(pk):
+    """Laeuft der Pruefer in die Zeitgrenze, darf ein Hilfsprozess das Ende nicht verzoegern."""
+    import sys
+    beginn = time.monotonic()
+    code, _, _ = pk.starte([sys.executable, "-c", HILFSPROZESS + "import time; time.sleep(30)\n"], zeitgrenze=1)
+    assert code == -1
+    assert time.monotonic() - beginn < 5
+
+
+def _lebt(pid: int) -> bool:
+    import os
+    import subprocess
+    if os.name == "nt":
+        aus = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace").stdout or ""
+        return str(pid) in aus
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def test_zeitgrenze_beendet_auch_den_hilfsprozess(pk, tmp_path):
+    """Nach der Zeitgrenze darf kein Hilfsprozess des Pruefers weiterlaufen."""
+    import sys
+    pid_datei = tmp_path / "hilfsprozess.pid"
+    skript = ("import subprocess, sys\n"
+              "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+              f"open({str(pid_datei)!r}, 'w').write(str(p.pid))\n"
+              "import time; time.sleep(30)\n")
+    code, _, _ = pk.starte([sys.executable, "-c", skript], zeitgrenze=2)
+    assert code == -1
+    pid = int(pid_datei.read_text())
+    ende = time.monotonic() + 5
+    while _lebt(pid) and time.monotonic() < ende:
+        time.sleep(0.2)
+    assert not _lebt(pid)

@@ -38,4 +38,8 @@ python pruefkreis.py pruefen --vorlage <file> --thema <id> [--pruefer codex|herm
 
 For Codex reviews, `codex exec` runs inside its `--sandbox read-only` mode. For Hermes reviews, `pruefkreis.py` restricts the active toolset via `-t file,todo` alongside the read-only system instruction, and passes the model and provider explicitly (`-m deepseek/deepseek-v4.1-flash --provider openrouter`) instead of relying on the local Hermes profile. A kernel-level read-only filesystem sandbox for Hermes is not built yet.
 
+### Leftover helper processes
+
+Reviewer output goes to temporary files instead of pipes, so a helper process left behind by a reviewer cannot block the run, and the time limit ends the whole process tree.
+
 ← [Back to overview](../../README.md)
