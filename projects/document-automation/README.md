@@ -5,7 +5,7 @@ against simple rules, rendered to HTML with every value escaped, and printed to 
 cover letter, CV and certificates into one PDF. Everything runs on my own machine; the repository only holds an
 invented sample person ("Alex Beispiel").
 
-**Stack:** Node.js 20+ · Puppeteer (headless Chrome) · `pdf-lib` · `node:test`
+**Stack:** Node.js 22.12+ · Puppeteer (headless Chrome) · `pdf-lib` · `node:test`
 
 ## How it works
 
