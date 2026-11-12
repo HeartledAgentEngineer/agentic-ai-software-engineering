@@ -146,3 +146,30 @@ jobs:
       - name: Tests · document-automation (node:test)
         working-directory: projects/document-automation
         run: node --test
+
+  sonos-demo:
+    name: Sonos simulation · tests, validator and browser QA
+    needs: secrets
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - name: Install Playwright in runner temp without install scripts
+        shell: pwsh
+        run: npm install --prefix "$env:RUNNER_TEMP/sonos-demo-browser" --ignore-scripts playwright@1.62.1
+      - name: State contract tests
+        run: node --test projects/sonos-music-drop/demo/ducker.test.js
+      - name: Showcase and local reference validation
+        run: node tools/verify-showcase.mjs
+      - name: Negative remote CSS fixture
+        run: node --test tools/verify-showcase.test.mjs
+      - name: Browser QA in installed Edge
+        shell: pwsh
+        env:
+          NODE_PATH: ${{ runner.temp }}/sonos-demo-browser/node_modules
+          SONOS_QA_DIR: ${{ runner.temp }}/sonos-demo-preview
+        run: node projects/sonos-music-drop/demo/browser-check.cjs

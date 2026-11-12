@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10151d">
+  <title>Sonos Music Drop · Volume ducking demo</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="ducker.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <a class="brand" href="../README.md" aria-label="Sonos Music Drop project overview">
+        <span class="brand-mark" aria-hidden="true">S</span>
+        <span>SONOS <span class="brand-light">MUSIC DROP</span></span>
+      </a>
+      <span class="demo-tag"><span aria-hidden="true"></span> INTERACTIVE DEMO</span>
+    </header>
+
+    <section class="hero" aria-labelledby="page-title">
+      <p class="eyebrow">A calmer way to hear the important bit</p>
+      <h1 id="page-title">Music makes room<br>for the <span>moment.</span></h1>
+      <p class="intro">See how a music volume drop can make space while someone speaks, then bring your listening level back exactly where it was.</p>
+      <p class="simulation-note" role="note"><span aria-hidden="true">ⓘ</span> Simulation with sample data – no microphone or speaker connection</p>
+    </section>
+
+    <section class="console" aria-labelledby="console-title">
+      <div class="console-head">
+        <div>
+          <p class="eyebrow">THE LISTENING ROOM</p>
+          <h2 id="console-title">Volume control</h2>
+        </div>
+        <p class="status" id="status" aria-live="polite"><span class="status-dot" aria-hidden="true"></span><span id="status-text">Ready when you are</span></p>
+      </div>
+
+      <div class="volume-card" aria-live="polite">
+        <div class="volume-copy">
+          <div class="volume-title"><span class="speaker-icon" aria-hidden="true">♫</span><span>Music volume</span></div>
+          <p id="volume-caption">Your room, your level.</p>
+        </div>
+        <output class="volume-value" id="volume-value" for="volume">40<span>%</span></output>
+        <div class="meter" id="meter" role="img" aria-label="Music volume 40 percent">
+          <span class="meter-fill" id="meter-fill"></span>
+        </div>
+      </div>
+
+      <div class="controls">
+        <div class="slider-row">
+          <div class="slider-label"><label for="volume">Starting volume</label><output id="volume-output" for="volume">40%</output></div>
+          <input id="volume" type="range" min="0" max="100" step="1" value="40" aria-describedby="volume-caption">
+          <div class="scale"><span>0%</span><span>100%</span></div>
+        </div>
+        <div class="slider-row">
+          <div class="slider-label"><label for="target">Speaking level</label><output id="target-output" for="target">15%</output></div>
+          <input id="target" type="range" min="0" max="100" step="1" value="15">
+          <div class="scale"><span>0%</span><span>100%</span></div>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="button button-primary" id="begin" type="button"><span aria-hidden="true">↓</span> Begin speaking</button>
+        <button class="button button-secondary" id="end" type="button" disabled><span aria-hidden="true">↗</span> End speaking</button>
+        <button class="button button-quiet" id="reset" type="button">Reset demo</button>
+      </div>
+      <p class="state-caption" id="state-caption">Adjust the sample levels, then begin to see the change.</p>
+    </section>
+
+    <section class="steps" aria-label="How the demo works">
+      <article><span class="step-number">01</span><div><h3>Choose your levels</h3><p>Set the room volume and the quieter speaking level.</p></div></article>
+      <article><span class="step-number">02</span><div><h3>Make a little space</h3><p>Begin speaking to lower the music without losing your place.</p></div></article>
+      <article><span class="step-number">03</span><div><h3>Return to your room</h3><p>End speaking to restore the exact starting volume.</p></div></article>
+    </section>
+
+    <footer><span>SONOS MUSIC DROP</span><span>Concept simulation · sample data only</span></footer>
+  </main>
+</body>
+</html>
