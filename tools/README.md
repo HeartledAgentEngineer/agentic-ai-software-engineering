@@ -8,17 +8,17 @@ These Windows applications support personal speech input and reading workflows. 
 
 Hold the configured hotkey to record from the microphone into memory. Releasing the key sends the recording through the configured speech-to-text provider chain, then sends the transcript through the configured text clean-up step. The resulting text is placed on the clipboard for the active application. The published personal-use configuration uses OpenRouter; it requires the user's own externally configured API credential.
 
-![typeFREE demonstration](../../assets/demos/typefree-demo.gif)
+![typeFREE demonstration](../assets/demos/typefree-demo.gif)
 
-The GIF is a workflow preview, not a live browser demo. The application source remains at [projects/typefree](../typefree/).
+The GIF is a workflow preview, not a live browser demo. The application source remains at [projects/typefree](../projects/typefree/).
 
 ### readFREE — read selected text aloud
 
-Select text in a Windows application and press the configured hotkey. readFREE obtains the selected text, requests speech from its OpenRouter text-to-speech provider, and plays the returned audio through Windows audio playback. It needs the user's own configured provider credentials and a network connection for speech generation. The small speech-client module is outside this repository. There is no browser demo; see the [readFREE project](../readfree/).
+Select text in a Windows application and press the configured hotkey. readFREE obtains the selected text, requests speech from its OpenRouter text-to-speech provider, and plays the returned audio through Windows audio playback. It needs the user's own configured provider credentials and a network connection for speech generation. The small speech-client module is outside this repository. There is no browser demo; see the [readFREE project](../projects/readfree/).
 
 ### ShotReader — OCR and spoken reading
 
-Copy a screenshot or text into the Windows app. For an image, Windows OCR extracts the text on the device; the user can review it before it is split into chunks and sent to OpenRouter text-to-speech. The returned audio is played locally. OCR on the device does not make the whole workflow offline: speech generation still uses the configured remote service. Its test mode does not call OpenRouter. See the [ShotReader project](../shotreader/).
+Copy a screenshot or text into the Windows app. For an image, Windows OCR extracts the text on the device; the user can review it before it is split into chunks and sent to OpenRouter text-to-speech. The returned audio is played locally. OCR on the device does not make the whole workflow offline: speech generation still uses the configured remote service. Its test mode does not call OpenRouter. See the [ShotReader project](../projects/shotreader/).
 
 ## Personal and enterprise variants
 

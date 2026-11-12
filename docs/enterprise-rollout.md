@@ -46,5 +46,5 @@ This guide separates the current public code and development checks from a propo
 
 - OrbitDesk package metadata and setup: [`projects/orbitdesk/pyproject.toml`](../projects/orbitdesk/pyproject.toml) and [project guide](../projects/orbitdesk/README.md).
 - Public verification: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
-- Speech tools and their personal-use routes: [Private Tools](../projects/tools/README.md). Foundry source is not linked because it is not included in the reviewed public snapshot.
+- Speech tools and their personal-use routes: [Private Tools](../tools/README.md). Foundry source is not linked because it is not included in the reviewed public snapshot.
 - Open work: privacy review for any Foundry source export; an organization-specific identity and deployment design; operational monitoring and cost controls; and independently verified promotion/rollback steps.
