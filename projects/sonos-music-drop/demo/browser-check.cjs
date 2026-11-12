@@ -12,17 +12,45 @@ async function main() {
   const screenshotDir = process.env.SONOS_QA_DIR || path.join(os.tmpdir(), 'sonos-demo-preview');
   fs.mkdirSync(screenshotDir, { recursive: true });
   const browser = await chromium.launch({ channel: 'msedge', headless: true });
-  const externalRequests = [];
+  const blockedProbeRequests = [];
+  const unexpectedExternalRequests = [];
+  const pageErrors = [];
+
+  async function installLocalOnlyRoutes(context, externalTracker) {
+    await context.route('**/*', async route => {
+      const url = route.request().url();
+      if (url.startsWith('file:') || url.startsWith('data:')) {
+        await route.continue();
+        return;
+      }
+      externalTracker.push(url);
+      await route.abort('blockedbyclient');
+    });
+  }
+
   try {
+    const guardContext = await browser.newContext({ permissions: [], serviceWorkers: 'block' });
+    await installLocalOnlyRoutes(guardContext, blockedProbeRequests);
+    const guardPage = await guardContext.newPage();
+    guardPage.on('pageerror', error => pageErrors.push(`guard: ${error.message}`));
+    await guardPage.goto('about:blank');
+    const probeWasBlocked = await guardPage.evaluate(async () => {
+      try {
+        await fetch('https://example.invalid/guard-probe');
+        return false;
+      } catch {
+        return true;
+      }
+    });
+    assert.equal(probeWasBlocked, true, 'synthetic external fetch must be blocked');
+    assert.deepEqual(blockedProbeRequests, ['https://example.invalid/guard-probe'], 'route handler must intercept exactly the synthetic probe');
+    await guardContext.close();
+
     for (const width of [390, 1280]) {
-      const context = await browser.newContext({ viewport: { width, height: 900 } });
+      const context = await browser.newContext({ viewport: { width, height: 900 }, permissions: [], serviceWorkers: 'block' });
+      await installLocalOnlyRoutes(context, unexpectedExternalRequests);
       const page = await context.newPage();
-      page.on('request', request => {
-        if (!request.url().startsWith('file:') && !request.url().startsWith('data:')) {
-          externalRequests.push(request.url());
-          request.abort().catch(() => {});
-        }
-      });
+      page.on('pageerror', error => pageErrors.push(`${width}px: ${error.message}`));
       await page.goto(pathToFileURL(path.join(demoDir, 'index.html')).href);
       assert.match(await page.locator('.simulation-note').innerText(), /Simulation with sample data – no microphone or speaker connection/);
       assert.equal(await page.getByRole('slider', { name: 'Starting volume' }).inputValue(), '40');
@@ -68,8 +96,9 @@ async function main() {
       assert.equal(await page.locator('#volume-output').innerText(), '40%');
       await context.close();
     }
-    assert.deepEqual(externalRequests, [], `external requests were attempted: ${externalRequests.join(', ')}`);
-    process.stdout.write(`Browser QA passed at 390px and 1280px; external requests: ${externalRequests.length}; screenshots: ${screenshotDir}\n`);
+    assert.deepEqual(unexpectedExternalRequests, [], `unexpected external requests were blocked: ${unexpectedExternalRequests.join(', ')}`);
+    assert.deepEqual(pageErrors, [], `browser page errors: ${pageErrors.join(' | ')}`);
+    process.stdout.write(`Browser QA passed at 390px and 1280px; guard probes blocked: ${blockedProbeRequests.length}; unexpected external requests: ${unexpectedExternalRequests.length}; page errors: ${pageErrors.length}; screenshots: ${screenshotDir}\n`);
   } finally {
     await browser.close();
   }

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const root = path.resolve(process.env.SHOWCASE_ROOT || path.join(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const demoRoot = path.join(root, 'projects', 'sonos-music-drop', 'demo');
 const required = [
   'index.html', 'style.css', 'app.js', 'ducker.js', 'ducker.test.js', 'browser-check.cjs',
@@ -43,6 +43,11 @@ for (const file of required) {
   if (['index.html', 'style.css', 'app.js', 'ducker.js'].includes(file)) {
     for (const pattern of forbidden) if (pattern.test(body)) fail(`Forbidden browser capability ${pattern}: projects/sonos-music-drop/demo/${file}`);
   }
+  if (file.endsWith('.css')) {
+    const activeCss = body.replace(/\/\*[\s\S]*?\*\//g, '');
+    if (/@import\b/i.test(activeCss)) fail(`CSS @import is not allowed: projects/sonos-music-drop/demo/${file}`);
+    if (/url\s*\(/i.test(activeCss)) fail(`CSS url() is not allowed because demo assets must stay local: projects/sonos-music-drop/demo/${file}`);
+  }
 }
 
 const htmlPath = path.join(demoRoot, 'index.html');
@@ -78,5 +83,5 @@ if (errors.length) {
   for (const error of errors) process.stderr.write(`ERROR: ${error}\n`);
   process.exitCode = 1;
 } else {
-  process.stdout.write('Showcase validation passed: required demo files, local references, and browser capability checks.\n');
+  process.stdout.write('Showcase validation passed: required files, local page references, and specific forbidden API/CSS checks.\n');
 }
