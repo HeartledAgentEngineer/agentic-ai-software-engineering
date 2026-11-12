@@ -164,9 +164,9 @@ jobs:
       - name: State contract tests
         run: node --test projects/sonos-music-drop/demo/ducker.test.js
       - name: Showcase and local reference validation
-        run: node tools/verify-showcase.mjs
+        run: node scripts/verify-showcase.mjs
       - name: Negative remote CSS fixture
-        run: node --test tools/verify-showcase.test.mjs
+        run: node --test scripts/verify-showcase.test.mjs
       - name: Browser QA in installed Edge
         shell: pwsh
         env:

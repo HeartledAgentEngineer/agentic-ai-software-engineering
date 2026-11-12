@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const validator = path.join(repoRoot, 'tools', 'verify-showcase.mjs');
+const validator = path.join(repoRoot, 'scripts', 'verify-showcase.mjs');
 
 test('validator rejects remote CSS imports and URL assets in an isolated copy', () => {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'showcase-validator-fixture-'));
