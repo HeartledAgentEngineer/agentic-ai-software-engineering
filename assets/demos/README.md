@@ -6,7 +6,7 @@ This directory holds visual evidence (screenshots, recordings, and animated GIFs
 
 | Target File | Project | Content |
 |---|---|---|
-| `orbitdesk-tray-status.png` | [OrbitDesk (Master-Schalter)](../../projects/master-schalter/) | Windows system tray quota monitor (Claude/Codex bars) and profile selector |
+| `orbitdesk-tray-status.png` | [OrbitDesk](../../projects/orbitdesk/) | Windows system tray quota monitor (Claude/Codex bars) and profile selector |
 | `personal-agent-mobile.png` | [Personal AI Agent](../../projects/personal-ai-agent/) | Installed standalone mobile app (PWA) with live voice status and memory inspector sheet |
 | `typefree-dictation-overlay.png` | [typeFREE](../../projects/typefree/) | Live system-wide dictation overlay and audio cleanup in action |
 | `concertify-playlist-preview.png` | [Concertify](../../projects/concertify/) | 5-layer web application generating Spotify playlists from setlists |

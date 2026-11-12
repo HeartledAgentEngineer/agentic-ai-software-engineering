@@ -52,9 +52,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: master-schalter
+          - name: orbitdesk
             os: windows-latest
-            dir: projects/master-schalter
+            dir: projects/orbitdesk
             install: pip install -e ".[leiste,dev]"
             test: python -m pytest -q
           - name: typefree
@@ -62,6 +62,11 @@ jobs:
             dir: projects/typefree
             install: pip install -r windows/requirements.txt -r windows/requirements-dev.txt
             test: python -m pytest -q windows/tests
+          - name: readfree
+            os: windows-latest
+            dir: projects/readfree
+            install: pip install -r requirements.txt pytest
+            test: python -m pytest -q tests
           - name: concertify
             os: ubuntu-latest
             dir: projects/concertify

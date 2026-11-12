@@ -47,11 +47,11 @@ One source for the rules, no copies: [`agent-setup/AGENTS.md`](agent-setup/AGENT
 
 ## 3. Planner, reviewer, workers — across harnesses and model families
 
-I do not lock my workflow to a single vendor or IDE. Instead, a single tool-agnostic rule set ([`AGENTS.md`](agent-setup/AGENTS.md)) and my control-room app **[OrbitDesk (Master-Schalter)](projects/master-schalter/)** (*Leitwarte*) coordinate several agent harnesses and model providers:
+I do not lock my workflow to a single vendor or IDE. Instead, a single tool-agnostic rule set ([`AGENTS.md`](agent-setup/AGENTS.md)) and my control-room app **[OrbitDesk](projects/orbitdesk/)** (*Leitwarte*) coordinate several agent harnesses and model providers:
 
 | Layer | Tools / Models in daily use | Purpose |
 |---|---|---|
-| **Control room (*Leitwarte*)** | **[OrbitDesk (Master-Schalter)](projects/master-schalter/)** | Tracks live subscription quotas, stores per-project role/model profiles (`masterwechsel profil <topic> --json`), enforces topic locks, and runs structured handovers between agent harnesses |
+| **Control room (*Leitwarte*)** | **[OrbitDesk](projects/orbitdesk/)** | Tracks live subscription quotas, stores per-project role/model profiles (`masterwechsel profil <topic> --json`), enforces topic locks, and runs structured handovers between agent harnesses |
 | **Agent harnesses** | **Claude Code** · **OpenAI Codex** (CLI & Desktop) · **Google Antigravity** · **Hermes** (open-source agent) | Execute planning, code editing, sandboxed reviews, and isolated worker runs against the same git gates |
 | **Frontier & cloud models** | **Claude** (Opus / Sonnet) · **OpenAI GPT-6** (Sol / Luna / Astra) · **Google Gemini** · **OpenRouter** (e.g. DeepSeek V4.1 Flash) · **Microsoft Foundry** (Azure AI Agent Service) | Frontier models for architecture and cross-family review; fast, cost-controlled models for scoped worker tasks and privacy-routed workflows |
 
@@ -62,7 +62,7 @@ I do not lock my workflow to a single vendor or IDE. Instead, a single tool-agno
 | **Worker** | implements small, explicitly assigned changes | a faster, cheaper worker model |
 
 - Which harness and model take which role depends on the topic profile and which subscription has free quota.
-  [OrbitDesk (Master-Schalter)](projects/master-schalter/) is the central *Leitwarte* (control desk) that keeps this state and is being expanded into a full multi-agent orchestration console.
+  [OrbitDesk](projects/orbitdesk/) is the central *Leitwarte* (control desk) that keeps this state and is being expanded into a full multi-agent orchestration console.
 - Reviewer and worker run in **fresh contexts**. The run that built something never approves it.
 - **No answer is no approval.** A review that times out or returns no verdict line counts as an error, never as
   approved.

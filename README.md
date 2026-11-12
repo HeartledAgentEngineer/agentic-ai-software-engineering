@@ -30,7 +30,7 @@ here**.
 
 Coming from industrial automation, I treat multi-agent software engineering like a **control room (*Leitwarte*)**:
 multiple specialized harnesses and frontier/cloud models operate under one tool-agnostic rule set ([`AGENTS.md`](agent-setup/AGENTS.md)),
-steered by **[OrbitDesk (Master-Schalter)](projects/master-schalter/)** and verified by **[Cross-model review](projects/cross-model-review/)** and automated gates.
+steered by **[OrbitDesk](projects/orbitdesk/)** and verified by **[Cross-model review](projects/cross-model-review/)** and automated gates.
 
 - **Agent harnesses:** **Claude Code** · **OpenAI Codex** (ChatGPT CLI & Desktop) · **Google Antigravity** · **Hermes** (open-source agent for private data and cost-controlled runs)
 - **Model & provider layer:** Frontier models across families (**Claude Opus/Sonnet**, **OpenAI GPT-6 Sol/Luna/Astra**, **Google Gemini**), **OpenRouter** (e.g. **DeepSeek V4.1 Flash** for fast worker/fallback runs and privacy-first routing), and **Microsoft Foundry / Azure AI Agent Service** (cloud agent patterns, RAG, MCP, AI-103)
@@ -38,7 +38,7 @@ steered by **[OrbitDesk (Master-Schalter)](projects/master-schalter/)** and veri
 ```mermaid
 flowchart TB
     subgraph Control["Control Plane · OrbitDesk (Leitwarte)"]
-        OD["OrbitDesk (Master-Schalter)<br/>Quotas · Role & model profiles · Topic locks · Handovers"]
+        OD["OrbitDesk<br/>Quotas · Role & model profiles · Topic locks · Handovers"]
         RULES["AGENTS.md + Skills<br/>Tool-agnostic governance"]
     end
     subgraph Harnesses["Agent Harnesses & Model Families"]
@@ -66,10 +66,11 @@ flowchart TB
 
 | Project | What it is | Stack | Status |
 |---|---|---|---|
-| [OrbitDesk (Master-Schalter)](projects/master-schalter/) | SCADA-inspired Windows control-room app (*Leitwarte*) that tracks live agent quotas, manages per-project role/model profiles, and hands work from one agent harness to another | Python, tkinter, pystray, pytest | In daily use |
+| [OrbitDesk](projects/orbitdesk/) | SCADA-inspired Windows control-room app (*Leitwarte*) that tracks live agent quotas, manages per-project role/model profiles, and hands work from one agent harness to another | Python, tkinter, pystray, pytest | In daily use |
 | [Cross-model review](projects/cross-model-review/) | Review loop: a plan or result is checked by a fresh run of another model family; the verdict is a machine-readable line, the protocol is shown to me | Python, Codex CLI, Hermes | In daily use |
 | [Personal AI agent](projects/personal-ai-agent/) | Personal assistant on Android: chat, long-term memory, tool calls, coding-agent routing | Python, FastAPI, web frontend, Termux | In daily use |
 | [typeFREE](projects/typefree/) | System-wide dictation tool for Windows with selectable speech-to-text providers and text clean-up | Python, keyboard hooks, pytest | In daily use |
+| [readFREE](projects/readfree/) | Reads selected text aloud from any Windows program with one hotkey, so my eyes get a break from the constant stream of agent output | Python, UI Automation, Win32 clipboard, MCI, pytest | In daily use |
 | [ShotReader](projects/shotreader/) | Reads screenshots aloud: on-device OCR, then streamed neural text-to-speech; automatic mode reads only real screenshots | PowerShell, Windows Forms, Windows OCR, OpenRouter TTS | In daily use |
 | [Concertify](projects/concertify/) | Web app that builds concert playlists from live setlists; migration from prototype to a 5-layer architecture in progress (10 of 76 routes moved) | Python, Flask, SQLite, Server-Sent Events, Spotify / Ticketmaster APIs | Working prototype |
 | [RAG knowledge base](projects/rag-knowledge-base/) | Semantic knowledge base with hybrid search (vector + full-text reciprocal rank fusion) | Python, FastAPI, PostgreSQL + pgvector, Mistral / Gemini | Working prototype |
@@ -93,11 +94,12 @@ graph LR
     end
     subgraph Daily["Tools I use every day"]
         T["typeFREE"]
+        L["readFREE"]
         P["Personal AI agent"]
         SR["ShotReader"]
     end
     subgraph System["Agents as one system"]
-        M["OrbitDesk (Master-Schalter)"]
+        M["OrbitDesk"]
         X["Cross-model review"]
         A["Agent setup"]
     end
@@ -110,8 +112,9 @@ Every push to `main`, pull request, and manual workflow dispatch runs [CI](.gith
 
 | Project | Automated tests | Runs in CI | Known gap |
 |---|---|---|---|
-| OrbitDesk (Master-Schalter) | 2,043 pytest tests (+ 1 skipped) | yes (Windows) | tray/UI interactions use fakes in headless test runs |
+| OrbitDesk | 2,043 pytest tests (+ 1 skipped) | yes (Windows) | tray/UI interactions use fakes in headless test runs |
 | typeFREE | 659 pytest tests (658 passed, 1 skipped on CI) | yes (Windows) | hotkeys and audio are mocked; real devices are tested by hand |
+| readFREE | 88 pytest tests | yes (Windows) | clipboard, hotkey API, player and speech client are fakes; a manual smoke test covers real windows and audio, the real key press and voice are tested by hand |
 | ShotReader | PowerShell self-test (`-Test`): speed rules, clipboard-format rule, image fingerprint, decision rules, 30-image memory, local OCR and speech | yes (Windows) | the OpenRouter speech call and the window are checked by hand |
 | Concertify | 193 pytest tests (+ 2 skipped) | yes (Linux) | external APIs are stubbed; `app.py` still holds 66 of 76 routes and 6 `global` statements |
 | Personal AI agent | 57 pytest tests | yes (Linux) | this is an excerpt; the full private suite is larger and not published |
@@ -133,7 +136,7 @@ Every project here was built with AI coding agents (**Claude Code**, **OpenAI Co
 - **Rules are wishes, guards are rules.** What an agent *may* do is enforced by permission settings and a
   pre-commit hook, not by a sentence in a prompt.
 - **Different roles, different models.** One model plans, a model from a different family reviews, cheaper
-  models build — coordinated through [OrbitDesk](projects/master-schalter/). I watch the review protocols instead of carrying messages between agents.
+  models build — coordinated through [OrbitDesk](projects/orbitdesk/). I watch the review protocols instead of carrying messages between agents.
 - **State lives in files.** Plans, journals and handover files make it possible to stop, switch tools or switch
   agents in the middle of a task.
 - **Code and docs in the same commit.** Documentation must not claim anything the code does not do.

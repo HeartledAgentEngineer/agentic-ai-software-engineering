@@ -1,4 +1,6 @@
-# OrbitDesk (Master-Schalter)
+# OrbitDesk
+
+> Formerly *Master-Schalter*. The Python package (`master_schalter`) and the command-line entry points (`masterwechsel`, `master-leiste`, `master-schalter-gui`) keep their original names, so existing installs and scripts keep working.
 
 A Windows tray and control-room app (*Leitwarte*) for orchestrating several AI coding agents as one system. Coming from industrial automation (PLC/SCADA control rooms), I built OrbitDesk (internal package name `master_schalter`, German for "master switch") as the central control desk that tracks live usage quotas, manages per-project agent roles (`planner` / `reviewer` / `worker` and model selection across **Claude Code**, **OpenAI Codex**, **Google Antigravity**, and **Hermes**), enforces topic locks, and hands a project from one agent harness to another with a verified technical handover package.
 
@@ -23,7 +25,7 @@ flowchart LR
         AG["Google Antigravity<br/>Shared repo & rules"]
     end
 
-    subgraph OrbitDesk["OrbitDesk (Master-Schalter · Leitwarte)"]
+    subgraph OrbitDesk["OrbitDesk · Leitwarte"]
         SIG["signale.py · claude_messen.py · codex_messen.py<br/>Validate 5h & weekly windows (0..100%)"]
         ROL["modi.py · rollen.py<br/>Per-topic Master / Worker / Model (Profil v2)"]
         UEB["uebergabe.py · wechsel.py · assistent.py<br/>Topic lock -> Handover package -> Target ACK"]
