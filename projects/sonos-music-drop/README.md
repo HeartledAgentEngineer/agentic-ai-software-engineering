@@ -17,4 +17,4 @@ The levels are illustrative state only. The simulation does not detect speech, p
 
 ## Local checks
 
-From the repository root, run `node --test projects/sonos-music-drop/demo/ducker.test.js` and `node tools/verify-showcase.mjs`. The optional `projects/sonos-music-drop/demo/browser-check.cjs` requires Playwright and a locally installed Microsoft Edge browser; set `SONOS_QA_DIR` to choose where its screenshots are written.
+From the repository root, run `node --test projects/sonos-music-drop/demo/ducker.test.js` and `node scripts/verify-showcase.mjs`. The optional `projects/sonos-music-drop/demo/browser-check.cjs` requires Playwright and a locally installed Microsoft Edge browser; set `SONOS_QA_DIR` to choose where its screenshots are written.
