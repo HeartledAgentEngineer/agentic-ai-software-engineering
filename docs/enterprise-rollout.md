@@ -10,13 +10,13 @@ This guide separates the current public code and development checks from a propo
 
 **Implemented but experimental — profiles and handovers.** Per-topic profiles store routing preferences for a master, worker provider, and model. They do not launch worker sessions. The code also contains technical handover and acknowledgement flows protected by local topic locks. These features have not been established as an organization-wide orchestration service. The current application has no organization-level SSO, multi-tenant authorization, or central audit service.
 
-**Privacy boundary.** The personal-purpose speech tools use separate, user-configured OpenRouter application routes; their speech or text is sent to the remote provider, and this is not a privacy guarantee. The agent-review workflow's OpenRouter route is different and accepts only sanitized technical input. Sensitive personal material stays with Hermes through an explicitly approved Foundry route. Foundry source exports remain behind a separate privacy review; this repository snapshot does not include a runnable Foundry variant. No general “privacy-first” guarantee is made for OpenRouter.
+**Privacy boundary.** The personal-purpose speech tools use separate, user-configured OpenRouter application routes; their speech or text is sent to the remote provider, and this is not a privacy guarantee. The agent-review workflow's OpenRouter route is different and accepts only sanitized technical input. Sensitive personal material stays with Hermes through an explicitly approved Foundry route. This repository also contains separate local Azure Speech/Vision evaluation demos for the three tools; they do not implement enterprise identity or deployment controls. No general “privacy-first” guarantee is made for OpenRouter.
 
 ## Local use and enterprise reference architecture
 
 **Current local setup:** install OrbitDesk on a user's Windows workstation, use that user's existing provider sign-ins, and keep configuration and state in that Windows profile. This is appropriate for individual evaluation. It is not a shared service, and profile fields are preferences rather than access-control roles.
 
-**Planned enterprise design:** place an organization-controlled identity and policy layer in front of any shared agent services; map named groups to least-privilege project roles; keep each provider route explicit; and isolate each team's source and execution environment. A future Azure / Foundry variant would need its own reviewed source, deployment design, and privacy approval before it could be called available. SSO, managed identity, tenant isolation, and production Azure installation are not implemented by this portfolio snapshot.
+**Planned enterprise design:** place an organization-controlled identity and policy layer in front of any shared agent services; map named groups to least-privilege project roles; keep each provider route explicit; and isolate each team's source and execution environment. The local demos can use the Azure SDK's `DefaultAzureCredential` for outbound calls, but provide no caller SSO, role checks, tenant isolation, or managed-identity deployment. Production Azure installation remains a separate planned step.
 
 ## Configuration, credentials, and access
 
@@ -30,7 +30,7 @@ This guide separates the current public code and development checks from a propo
 
 ### Planned pilot for speech tools
 
-typeFREE, readFREE, and ShotReader are **planned enterprise reference candidates**, not a currently available Foundry deployment. Their published personal-use routes send audio or text to the configured remote provider. Any enterprise source export remains quarantined until its separate privacy review is complete; this guide makes no claim that a reviewed Foundry build exists.
+typeFREE, readFREE, and ShotReader have **runnable local Azure evaluation demos** in [`tools/foundry-demos`](../tools/foundry-demos/README.md). These are not an enterprise deployment. Their separate personal-use routes send audio or text to the configured OpenRouter provider. Organization SSO, tenant isolation, production cost controls, and rollout approval remain planned and are not implemented by the demos.
 
 For a department pilot:
 
@@ -74,5 +74,5 @@ GitHub automatically runs the configured checks for the selected commit. Review 
 
 - OrbitDesk package metadata and setup: [`projects/orbitdesk/pyproject.toml`](../projects/orbitdesk/pyproject.toml) and [project guide](../projects/orbitdesk/README.md).
 - Public verification: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
-- Speech tools and their personal-use routes: [Private Tools](../tools/README.md). Foundry source is not linked because it is not included in the reviewed public snapshot.
-- Open work: privacy review for any Foundry source export; an organization-specific identity and deployment design; operational monitoring and cost controls; and independently verified promotion/rollback steps.
+- Speech tools and their personal-use routes: [Private Tools](../tools/README.md); [local Foundry evaluation demos](../tools/foundry-demos/README.md).
+- Open work: organization-specific identity and deployment design; operational monitoring and cost controls; and independently verified promotion/rollback steps.

@@ -34,7 +34,7 @@ Quick links: [Projects](#projects) · [Private Tools](tools/README.md) · [Sonos
 | [OrbitDesk](projects/orbitdesk/) | Windows tray app for Claude Code and Codex quota/limit status; per-topic profiles and handover workflows are experimental | Python, tkinter, pystray, pytest | Quota display in daily use; profiles and handovers experimental |
 | [Cross-model review](projects/cross-model-review/) | Review loop: a plan or result is checked by a fresh run of another model family; the verdict is a machine-readable line, the protocol is shown to me | Python, Codex CLI, Hermes | In daily use |
 | [Personal AI agent](projects/personal-ai-agent/) | Personal assistant on Android: chat, long-term memory, tool calls, coding-agent routing | Python, FastAPI, web frontend, Termux | In daily use |
-| [Private Tools](tools/README.md) | Personal-purpose dictation, selected-text readback, and screenshot OCR/readback; current OpenRouter variants use user credentials, while the Azure / Foundry source export awaits privacy review | Windows, Python, PowerShell | Personal-purpose applications; Foundry variant in evaluation |
+| [Private Tools](tools/README.md) · [Foundry demos](tools/foundry-demos/README.md) | Personal-purpose dictation, selected-text readback, and screenshot OCR/readback; separate runnable Azure Speech/Vision evaluation services are available | Windows, Python, PowerShell | Personal apps plus local evaluation demos; no enterprise deployment |
 | [Sonos Music Drop](projects/sonos-music-drop/README.md) | Local application concept with a deterministic browser simulation using sample data; it does not control Sonos or play audio | Python concept, HTML, CSS, JavaScript | Simulation only; the README gives the repository ZIP instructions and browser entry point |
 | [Concertify](projects/concertify/) | Web app that builds concert playlists from live setlists; migration from prototype to a 5-layer architecture in progress (10 of 76 routes moved) | Python, Flask, SQLite, Server-Sent Events, Spotify / Ticketmaster APIs | Working prototype |
 | [RAG knowledge base](projects/rag-knowledge-base/) | Semantic knowledge base with hybrid search (vector + full-text reciprocal rank fusion) | Python, FastAPI, PostgreSQL + pgvector, Mistral / Gemini | Working prototype |
@@ -102,7 +102,7 @@ flowchart TB
     end
     subgraph Gates["Deterministic Verification Gates"]
         HOOK["Git pre-commit hook<br/>Project test suites + identity check"]
-        CI["GitHub Actions CI<br/>Gitleaks → Ruff → 6× pytest → Node → Clang C"]
+        CI["GitHub Actions CI<br/>Gitleaks → Ruff → 8× pytest → Node → Clang C"]
     end
     PLAN -.->|Operator consults quota status| OD
     RULES --> PLAN

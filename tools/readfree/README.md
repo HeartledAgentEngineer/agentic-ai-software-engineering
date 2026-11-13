@@ -98,3 +98,5 @@ approved; tests were written before the code. A live smoke test caught a real bu
 clipboard in two bursts about 20 ms apart. The first version took the second burst for a copy by another program,
 and the real clipboard was overwritten once during testing. Now two consecutive opens of the clipboard must see the
 same sequence number before anything is read or restored.
+
+Azure evaluation code: [readFREE Foundry demo](../foundry-demos/README.md#readfree).

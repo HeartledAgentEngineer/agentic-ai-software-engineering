@@ -45,7 +45,7 @@ jobs:
       - run: ruff check --output-format=github .
 
   python-tests:
-    name: Tests · ${{ matrix.name }}
+    name: Tests Â· ${{ matrix.name }}
     needs: secrets
     runs-on: ${{ matrix.os }}
     strategy:
@@ -67,6 +67,11 @@ jobs:
             dir: tools/readfree
             install: pip install -r requirements.txt pytest
             test: python -m pytest -q tests
+          - name: foundry-demos
+            os: ubuntu-latest
+            dir: tools/foundry-demos
+            install: pip install -r requirements-dev.txt -r shared_core/requirements_azure.txt
+            test: python -m pytest -q --disable-socket --allow-unix-socket --allow-hosts=localhost,127.0.0.1,::1 tests
           - name: concertify
             os: ubuntu-latest
             dir: projects/concertify
@@ -100,7 +105,7 @@ jobs:
       - run: ${{ matrix.test }}
 
   shotreader:
-    name: ShotReader · PowerShell self-test
+    name: ShotReader Â· PowerShell self-test
     needs: secrets
     runs-on: windows-latest
     defaults:
@@ -113,7 +118,7 @@ jobs:
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\ShotReader.ps1 -Test
 
   c-university:
-    name: C · university foundations (2020 code, characterization tests)
+    name: C Â· university foundations (2020 code, characterization tests)
     needs: secrets
     # Windows: the 2020 code uses scanf_s from the Microsoft C runtime. clang ships with the runner image.
     runs-on: windows-latest
@@ -140,15 +145,15 @@ jobs:
         run: |
           find projects tools -name '*.js' -not -path '*/node_modules/*' -print0 \
             | xargs -0 -n1 node --check
-      - name: Lockfile in sync · document-automation (no install scripts)
+      - name: Lockfile in sync Â· document-automation (no install scripts)
         working-directory: projects/document-automation
         run: npm ci --ignore-scripts
-      - name: Tests · document-automation (node:test)
+      - name: Tests Â· document-automation (node:test)
         working-directory: projects/document-automation
         run: node --test
 
   sonos-demo:
-    name: Sonos simulation · tests, validator and browser QA
+    name: Sonos simulation Â· tests, validator and browser QA
     needs: secrets
     runs-on: windows-latest
     timeout-minutes: 5

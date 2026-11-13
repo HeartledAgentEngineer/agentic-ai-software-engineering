@@ -1,0 +1,3 @@
+# Nur fÃ¼r den PrÃ¼fbefehl; pytest-socket sperrt externe Netzwerkverbindungen in CI.
+pytest>=8.0
+pytest-socket==0.8.1

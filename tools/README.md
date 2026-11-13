@@ -24,12 +24,14 @@ Copy a screenshot or text into the Windows app. For an image, Windows OCR extrac
 
 | Tool | Personal-purpose application route | Azure / Foundry enterprise evaluation route |
 |---|---|---|
-| typeFREE | User-configured OpenRouter speech-to-text and text clean-up; requires the user's own credential | Source export is pending separate privacy review; no runnable Foundry variant is published here |
-| readFREE | User-configured OpenRouter text-to-speech; speech client is external to this repository | Source export is pending separate privacy review; no runnable Foundry variant is published here |
-| ShotReader | Windows OCR on the device, then user-configured OpenRouter text-to-speech | Source export is pending separate privacy review; no runnable Foundry variant is published here |
+| typeFREE | User-configured OpenRouter speech-to-text and text clean-up; requires the user's own credential | Runnable evaluation source is available in the [Foundry demos](foundry-demos/README.md); not a production deployment |
+| readFREE | User-configured OpenRouter text-to-speech; speech client is external to this repository | Runnable evaluation source is available in the [Foundry demos](foundry-demos/README.md); not a production deployment |
+| ShotReader | Windows OCR on the device, then user-configured OpenRouter text-to-speech | Runnable evaluation source is available in the [Foundry demos](foundry-demos/README.md); not a production deployment |
 
 The OpenRouter route is the user's own credentialed cloud service for these personal-purpose applications. Audio or text leaves the device when the route is used; public source visibility and local handling do not provide a privacy guarantee. The separate OpenRouter agent-review route in this portfolio accepts only sanitized technical input. Sensitive personal material stays with Hermes through an explicitly approved Foundry route; do not submit it through these OpenRouter application variants.
 
-The Azure / Foundry column describes an intended evaluation direction, not a downloadable product variant. The Foundry source export is pending its separate privacy review; there is no public runnable Foundry demo or production deployment claim.
+The linked Foundry code is a runnable local evaluation demo of Azure Speech, Azure Vision, and optional text-cleanup providers. It is separate from the personal-purpose applications above and is not an enterprise deployment. It does not implement organization SSO, tenant isolation, production cost controls, or deployment operations. See the [demo setup and limits](foundry-demos/README.md).
+
+Project guides: [typeFREE](typefree/README.md), [readFREE](readfree/README.md), and [ShotReader](shotreader/README.md).
 
 Source folders: `tools/typefree/`, `tools/readfree/`, and `tools/shotreader/`. The portfolio lists source links and the typeFREE GIF as a preview; it does not present GitHub's code view as a playable demo.
