@@ -8,7 +8,7 @@ updates:
   - package-ecosystem: pip
     directories:
       - /projects/orbitdesk
-      - /projects/typefree/windows
+      - /tools/typefree/windows
       - /projects/concertify
       - /projects/personal-ai-agent/backend
       - /projects/rag-knowledge-base
