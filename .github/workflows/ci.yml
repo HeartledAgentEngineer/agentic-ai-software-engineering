@@ -67,6 +67,11 @@ jobs:
             dir: tools/readfree
             install: pip install -r requirements.txt pytest
             test: python -m pytest -q tests
+          - name: foundry-demos
+            os: ubuntu-latest
+            dir: tools/foundry-demos
+            install: pip install -r requirements-dev.txt -r shared_core/requirements_azure.txt
+            test: python -m pytest -q --disable-socket --allow-unix-socket --allow-hosts=localhost,127.0.0.1,::1 tests
           - name: concertify
             os: ubuntu-latest
             dir: projects/concertify

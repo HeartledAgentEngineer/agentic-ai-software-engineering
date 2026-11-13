@@ -23,42 +23,7 @@ here**.
 | [My Journey](JOURNEY.md) | From prompting to running several agents and models as one system — stage by stage, each with a project as evidence |
 | [How I work](HOW-I-WORK.md) | The working method: verification gate, planner / reviewer / worker roles across harnesses, cross-model review, state in files |
 | [Projects](#projects) | The projects that came out of it, from a PLC digital twin to a multi-agent control room (*Leitwarte*) |
-
----
-
-## Multi-Agent Ecosystem & Control Room (*Leitwarte*)
-
-Coming from industrial automation, I treat multi-agent software engineering like a **control room (*Leitwarte*)**:
-multiple specialized harnesses and frontier/cloud models operate under one tool-agnostic rule set ([`AGENTS.md`](agent-setup/AGENTS.md)),
-with verification through **[Cross-model review](projects/cross-model-review/)** and automated gates. **[OrbitDesk](projects/orbitdesk/)** is currently most useful as a Windows quota/limit display; its role profiles and handover functions are experimental, not a production coordination plane. See the [enterprise rollout guide](docs/enterprise-rollout.md) for current evidence and planned controls.
-
-- **Agent harnesses:** **Claude Code** · **OpenAI Codex** (ChatGPT CLI & Desktop) · **Google Antigravity** · **Hermes** (sensitive agent-workflow content stays on the explicitly approved Foundry route)
-- **Model & provider layer:** Frontier models across families (**Claude Opus/Sonnet**, **OpenAI GPT-6 Sol/Luna/Astra**, **Google Gemini**). **OpenRouter** is used by the personal-purpose speech tools with the user's credentials and by a separate sanitized technical-review route; these are distinct data flows, and OpenRouter carries no blanket privacy guarantee. Sensitive personal agent-workflow content stays with Hermes through an explicitly approved Foundry route. Azure / Foundry is an enterprise evaluation direction; its public source export remains subject to separate privacy review.
-
-```mermaid
-flowchart TB
-    subgraph Companion["Windows quota companion · OrbitDesk"]
-        OD["Quota / limit status<br/>Experimental role profiles and handovers"]
-    end
-    RULES["AGENTS.md + Skills<br/>Tool-agnostic governance"]
-    subgraph Harnesses["Agent Harnesses & Model Families"]
-        PLAN["Planner (Thinker)<br/>Claude Code · Antigravity · Codex<br/>Frontier models"]
-        WORK["Worker (Builder)<br/>Codex · Claude Sonnet · Hermes via approved Foundry route<br/>OpenRouter: sanitized technical review only"]
-        REV["Cross-Model Reviewer<br/>pruefkreis.py · Different model family<br/>Codex read-only sandbox · Hermes -t file,todo"]
-        PRIV["Data handling boundary<br/>Sensitive personal agent content: Hermes via explicitly approved Foundry route<br/>Personal-tool OpenRouter routes are separate; no blanket privacy guarantee"]
-    end
-    subgraph Gates["Deterministic Verification Gates"]
-        HOOK["Git pre-commit hook<br/>Project test suites + identity check"]
-        CI["GitHub Actions CI<br/>Gitleaks → Ruff → 6× pytest → Node → Clang C"]
-    end
-    PLAN -.->|Operator consults quota status| OD
-    RULES --> PLAN
-    PLAN -->|Technical task| WORK
-    WORK -->|Diff + check command = 0| REV
-    REV -->|URTEIL: FREI / EINWAND| PLAN
-    PLAN -.->|Sensitive scope only| PRIV
-    WORK --> HOOK --> CI
-```
+Quick links: [Projects](#projects) · [Private Tools](tools/README.md) · [Sonos simulation](projects/sonos-music-drop/README.md)
 
 ---
 
@@ -69,8 +34,8 @@ flowchart TB
 | [OrbitDesk](projects/orbitdesk/) | Windows tray app for Claude Code and Codex quota/limit status; per-topic profiles and handover workflows are experimental | Python, tkinter, pystray, pytest | Quota display in daily use; profiles and handovers experimental |
 | [Cross-model review](projects/cross-model-review/) | Review loop: a plan or result is checked by a fresh run of another model family; the verdict is a machine-readable line, the protocol is shown to me | Python, Codex CLI, Hermes | In daily use |
 | [Personal AI agent](projects/personal-ai-agent/) | Personal assistant on Android: chat, long-term memory, tool calls, coding-agent routing | Python, FastAPI, web frontend, Termux | In daily use |
-| [Private Tools](tools/README.md) | Personal-purpose dictation, selected-text readback, and screenshot OCR/readback; current OpenRouter variants use user credentials, while the Azure / Foundry source export awaits privacy review | Windows, Python, PowerShell | Personal-purpose applications; Foundry variant in evaluation |
-| [Sonos Music Drop](projects/sonos-music-drop/) | Local application concept for lowering music during speech; includes a clearly labeled browser simulation with sample data | Python concept, HTML, CSS, JavaScript | Simulation only; [download the repository](https://github.com/HeartledAgentEngineer/agentic-ai-software-engineering/archive/refs/heads/main.zip), extract it, and open `projects/sonos-music-drop/demo/index.html` |
+| [Private Tools](tools/README.md) · [Foundry demos](tools/foundry-demos/README.md) | Personal-purpose dictation, selected-text readback, and screenshot OCR/readback; separate runnable Azure Speech/Vision evaluation services are available | Windows, Python, PowerShell | Personal apps plus local evaluation demos; no enterprise deployment |
+| [Sonos Music Drop](projects/sonos-music-drop/README.md) | Local application concept with a deterministic browser simulation using sample data; it does not control Sonos or play audio | Python concept, HTML, CSS, JavaScript | Simulation only; the README gives the repository ZIP instructions and browser entry point |
 | [Concertify](projects/concertify/) | Web app that builds concert playlists from live setlists; migration from prototype to a 5-layer architecture in progress (10 of 76 routes moved) | Python, Flask, SQLite, Server-Sent Events, Spotify / Ticketmaster APIs | Working prototype |
 | [RAG knowledge base](projects/rag-knowledge-base/) | Semantic knowledge base with hybrid search (vector + full-text reciprocal rank fusion) | Python, FastAPI, PostgreSQL + pgvector, Mistral / Gemini | Working prototype |
 | [Document automation](projects/document-automation/) | Data-driven CV generator: JSON → validated, escaped HTML → A4 PDF, plus PDF merging | Node.js, Puppeteer, pdf-lib, node:test | Stable local tool |
@@ -111,6 +76,44 @@ graph LR
     end
     OT --> Products --> Daily --> System
 ```
+
+---
+
+## Multi-Agent Ecosystem & Control Room (*Leitwarte*)
+
+Coming from industrial automation, I treat multi-agent software engineering like a **control room (*Leitwarte*)**:
+multiple specialized harnesses and frontier/cloud models operate under one tool-agnostic rule set ([`AGENTS.md`](agent-setup/AGENTS.md)),
+with verification through **[Cross-model review](projects/cross-model-review/)** and automated gates. **[OrbitDesk](projects/orbitdesk/)** is currently most useful as a Windows quota/limit display; its role profiles and handover functions are experimental, not a production coordination plane. See the [enterprise rollout guide](docs/enterprise-rollout.md) for current evidence and planned controls.
+
+- **Agent harnesses:** **Claude Code** · **OpenAI Codex** (ChatGPT CLI & Desktop) · **Google Antigravity** · **Hermes** (sensitive agent-workflow content stays on the explicitly approved Foundry route)
+- **Model & provider layer:** Frontier models across families (**Claude Opus/Sonnet**, **OpenAI GPT-6 Sol/Luna/Astra**, **Google Gemini**). **OpenRouter** is used by the personal-purpose speech tools with the user's credentials and by a separate sanitized technical-review route; these are distinct data flows, and OpenRouter carries no blanket privacy guarantee. Sensitive personal agent-workflow content stays with Hermes through an explicitly approved Foundry route. Azure / Foundry is an enterprise evaluation direction; its public source export remains subject to separate privacy review.
+
+```mermaid
+flowchart TB
+    subgraph Companion["Windows quota companion · OrbitDesk"]
+        OD["Quota / limit status<br/>Experimental role profiles and handovers"]
+    end
+    RULES["AGENTS.md + Skills<br/>Tool-agnostic governance"]
+    subgraph Harnesses["Agent Harnesses & Model Families"]
+        PLAN["Planner (Thinker)<br/>Claude Code · Antigravity · Codex<br/>Frontier models"]
+        WORK["Worker (Builder)<br/>Codex · Claude Sonnet · Hermes via approved Foundry route<br/>OpenRouter: sanitized technical review only"]
+        REV["Cross-Model Reviewer<br/>pruefkreis.py · Different model family<br/>Codex read-only sandbox · Hermes -t file,todo"]
+        PRIV["Data handling boundary<br/>Sensitive personal agent content: Hermes via explicitly approved Foundry route<br/>Personal-tool OpenRouter routes are separate; no blanket privacy guarantee"]
+    end
+    subgraph Gates["Deterministic Verification Gates"]
+        HOOK["Git pre-commit hook<br/>Project test suites + identity check"]
+        CI["GitHub Actions CI<br/>Gitleaks → Ruff → 8× pytest → Node → Clang C"]
+    end
+    PLAN -.->|Operator consults quota status| OD
+    RULES --> PLAN
+    PLAN -->|Technical task| WORK
+    WORK -->|Diff + check command = 0| REV
+    REV -->|URTEIL: FREI / EINWAND| PLAN
+    PLAN -.->|Sensitive scope only| PRIV
+    WORK --> HOOK --> CI
+```
+
+---
 
 ## Quality at a glance
 
