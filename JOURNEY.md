@@ -73,7 +73,7 @@ Node.js ADS bridge to a 3D HMI in the browser, the bridge between my OT backgrou
 - **What I learned:** my approvals at every phase boundary cost the most time and gave the least safety.
   I replaced them with machine checks: *done means the project's check command exits with 0*, and code and
   docs go into the same commit.
-- 🔗 [typeFREE](projects/typefree/) · [Personal AI agent](projects/personal-ai-agent/) · [How I work](HOW-I-WORK.md)
+- 🔗 [typeFREE](tools/typefree/) · [Personal AI agent](projects/personal-ai-agent/) · [How I work](HOW-I-WORK.md)
 
 ## September 2026 — Planner and workers
 
@@ -111,7 +111,7 @@ Node.js ADS bridge to a 3D HMI in the browser, the bridge between my OT backgrou
 - **readFREE**, the counterpart to typeFREE: select text anywhere, press a key, listen. With four or five agent chats running in parallel, the stream of text to read became the bottleneck; moving part of it to the ears gives the eyes a break.
 - Hardened this portfolio for release: automated secret scanning (Gitleaks), CI test matrices across Windows and Linux, and strict data-privacy / PII checks before publication.
 - **What I learned:** whether in industrial PLCs or cloud agent pipelines, reliability comes from explicit state boundaries, deterministic checks, and knowing exactly where data goes.
-- 🔗 [readFREE](projects/readfree/) · [Agent setup](agent-setup/) · [CI workflow](.github/workflows/ci.yml) · [Security policy](SECURITY.md)
+- 🔗 [readFREE](tools/readfree/) · [Agent setup](agent-setup/) · [CI workflow](.github/workflows/ci.yml) · [Security policy](SECURITY.md)
 
 ---
 

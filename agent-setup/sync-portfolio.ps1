@@ -58,7 +58,7 @@ $Whitelist = @(
     "projects/concertify",
     "projects/personal-ai-agent",
     "projects/orbitdesk",
-    "projects/typefree",
+    "tools/typefree",
     "projects/cross-model-review",
     "agent-setup",
     ".github",

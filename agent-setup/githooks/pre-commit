@@ -110,7 +110,7 @@ if hat_code "$P_SCHALTER"; then
     fi
 fi
 
-P_TYPEFREE="projects/typefree"
+P_TYPEFREE="tools/typefree"
 if hat_code "$P_TYPEFREE"; then
     PY="$P_TYPEFREE/.venv/Scripts/python.exe"
     if [[ -x "$PY" ]]; then
