@@ -63,4 +63,4 @@ Parallel requests to the same speech-to-text provider share a single deadline. I
 
 The API key goes into a local `.env` (see `installer/ANLEITUNG-API-KEY.html`).
 
-← [Back to overview](../../README.md)
+← [Back to overview](../../README.md) · [Azure evaluation demo](../foundry-demos/README.md#typefree)

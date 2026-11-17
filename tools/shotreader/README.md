@@ -67,4 +67,4 @@ The self-test checks the speed rules, the clipboard-format rule, the fingerprint
 different sizes differ), the decision rules, the 30-image memory, the local OCR engine on a rendered test image, and
 local speech synthesis. It does not call OpenRouter and needs no key. It runs in CI on a Windows runner.
 
-[← Back to the overview](../../README.md)
+[← Back to the overview](../../README.md) · [Azure evaluation demo](../foundry-demos/README.md#shotreader)
