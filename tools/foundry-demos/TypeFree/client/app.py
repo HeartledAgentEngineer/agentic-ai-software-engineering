@@ -1,4 +1,19 @@
-'typeFREE Azure speech demo client. Run from the demo root: python TypeFree/client/app.py'
+"""typeFREE — Azure Edition: Windows client for the dictation service.
+
+Examples (server running on port 8101)::
+
+    ./.venv/Scripts/python.exe TypeFree/client/app.py --datei probe.wav
+    ./.venv/Scripts/python.exe TypeFree/client/app.py --mikrofon --sekunden 8
+    ./.venv/Scripts/python.exe TypeFree/client/app.py --mikrofon --hotkey "alt+a" --einfuegen
+
+The client talks only to its own server (HTTP); the server talks to Azure.
+Microphone and hotkey need ``sounddevice`` and ``keyboard`` — if they are
+missing the client says so and the file mode still works.
+
+Sign-in: the client holds no key. It signs the user in with Entra ID (MSAL,
+``shared_core/client_auth.py``) and sends the access token to its server; the
+server's own Azure identity is ``DefaultAzureCredential`` (Managed Identity).
+"""
 
 from __future__ import annotations
 
@@ -13,6 +28,11 @@ from ctypes import wintypes
 from pathlib import Path
 
 import httpx
+
+# shared_core liegt eine Ebene über dem App-Ordner; der Client nutzt daraus nur
+# client_auth (MSAL), kein Azure-SDK.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from shared_core.client_auth import AnmeldungFehlgeschlagen, auth_kopf  # noqa: E402
 
 STANDARD_SERVER = "http://127.0.0.1:8101"
 
@@ -96,7 +116,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hotkey", type=str, default=None, help="globaler Hotkey zum Beenden, z. B. 'alt+a'")
     parser.add_argument("--kontext", type=str, default="", help="bereits vorhandener Text als Kontext der Glättung")
     parser.add_argument("--server", type=str, default=STANDARD_SERVER, help="Server-URL")
-    parser.add_argument("--token", type=str, default=None, help="Bearer-Token, falls der Server einen verlangt")
     parser.add_argument("--einfuegen", action="store_true", help="Ergebnis in die Zwischenablage legen und Strg+V senden")
     args = parser.parse_args(argv)
 
@@ -105,7 +124,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         wav_bytes = _aufnehmen(sekunden=args.sekunden, hotkey=args.hotkey)
 
-    kopf = {"Authorization": f"Bearer {args.token}"} if args.token else {}
+    try:
+        kopf = auth_kopf()
+    except AnmeldungFehlgeschlagen as fehler:
+        print(f"FEHLER: {fehler}")
+        return 2
     try:
         antwort = httpx.post(
             f"{args.server.rstrip('/')}/api/v1/dictate",

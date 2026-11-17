@@ -21,6 +21,11 @@ from pathlib import Path
 
 import httpx
 
+# shared_core liegt eine Ebene über dem App-Ordner; der Client nutzt daraus nur
+# client_auth (MSAL), kein Azure-SDK.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from shared_core.client_auth import AnmeldungFehlgeschlagen, auth_kopf  # noqa: E402
+
 STANDARD_SERVER = "http://127.0.0.1:8103"
 BILD_ENDUNGEN = (".png", ".jpg", ".jpeg", ".bmp", ".gif")
 
@@ -51,13 +56,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stimme", type=str, default="de-DE-ConradNeural")
     parser.add_argument("--tempo", type=str, default="+0%")
     parser.add_argument("--server", type=str, default=STANDARD_SERVER)
-    parser.add_argument("--token", type=str, default=None)
     parser.add_argument("--audio", type=str, default=None, help="WAV-Datei behalten (Pfad)")
     parser.add_argument("--nicht-abspielen", action="store_true", help="nur lesen, nicht hören")
     args = parser.parse_args(argv)
 
     bild = Path(args.bild).read_bytes() if args.bild else _bild_aus_zwischenablage()
-    kopf = {"Authorization": f"Bearer {args.token}"} if args.token else {}
+    try:
+        kopf = auth_kopf()
+    except AnmeldungFehlgeschlagen as fehler:
+        print(f"FEHLER: {fehler}")
+        return 2
     try:
         antwort = httpx.post(
             f"{args.server.rstrip('/')}/api/v1/ocr-und-vorlesen",

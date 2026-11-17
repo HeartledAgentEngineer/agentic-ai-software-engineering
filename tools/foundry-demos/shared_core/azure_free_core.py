@@ -18,10 +18,10 @@ Component here                   Azure service                              AI-1
 ``smooth_dictation_text``        GitHub Models / OpenRouter / Azure Foundry Implement generative AI solutions
 ===============================  =========================================  =============================================
 
-Authentication switches between an API key from the local ``.env`` (fast F0
-testing on this PC) and ``DefaultAzureCredential`` (enterprise / Managed
-Identity, keyless). Keys are read from the local ``.env`` only and never
-logged.
+Authentication defaults to Entra ID via ``DefaultAzureCredential`` (``az login``
+locally, Managed Identity in Azure Container Apps) — keyless. An API key from the
+local ``.env`` is used only when ``AZURE_AUTH_MODE=key`` is set explicitly
+(fallback for F0 resources without a custom subdomain). Keys are never logged.
 
 Smoke test after installation::
 
@@ -187,19 +187,20 @@ def load_env(env_path: str | os.PathLike[str] | None = None) -> Path | None:
 def choose_auth_mode(service: str, env: Mapping[str, str] | None = None) -> AuthMode:
     """Decide between key mode and Entra ID for a service ("speech", "vision", "foundry").
 
-    ``AZURE_AUTH_MODE`` may force ``"key"`` or ``"entra"``. In the default
-    ``"auto"`` mode a configured key wins (fast F0 testing); without a key the
-    enterprise default ``DefaultAzureCredential`` applies.
+    Default is ``"entra"`` (``DefaultAzureCredential``) — even when a key is
+    present in the environment. Key mode only with explicit ``AZURE_AUTH_MODE=key``
+    (fallback while Speech/Vision F0 have no custom subdomain, which Entra tokens
+    require). ``"auto"`` is accepted as an alias for the default ``"entra"``.
     """
     environment = os.environ if env is None else env
     if service not in _KEY_VARS:
         raise ConfigurationError(f"Unbekannter Dienst {service!r} — erlaubt: {', '.join(_KEY_VARS)}")
-    gewaehlt = (environment.get("AZURE_AUTH_MODE") or "auto").strip().lower()
-    if gewaehlt in ("key", "entra"):
-        return gewaehlt  # type: ignore[return-value]
-    if gewaehlt != "auto":
-        raise ConfigurationError(f"AZURE_AUTH_MODE {gewaehlt!r} unbekannt — erlaubt: auto, key, entra")
-    return "key" if (environment.get(_KEY_VARS[service]) or "").strip() else "entra"
+    gewaehlt = (environment.get("AZURE_AUTH_MODE") or "entra").strip().lower()
+    if gewaehlt == "key":
+        return "key"
+    if gewaehlt in ("entra", "auto"):
+        return "entra"
+    raise ConfigurationError(f"AZURE_AUTH_MODE {gewaehlt!r} unbekannt — erlaubt: entra (Standard), key")
 
 
 def get_default_credential():

@@ -1,10 +1,8 @@
 """readFREE — Azure Edition: FastAPI service for reading text aloud (neural TTS + SSML).
 
-Start locally (from ``03_Azure_Projects``)::
+Start locally (from the repository root)::
 
-    ./.venv/Scripts/python.exe -m uvicorn ReadFree.server.main:app --port 8102
-
-Container: see ``ReadFree/server/Dockerfile``.
+    python -m uvicorn ReadFree.server.main:app --app-dir tools/foundry-demos --port 8102
 
 AI-102 mapping: "Implement a speech solution" (speech synthesis, SSML prosody).
 """
@@ -72,7 +70,7 @@ def stimmen() -> list[dict]:
     return STIMMEN
 
 
-@app.post("/api/v1/speak", dependencies=[Depends(api_common.require_token)])
+@app.post("/api/v1/speak", dependencies=[Depends(api_common.require_entra_user)])
 async def speak(anfrage: SprechAnfrage) -> Response:
     """Text als WAV-Audio (24 kHz/16 Bit/mono) zurückgeben."""
     try:

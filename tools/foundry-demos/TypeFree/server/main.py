@@ -3,11 +3,9 @@
 Pipeline: audio upload → Azure AI Speech (F0) → optional LLM smoothing
 (Azure Foundry / GitHub Models / OpenRouter) → plain text.
 
-Start locally (from ``03_Azure_Projects``)::
+Start locally (from the repository root)::
 
-    ./.venv/Scripts/python.exe -m uvicorn TypeFree.server.main:app --port 8101
-
-Container: see ``TypeFree/server/Dockerfile`` (build context = ``03_Azure_Projects``).
+    python -m uvicorn TypeFree.server.main:app --app-dir tools/foundry-demos --port 8101
 
 AI-102 mapping: "Implement a speech solution" (speech to text) and
 "Implement generative AI solutions" (text optimisation).
@@ -101,7 +99,7 @@ def healthz() -> dict:
     return api_common.health_payload("typefree-azure", VERSION)
 
 
-@app.post("/api/v1/transcribe", dependencies=[Depends(api_common.require_token)])
+@app.post("/api/v1/transcribe", dependencies=[Depends(api_common.require_entra_user)])
 async def transcribe(audio: UploadFile = File(...), language: str = Form("de-DE")) -> dict:
     """Nur Spracherkennung (Rohtext ohne Glättung)."""
     pfad = await _zu_tempdatei(audio)
@@ -114,7 +112,7 @@ async def transcribe(audio: UploadFile = File(...), language: str = Form("de-DE"
     return {"text": text}
 
 
-@app.post("/api/v1/dictate", dependencies=[Depends(api_common.require_token)])
+@app.post("/api/v1/dictate", dependencies=[Depends(api_common.require_entra_user)])
 async def dictate(
     audio: UploadFile = File(...),
     context: str = Form(""),
@@ -146,7 +144,7 @@ async def dictate(
     )
 
 
-@app.post("/api/v1/smooth", dependencies=[Depends(api_common.require_token)])
+@app.post("/api/v1/smooth", dependencies=[Depends(api_common.require_entra_user)])
 async def smooth(anfrage: GlaettungsAnfrage) -> GlaettungsAntwort:
     """Nur die Glättung (ohne Audio)."""
     try:

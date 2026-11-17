@@ -30,7 +30,7 @@ Copy a screenshot or text into the Windows app. For an image, Windows OCR extrac
 
 The OpenRouter route is the user's own credentialed cloud service for these personal-purpose applications. Audio or text leaves the device when the route is used; public source visibility and local handling do not provide a privacy guarantee. The separate OpenRouter agent-review route in this portfolio accepts only sanitized technical input. Sensitive personal material stays with Hermes through an explicitly approved Foundry route; do not submit it through these OpenRouter application variants.
 
-The linked Foundry code is a runnable local evaluation demo of Azure Speech, Azure Vision, and optional text-cleanup providers. It is separate from the personal-purpose applications above and is not an enterprise deployment. It does not implement organization SSO, tenant isolation, production cost controls, or deployment operations. See the [demo setup and limits](foundry-demos/README.md).
+The linked Foundry code is a runnable local evaluation demo of Azure Speech, Azure Vision, and optional text-cleanup providers. It is separate from the personal-purpose applications above and is not an enterprise deployment. Clients sign in with Microsoft Entra ID (MSAL) and the servers validate the token and call Azure with their own identity (`DefaultAzureCredential`); this is covered by offline tests but not yet verified against a live tenant. It does not implement tenant isolation, production cost controls, or deployment operations. See the [demo setup and limits](foundry-demos/README.md).
 
 Project guides: [typeFREE](typefree/README.md), [readFREE](readfree/README.md), and [ShotReader](shotreader/README.md).
 

@@ -160,11 +160,24 @@ def test_smooth_ohne_zugangsdaten_meldet_unverfuegbar():
 # ── Auth-Weiche ──────────────────────────────────────────────────────────────
 
 
-def test_auth_modus_key_gewinnt_im_auto_modus():
-    assert core.choose_auth_mode("vision", {"AZURE_VISION_KEY": "k"}) == "key"
+def test_auth_modus_standard_ist_entra_auch_mit_schluessel():
+    """Vorgabe 16.11.2026: Anmeldung über Entra ID, nicht über Schlüssel."""
     assert core.choose_auth_mode("vision", {}) == "entra"
-    assert core.choose_auth_mode("speech", {"AZURE_AUTH_MODE": "entra", "AZURE_SPEECH_KEY": "k"}) == "entra"
+    for dienst, var in (("speech", "AZURE_SPEECH_KEY"), ("vision", "AZURE_VISION_KEY"), ("foundry", "AZURE_FOUNDRY_KEY")):
+        assert core.choose_auth_mode(dienst, {var: "k"}) == "entra"
+        assert core.choose_auth_mode(dienst, {var: "k", "AZURE_AUTH_MODE": "auto"}) == "entra"
+        assert core.choose_auth_mode(dienst, {var: "k", "AZURE_AUTH_MODE": "entra"}) == "entra"
+
+
+def test_auth_modus_key_nur_bei_ausdruecklichem_schalter():
     assert core.choose_auth_mode("speech", {"AZURE_AUTH_MODE": "key"}) == "key"
+    assert core.choose_auth_mode("speech", {"AZURE_AUTH_MODE": " KEY "}) == "key"
+
+
+def test_vision_credential_ohne_schalter_ist_default_azure_credential(monkeypatch):
+    attrappe = object()
+    monkeypatch.setattr(core, "get_default_credential", lambda: attrappe)
+    assert core.get_credential("vision", env={"AZURE_VISION_KEY": "k"}) is attrappe
 
 
 def test_auth_modus_lehnt_unbekanntes_ab():

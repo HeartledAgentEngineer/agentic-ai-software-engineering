@@ -16,7 +16,7 @@ This guide separates the current public code and development checks from a propo
 
 **Current local setup:** install OrbitDesk on a user's Windows workstation, use that user's existing provider sign-ins, and keep configuration and state in that Windows profile. This is appropriate for individual evaluation. It is not a shared service, and profile fields are preferences rather than access-control roles.
 
-**Planned enterprise design:** place an organization-controlled identity and policy layer in front of any shared agent services; map named groups to least-privilege project roles; keep each provider route explicit; and isolate each team's source and execution environment. The local demos can use the Azure SDK's `DefaultAzureCredential` for outbound calls, but provide no caller SSO, role checks, tenant isolation, or managed-identity deployment. Production Azure installation remains a separate planned step.
+**Planned enterprise design:** place an organization-controlled identity and policy layer in front of any shared agent services; map named groups to least-privilege project roles; keep each provider route explicit; and isolate each team's source and execution environment. The local demos use the Azure SDK's `DefaultAzureCredential` for outbound calls by default and validate the caller's Entra ID access token (signature, issuer, audience, expiry, scope) in each server; this is verified offline only, and there is no tenant isolation or managed-identity deployment yet. Production Azure installation remains a separate planned step.
 
 ## Configuration, credentials, and access
 
@@ -30,7 +30,7 @@ This guide separates the current public code and development checks from a propo
 
 ### Planned pilot for speech tools
 
-typeFREE, readFREE, and ShotReader have **runnable local Azure evaluation demos** in [`tools/foundry-demos`](../tools/foundry-demos/README.md). These are not an enterprise deployment. Their separate personal-use routes send audio or text to the configured OpenRouter provider. Organization SSO, tenant isolation, production cost controls, and rollout approval remain planned and are not implemented by the demos.
+typeFREE, readFREE, and ShotReader have **runnable local Azure evaluation demos** in [`tools/foundry-demos`](../tools/foundry-demos/README.md). These are not an enterprise deployment. Their separate personal-use routes send audio or text to the configured OpenRouter provider. The demos implement Entra ID sign-in between client and server (offline-tested, not yet against a live tenant); tenant isolation, production cost controls, and rollout approval remain planned and are not implemented by the demos.
 
 For a department pilot:
 

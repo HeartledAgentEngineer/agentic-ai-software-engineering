@@ -3,11 +3,9 @@
 Pipeline: image upload → Azure AI Vision, Image Analysis Read (F0) → Azure
 Neural TTS (F0) → text plus WAV audio.
 
-Start locally (from ``03_Azure_Projects``)::
+Start locally (from the repository root)::
 
-    ./.venv/Scripts/python.exe -m uvicorn shotReader.server.main:app --port 8103
-
-Container: see ``shotReader/server/Dockerfile``.
+    python -m uvicorn shotReader.server.main:app --app-dir tools/foundry-demos --port 8103
 
 AI-102 mapping: "Implement a computer vision solution" (optical character
 recognition) and "Implement a speech solution" (synthesis).
@@ -68,7 +66,7 @@ def healthz() -> dict:
     return api_common.health_payload("shotreader-azure", VERSION)
 
 
-@app.post("/api/v1/ocr", dependencies=[Depends(api_common.require_token)])
+@app.post("/api/v1/ocr", dependencies=[Depends(api_common.require_entra_user)])
 async def ocr(bild: UploadFile = File(...)) -> dict:
     """Nur Texterkennung (kein Vorlesen)."""
     daten = await _bilddaten(bild)
@@ -81,7 +79,7 @@ async def ocr(bild: UploadFile = File(...)) -> dict:
     return {"text": text}
 
 
-@app.post("/api/v1/ocr-und-vorlesen", dependencies=[Depends(api_common.require_token)])
+@app.post("/api/v1/ocr-und-vorlesen", dependencies=[Depends(api_common.require_entra_user)])
 async def ocr_und_vorlesen(
     bild: UploadFile = File(...),
     stimme: str = Form(core.DEFAULT_SPEECH_VOICE),
