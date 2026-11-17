@@ -51,6 +51,14 @@ test('validator rejects demo files that are too large or not linked from the pro
     assert.equal(rejected.status, 1, 'oversized or unlinked demo files must fail validation');
     assert.match(rejected.stderr, /Demo file above 5 MB \(5242881 bytes\): projects\/other\/docs\/demo\.gif/);
     assert.match(rejected.stderr, /Demo file not linked from projects\/other\/README\.md: projects\/other\/docs\/demo\.gif/);
+
+    const toolDocs = path.join(fixtureRoot, 'tools', 'sometool', 'docs');
+    fs.mkdirSync(toolDocs, { recursive: true });
+    fs.writeFileSync(path.join(fixtureRoot, 'tools', 'sometool', 'README.md'), '# Tool\n\nNo demo link here.\n');
+    fs.writeFileSync(path.join(toolDocs, 'demo.mp4'), Buffer.alloc(16));
+    const rejectedTool = spawnSync(process.execPath, [validator], { encoding: 'utf8', env });
+    assert.equal(rejectedTool.status, 1, 'unlinked demo files under tools/ must fail validation');
+    assert.match(rejectedTool.stderr, /Demo file not linked from tools\/sometool\/README\.md: tools\/sometool\/docs\/demo\.mp4/);
   } finally {
     fs.rmSync(fixtureRoot, { recursive: true, force: true });
   }

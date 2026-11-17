@@ -2,6 +2,13 @@
 
 OrbitDesk is a Windows tray application whose best-established role is showing Claude Code and Codex quota and limit status. Per-topic role profiles and handover workflows are present in the code, but remain experimental; they are not a production-proven agent orchestration service.
 
+![OrbitDesk overview: quota panels for Claude, Codex and Gemini; a click on Aktualisieren refreshes the Codex reading from 18:41 to 18:45](docs/demo.gif)
+
+**What you see:** the top of the overview window with the quota panels, then a click on *Aktualisieren*: the Codex
+reading changes from "gemessen 18:41" to "gemessen 18:45". The tray icon and the per-topic profile table below the
+panels are not shown. Recorded on my desktop on 17 Nov 2026 with my daily version 0.7.12, which also shows the
+Antigravity/Gemini quota; the code in this folder is the published 0.5.1 snapshot with the Claude and Codex panels.
+
 ## What is available
 
 - **Quota and limit display — used day to day.** The tray and overview show measured Claude Code and Codex usage windows, reset information, and unknown or stale readings. The warning threshold is configurable. Claude refresh calls its OAuth usage endpoint; Codex status is read from local session data and can be actively refreshed through the Codex app server. A local interface does not mean offline operation.

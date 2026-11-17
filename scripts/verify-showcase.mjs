@@ -79,24 +79,26 @@ else {
   }
 }
 
-// Recorded demos (projects/<name>/docs/demo.*): small enough for GitHub to show, and linked from the project README.
+// Recorded demos (projects/<name>/docs/demo.*, tools/<name>/docs/demo.*): small enough for GitHub to show, and
+// linked from the README next to them.
 const MAX_DEMO_BYTES = 5 * 1024 * 1024;
-const projectsRoot = path.join(root, 'projects');
 let demoCount = 0;
-if (fs.existsSync(projectsRoot)) {
-  for (const project of fs.readdirSync(projectsRoot, { withFileTypes: true })) {
+for (const area of ['projects', 'tools']) {
+  const areaRoot = path.join(root, area);
+  if (!fs.existsSync(areaRoot)) continue;
+  for (const project of fs.readdirSync(areaRoot, { withFileTypes: true })) {
     if (!project.isDirectory()) continue;
-    const docsDir = path.join(projectsRoot, project.name, 'docs');
+    const docsDir = path.join(areaRoot, project.name, 'docs');
     if (!fs.existsSync(docsDir)) continue;
     const demos = fs.readdirSync(docsDir).filter(name => /^demo\.[a-z0-9]+$/i.test(name));
-    const projectReadme = path.join(projectsRoot, project.name, 'README.md');
+    const projectReadme = path.join(areaRoot, project.name, 'README.md');
     const readmeText = fs.existsSync(projectReadme) ? fs.readFileSync(projectReadme, 'utf8') : '';
     for (const name of demos) {
       demoCount++;
-      const relative = `projects/${project.name}/docs/${name}`;
+      const relative = `${area}/${project.name}/docs/${name}`;
       const size = fs.statSync(path.join(docsDir, name)).size;
       if (size > MAX_DEMO_BYTES) fail(`Demo file above 5 MB (${size} bytes): ${relative}`);
-      if (!readmeText.includes(`](docs/${name})`)) fail(`Demo file not linked from projects/${project.name}/README.md: ${relative}`);
+      if (!readmeText.includes(`](docs/${name})`)) fail(`Demo file not linked from ${area}/${project.name}/README.md: ${relative}`);
     }
   }
 }
