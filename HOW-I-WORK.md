@@ -28,6 +28,8 @@ Before any statement like “works”, “fixed” or “green”:
 Where a project has no check command, I name the missing one and review every change individually. Inventing a
 command that checks nothing would be worse than having none.
 
+→ [Verification run](docs/verification.md): every CI job, the local command for it, and what one recorded run printed.
+
 **The boundary:** for code on a running PLC there is no such gate — a test run on a live machine is not an option.
 There the agent only delivers blueprints, and I apply them myself.
 
