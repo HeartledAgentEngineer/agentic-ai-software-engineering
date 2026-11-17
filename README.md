@@ -39,9 +39,7 @@ Quick links: [Projects](#projects) · [Private Tools](tools/README.md) · [Sonos
 | [Concertify](projects/concertify/) | Web app that builds concert playlists from live setlists; migration from prototype to a 5-layer architecture in progress (10 of 76 routes moved) | Python, Flask, SQLite, Server-Sent Events, Spotify / Ticketmaster APIs | Working prototype |
 | [RAG knowledge base](projects/rag-knowledge-base/) | Semantic knowledge base with hybrid search (vector + full-text reciprocal rank fusion) | Python, FastAPI, PostgreSQL + pgvector, Mistral / Gemini | Working prototype |
 | [Document automation](projects/document-automation/) | Data-driven CV generator: JSON → validated, escaped HTML → A4 PDF, plus PDF merging | Node.js, Puppeteer, pdf-lib, node:test | Stable local tool |
-
 | [University foundations: mail-order company in C](projects/university-foundations/mail-order-c/) | My 2020 university lab code, unchanged — plus a 2026 review with compiler warnings and characterization tests | C (structs, pointers, linked lists, binary files), clang | Archive + review |
-
 | [Agent setup](agent-setup/) | The skills, sub-agents and git hook behind the method | Markdown skills, Bash, Node.js | In daily use |
 
 ### Other experiments
