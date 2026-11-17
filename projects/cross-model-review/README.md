@@ -1,5 +1,20 @@
 # Cross-model review
 
+**Demo — [two recorded runs](docs/demo.md):** a sample plan with one deliberately wrong claim is reviewed by Hermes
+(DeepSeek V4.1 Flash) and gets an objection that cites the code line; after a one-line fix, a fresh run approves it.
+
+```text
+Behauptung 2 (0=FREI, 1=Fehler, 2=EINWAND):
+FALSCH. pruefkreis.py:597 gibt `{"frei": 0, "einwand": 1}.get(status, 2)` zurueck, d.h. 1=EINWAND und 2=Fehler. Die Zuordnung in der Behauptung ist vertauscht. Bestaetigt auch im eigenen Modul-Docstring :52 ("0 = FREI, 1 = EINWAND, 2 = Fehler"). Konkreter Fehler.
+[…]
+URTEIL: EINWAND
+```
+
+**What you see:** an excerpt of round 1 as the tool printed it (German, as the review prompt asks; `[…]` marks
+omitted lines). Round 1 took 79.5 s and cost 0.0024 USD; round 2 after the fix ended with `URTEIL: FREI` in 51.5 s
+for 0.0035 USD. The full output of both rounds, the fix as a diff and how it was recorded are in
+[docs/demo.md](docs/demo.md).
+
 A small CLI that lets one agent's plan or result be checked by a fresh run of another model. I read the review
 protocol instead of carrying messages between agents by hand.
 
@@ -41,5 +56,17 @@ For Codex reviews, `codex exec` runs inside its `--sandbox read-only` mode. For 
 ### Leftover helper processes
 
 Reviewer output goes to temporary files instead of pipes, so a helper process left behind by a reviewer cannot block the run, and the time limit ends the whole process tree.
+
+## Check it yourself
+
+The rules above are covered by an offline test suite — no reviewer, no network, no cost:
+
+```bash
+cd projects/cross-model-review
+python -m pytest -q tests
+```
+
+Local run on 2026-11-17 (Windows, Python 3.12, pytest 9.0.3): `99 passed in 31.75s`. CI runs the same command on
+every push and pull request.
 
 ← [Back to overview](../../README.md)

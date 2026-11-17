@@ -79,9 +79,31 @@ else {
   }
 }
 
+// Recorded demos (projects/<name>/docs/demo.*): small enough for GitHub to show, and linked from the project README.
+const MAX_DEMO_BYTES = 5 * 1024 * 1024;
+const projectsRoot = path.join(root, 'projects');
+let demoCount = 0;
+if (fs.existsSync(projectsRoot)) {
+  for (const project of fs.readdirSync(projectsRoot, { withFileTypes: true })) {
+    if (!project.isDirectory()) continue;
+    const docsDir = path.join(projectsRoot, project.name, 'docs');
+    if (!fs.existsSync(docsDir)) continue;
+    const demos = fs.readdirSync(docsDir).filter(name => /^demo\.[a-z0-9]+$/i.test(name));
+    const projectReadme = path.join(projectsRoot, project.name, 'README.md');
+    const readmeText = fs.existsSync(projectReadme) ? fs.readFileSync(projectReadme, 'utf8') : '';
+    for (const name of demos) {
+      demoCount++;
+      const relative = `projects/${project.name}/docs/${name}`;
+      const size = fs.statSync(path.join(docsDir, name)).size;
+      if (size > MAX_DEMO_BYTES) fail(`Demo file above 5 MB (${size} bytes): ${relative}`);
+      if (!readmeText.includes(`](docs/${name})`)) fail(`Demo file not linked from projects/${project.name}/README.md: ${relative}`);
+    }
+  }
+}
+
 if (errors.length) {
   for (const error of errors) process.stderr.write(`ERROR: ${error}\n`);
   process.exitCode = 1;
 } else {
-  process.stdout.write('Showcase validation passed: required files, local page references, and specific forbidden API/CSS checks.\n');
+  process.stdout.write(`Showcase validation passed: required files, local page references, specific forbidden API/CSS checks, and ${demoCount} demo file(s) within 5 MB and linked from their README.\n`);
 }
