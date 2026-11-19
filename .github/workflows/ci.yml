@@ -102,7 +102,16 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: ${{ matrix.install }}
-      - run: ${{ matrix.test }}
+      # JUnit report per suite: every test with its file and result, kept as an artifact for 14 days.
+      - run: ${{ matrix.test }} -o junit_family=xunit1 --junitxml="${{ runner.temp }}/reports/junit.xml"
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports-${{ matrix.name }}
+          path: ${{ runner.temp }}/reports/
+          if-no-files-found: warn
+          retention-days: 14
 
   shotreader:
     name: ShotReader · PowerShell self-test
