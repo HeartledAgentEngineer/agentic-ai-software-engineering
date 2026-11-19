@@ -8,7 +8,8 @@ Usage (in the project's working directory, after pytest):
   carries its file).
 - ``--coverage``: Cobertura report from pytest-cov (``--cov-report=xml:...``). Optional.
 
-Appends Markdown to ``$GITHUB_STEP_SUMMARY`` or, without that variable, writes it to standard output.
+Appends Markdown to ``$GITHUB_STEP_SUMMARY`` or, without that variable (or if it cannot be written), writes it
+to standard output.
 The exit code is always 0: whether the tests are green is decided by the pytest step, not by the report.
 If the JUnit report is missing (pytest did not finish) or a report cannot be read (broken XML, no access),
 the report says so and gives the reason.
@@ -168,10 +169,14 @@ def main(argv: list[str] | None = None) -> int:
     report = build_report(args.title, args.junit, args.coverage)
     target = os.environ.get("GITHUB_STEP_SUMMARY")
     if target:
-        with open(target, "a", encoding="utf-8") as file:
-            file.write(report + "\n")
-    else:
-        sys.stdout.buffer.write((report + "\n").encode("utf-8"))  # Windows console: not cp1252
+        try:
+            with open(target, "a", encoding="utf-8") as file:
+                file.write(report + "\n")
+            return 0
+        except OSError as error:
+            # The report must never fail the job: fall back to the log, with a warning on the run page.
+            report = f"::warning::Job summary could not be written ({error}); the report follows in the log.\n{report}"
+    sys.stdout.buffer.write((report + "\n").encode("utf-8"))  # Windows console: not cp1252
     return 0
 
 

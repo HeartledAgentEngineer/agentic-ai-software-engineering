@@ -142,3 +142,14 @@ def test_no_access_to_the_coverage_report_is_reported(tmp_path, monkeypatch):
     content = summary.read_text(encoding="utf-8")
     assert "**4 tests:**" in content
     assert "Coverage report could not be read" in content
+
+
+def test_summary_that_cannot_be_written_falls_back_to_stdout_and_exit_stays_0(tmp_path, monkeypatch, capsys):
+    folder = tmp_path / "summary-is-a-folder"  # opening it for appending raises an OSError
+    folder.mkdir()
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(folder))
+
+    assert test_report.main(["--title", "Demo", "--junit", str(_write(tmp_path, "j.xml", JUNIT))]) == 0
+    out = capsys.readouterr().out
+    assert "::warning::Job summary could not be written" in out
+    assert "## Demo: test report" in out

@@ -117,9 +117,11 @@ jobs:
           --junitxml=${{ runner.temp }}/reports/junit.xml
           --cov=. --cov-report=xml:${{ runner.temp }}/reports/coverage.xml
       # Job summary: every test with its result, skipped ones with their reason, line coverage per module.
-      # It never fails the job; green or red is decided by the pytest step above.
+      # It never fails the job; green or red is decided by the pytest step above. The script itself exits 0 on
+      # unreadable reports or an unwritable summary; continue-on-error also covers anything else.
       - name: Test report
         if: always()
+        continue-on-error: true
         shell: bash
         env:
           SUITE: ${{ matrix.name }}

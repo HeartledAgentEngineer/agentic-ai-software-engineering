@@ -33,7 +33,7 @@ Since 2026-11-19 every pytest suite also writes a JUnit report and a coverage re
 `Tests · <suite>` job lists the totals, every failed, erroring or skipped test with its reason, all tests grouped by
 file, and line coverage per module (test code excluded). Both reports stay attached to the run for 14 days as the
 artifact `test-reports-<suite>`. The summary comes from [`.github/scripts/ci_test_report.py`](../.github/scripts/ci_test_report.py);
-its 9 tests run in the lint job. There is no coverage threshold: the numbers are reported, not enforced.
+its 10 tests run in the lint job, and the step cannot fail the job. There is no coverage threshold: the numbers are reported, not enforced.
 
 **Recorded run:** [GitHub Actions run 44498434719](https://github.com/HeartledAgentEngineer/agentic-ai-software-engineering/actions/runs/44498434719)
 on 2026-11-19 for pull request #42, commit `16ecfee`, all jobs green.
