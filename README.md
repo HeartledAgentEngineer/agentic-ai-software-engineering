@@ -22,6 +22,7 @@ here**.
 |---|---|
 | [My Journey](JOURNEY.md) | From prompting to running several agents and models as one system — stage by stage, each with a project as evidence |
 | [How I work](HOW-I-WORK.md) | The working method: verification gate, planner / reviewer / worker roles across harnesses, cross-model review, state in files |
+| [Delivery and checks](docs/enterprise-rollout.md#ci-releases-and-portfolio-promotion) | What runs automatically (CI), what stays a controlled step (merge, release), and what is still missing |
 | [Projects](#projects) | The projects that came out of it, from a PLC digital twin to a multi-agent control room (*Leitwarte*) |
 Quick links: [Projects](#projects) · [Private Tools](tools/README.md) · [Sonos simulation](projects/sonos-music-drop/README.md)
 
