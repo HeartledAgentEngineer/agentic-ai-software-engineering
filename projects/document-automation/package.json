@@ -10,8 +10,6 @@
     "test": "node --test"
   },
   "keywords": [
-    "docx",
-    "openxml",
     "puppeteer",
     "pdf-lib",
     "document-automation"
@@ -19,7 +17,6 @@
   "author": "Max Mustermann",
   "license": "MIT",
   "dependencies": {
-    "docx": "^8.2.0",
     "pdf-lib": "^1.17.1",
     "puppeteer": "^25.16.0"
   },
