@@ -58,6 +58,20 @@ flowchart LR
 
 GitHub automatically runs the configured checks for the selected commit. Review and merge to `main`, plus any later release or promotion, remain controlled steps. The public CI tests source; it does not deploy an enterprise application.
 
+**Automation levels today (checked on 2026-11-19):**
+
+| Step | Trigger | Level |
+|---|---|---|
+| Secret scan first, then lint and project tests ([`ci.yml`](../.github/workflows/ci.yml)) | every push to `main`, every pull request, manual run | Automatic |
+| Dependency update pull requests ([Dependabot](../.github/dependabot.yml)) | monthly for GitHub Actions, pip and npm | Automatic to open; an update reaches `main` only through the same CI and review path |
+| Review by a model of another family | started for each change; verdict, model and route recorded locally | Semi-automatic |
+| Merge to `main` | after green CI and an approving review | Controlled by convention; no branch rule enforces the checks yet |
+| Windows build and draft release (Playground) | version tag `typefree-v*` or `orbitdesk-v*` | Automatic after a manual tag; publishing stays manual. No tag has been pushed yet, so no release exists |
+| Sync of the phone agent with `main` (Playground) | start of the agent | Automatic in both directions: if `main` is ahead, fast-forward (`git pull --ff-only`); if the phone has newer commits, it pushes them to `main` directly, which bypasses CI and review; if both diverged or the fetch fails, it prints a warning and starts the version already on the phone, leaving the merge to me. No deploy job |
+| Cloud resources, PLC/OT systems | — | Manual only |
+
+In short: continuous integration is automatic; continuous delivery exists as a tag-triggered build with a manual publish step and has not run yet; there is no continuous deployment.
+
 **Separate development Playground:** tag workflows exist for Windows executable builds and draft releases for typeFREE and OrbitDesk, gated by their configured tests. The Playground also has a curated exporter; its artificial-fixture tests have been run separately. These development tools are distinct from the public repository's `ci.yml`. The evidence reviewed for this candidate does not establish automatic, version-bound promotion from an approved Playground milestone to a sanitized public pull request. Promotion remains a controlled preparation and review step; each public change must pass the public CI for its exact commit.
 
 ## Monitoring, cost, scale, and rollback
@@ -75,4 +89,4 @@ GitHub automatically runs the configured checks for the selected commit. Review 
 - OrbitDesk package metadata and setup: [`projects/orbitdesk/pyproject.toml`](../projects/orbitdesk/pyproject.toml) and [project guide](../projects/orbitdesk/README.md).
 - Public verification: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
 - Speech tools and their personal-use routes: [Private Tools](../tools/README.md); [local Foundry evaluation demos](../tools/foundry-demos/README.md).
-- Open work: organization-specific identity and deployment design; operational monitoring and cost controls; and independently verified promotion/rollback steps.
+- Open work: organization-specific identity and deployment design; operational monitoring and cost controls; independently verified promotion/rollback steps; a branch rule on `main` that requires the CI checks; routing the phone's own commits through a branch and pull request instead of a direct push; and a first tag-triggered release.
