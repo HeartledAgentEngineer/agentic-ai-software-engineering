@@ -45,4 +45,6 @@ python app.py      # http://127.0.0.1:5000
 pytest tests/      # 193 passed, 2 skipped; also run in CI
 ```
 
+Minimum dependency versions live in `requirements.txt` (last raised on 2026-11-19: Flask 3.1.3, lxml 6.1.3, requests 2.34.2, spotipy 2.26.0, python-dotenv 1.2.4).
+
 ← [Back to overview](../../README.md)
