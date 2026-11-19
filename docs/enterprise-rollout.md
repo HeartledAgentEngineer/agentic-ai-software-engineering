@@ -67,7 +67,7 @@ GitHub automatically runs the configured checks for the selected commit. Review 
 | Review by a model of another family | started for each change; verdict, model and route recorded locally | Semi-automatic |
 | Merge to `main` | after green CI and an approving review | Controlled by convention; no branch rule enforces the checks yet |
 | Windows build and draft release (Playground) | version tag `typefree-v*` or `orbitdesk-v*` | Automatic after a manual tag; publishing stays manual. No tag has been pushed yet, so no release exists |
-| Update of the phone agent (Playground) | start of the agent | Pull-based: fast-forward to `main` when possible (`git pull --ff-only`), otherwise start the version already there. No deploy job |
+| Sync of the phone agent with `main` (Playground) | start of the agent | Automatic in both directions: if `main` is ahead, fast-forward (`git pull --ff-only`); if the phone has newer commits, it pushes them to `main` directly, which bypasses CI and review; if both diverged, it stops and leaves the decision to me. No deploy job |
 | Cloud resources, PLC/OT systems | — | Manual only |
 
 In short: continuous integration is automatic; continuous delivery exists as a tag-triggered build with a manual publish step and has not run yet; there is no continuous deployment.
@@ -89,4 +89,4 @@ In short: continuous integration is automatic; continuous delivery exists as a t
 - OrbitDesk package metadata and setup: [`projects/orbitdesk/pyproject.toml`](../projects/orbitdesk/pyproject.toml) and [project guide](../projects/orbitdesk/README.md).
 - Public verification: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
 - Speech tools and their personal-use routes: [Private Tools](../tools/README.md); [local Foundry evaluation demos](../tools/foundry-demos/README.md).
-- Open work: organization-specific identity and deployment design; operational monitoring and cost controls; independently verified promotion/rollback steps; a branch rule on `main` that requires the CI checks; and a first tag-triggered release.
+- Open work: organization-specific identity and deployment design; operational monitoring and cost controls; independently verified promotion/rollback steps; a branch rule on `main` that requires the CI checks; routing the phone's own commits through a branch and pull request instead of a direct push; and a first tag-triggered release.
