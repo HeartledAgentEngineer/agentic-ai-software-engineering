@@ -41,6 +41,9 @@ npm run build            # HTML + A4 PDF into output/
 npm run merge            # needs the certificate PDFs, see merge_pdfs.js
 ```
 
+Runtime dependencies are Puppeteer (PDF) and pdf-lib (merge). The unused `docx` package was removed on 2026-11-19;
+nothing in this folder builds Word files.
+
 ## Tests
 
 `test/cv.test.js` (Node's built-in test runner) covers the sample data, every validation rule, HTML escaping, date
