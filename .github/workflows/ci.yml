@@ -43,6 +43,10 @@ jobs:
           python-version: "3.12"
       - run: pip install ruff==0.6.9
       - run: ruff check --output-format=github .
+      - name: Self-tests of the CI report script
+        run: |
+          pip install pytest
+          python -m pytest -q -p no:cacheprovider .github/scripts
 
   python-tests:
     name: Tests · ${{ matrix.name }}
@@ -102,7 +106,36 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: ${{ matrix.install }}
-      - run: ${{ matrix.test }}
+      - run: pip install pytest-cov
+      # JUnit and coverage report per suite, both kept as an artifact for 14 days. The coverage data file goes
+      # to the runner's temp folder so the working tree stays as it was.
+      - name: pytest
+        env:
+          COVERAGE_FILE: ${{ runner.temp }}/.coverage
+        run: >-
+          ${{ matrix.test }} -p no:cacheprovider -o junit_family=xunit1
+          --junitxml=${{ runner.temp }}/reports/junit.xml
+          --cov=. --cov-report=xml:${{ runner.temp }}/reports/coverage.xml
+      # Job summary: every test with its result, skipped ones with their reason, line coverage per module.
+      # It never fails the job; green or red is decided by the pytest step above. The script itself exits 0 on
+      # unreadable reports or an unwritable summary; continue-on-error also covers anything else.
+      - name: Test report
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          SUITE: ${{ matrix.name }}
+        run: >-
+          python "$GITHUB_WORKSPACE/.github/scripts/ci_test_report.py" --title "$SUITE"
+          --junit "$RUNNER_TEMP/reports/junit.xml" --coverage "$RUNNER_TEMP/reports/coverage.xml"
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports-${{ matrix.name }}
+          path: ${{ runner.temp }}/reports/
+          if-no-files-found: warn
+          retention-days: 14
 
   shotreader:
     name: ShotReader · PowerShell self-test

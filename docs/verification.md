@@ -27,6 +27,34 @@ on 2026-11-17 for pull request #32, commit `87e0aa7` (tested as merge commit `59
 In total: 3,151 Python tests passed across seven suites (4 skipped), plus 22 Node tests, the C characterization checks
 and the PowerShell self-test.
 
+## Test report and coverage per suite
+
+Since 2026-11-19 every pytest suite also writes a JUnit report and a coverage report. The job summary of each
+`Tests · <suite>` job lists the totals, every failed, erroring or skipped test with its reason, all tests grouped by
+file, and line coverage per module (test code excluded). Both reports stay attached to the run for 14 days as the
+artifact `test-reports-<suite>`. The summary comes from [`.github/scripts/ci_test_report.py`](../.github/scripts/ci_test_report.py);
+its 10 tests run in the lint job, and the step cannot fail the job. There is no coverage threshold: the numbers are reported, not enforced.
+
+**Recorded run:** [GitHub Actions run 44498434719](https://github.com/HeartledAgentEngineer/agentic-ai-software-engineering/actions/runs/44498434719)
+on 2026-11-19 for pull request #42, commit `16ecfee`, all jobs green.
+
+| Suite | Tests | Line coverage (test code excluded) |
+|---|---|---|
+| orbitdesk | 2,044 (2,043 passed, 1 skipped) | 89 % (9,191 of 10,319 lines) |
+| typefree | 659 (658 passed, 1 skipped) | 82 % (2,039 of 2,480) |
+| cross-model-review | 99 passed | 92 % (357 of 388) |
+| foundry-demos | 87 passed | 61 % (622 of 1,019) |
+| readfree | 88 passed | 53 % (579 of 1,091) |
+| concertify | 195 (193 passed, 2 skipped) | 21 % (1,167 of 5,611) |
+| personal-ai-agent | 57 passed | 22 % (1,107 of 5,086) |
+| rag-knowledge-base | 13 passed | 17 % (112 of 676) |
+
+Where coverage is low, the "Known gap" column in the [README](../README.md#quality-at-a-glance) says what is not
+tested. Adding coverage did not change which tests run: the same pull request first ran with the JUnit report only
+(commit `aa8c5b5`, [run 44496003931](https://github.com/HeartledAgentEngineer/agentic-ai-software-engineering/actions/runs/44496003931)),
+and the two runs were compared test by test. All 3,242 tests matched with the same result in both runs (none added,
+missing or changed), and the pytest summary lines of the first run matched the last run on `main`.
+
 ## What CI does not check
 
 - The demo GIFs are recorded locally by [`scripts/demos/record-browser-demos.cjs`](../scripts/demos/record-browser-demos.cjs)

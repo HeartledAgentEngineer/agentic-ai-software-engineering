@@ -118,6 +118,8 @@ flowchart TB
 
 Every push to `main`, pull request, and manual workflow dispatch runs [CI](.github/workflows/ci.yml): a full-history secret scan (Gitleaks), a lint gate (ruff, bug-class rules: syntax errors, undefined names), the test suites below, a syntax check of every JavaScript file, the Node test runner, and the C characterization tests.
 
+Each pytest job also writes a job summary (every test with its result, skipped tests with their reason, line coverage per module) and keeps the JUnit and coverage reports for 14 days; [how to read a run](docs/verification.md#test-report-and-coverage-per-suite).
+
 | Project | Automated tests | Runs in CI | Known gap |
 |---|---|---|---|
 | OrbitDesk | pytest suite | yes (Windows) | tray/UI interactions use fakes in headless test runs; no fixed count asserted |
