@@ -7,3 +7,4 @@
 *.ico binary
 # 2020 student code stays byte-exact (Windows-1252, CRLF)
 projects/university-foundations/**/original/** -text
+*.mp4 binary
