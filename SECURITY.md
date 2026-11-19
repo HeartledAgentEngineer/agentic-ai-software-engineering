@@ -15,7 +15,7 @@ If private vulnerability reporting is available in a public version, use GitHub'
 | Dependency updates as reviewed pull requests | [Dependabot](.github/dependabot.yml) |
 | The personal agent checks host and origin on every response (against cross-site reads of its API key and DNS rebinding — found by a test, then fixed) and blocks private names before a web search leaves the device | [personal-ai-agent](projects/personal-ai-agent/) |
 
-The GitHub Actions `actions/checkout@v6`, `actions/setup-python@v6`, and `actions/setup-node@v5` run on Node.js 24.
+The GitHub Actions `actions/checkout@v7`, `actions/setup-python@v7`, and `actions/setup-node@v7` run on Node.js 24.
 
 On pull requests, the secret scan reads the PR commit list with read-only permissions and leaves PR comments disabled.
 
