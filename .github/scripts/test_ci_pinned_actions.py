@@ -352,6 +352,8 @@ def test_hardened_target_and_multiline_key_edge_cases_fail(tmp_path, capsys, bad
     '  - run: "echo\n      uses: actions/checkout@v4"',
     "  - run: echo\n      {",
     "  env: {\n    MODE: uses\n  }",
+    "  - name: Don't skip checkout",
+    "  - name: 'Don''t skip checkout'",
 ])
 def test_hardened_valid_multiline_context_before_pinned_uses_passes(tmp_path, capsys, snippet):
     content = (
@@ -363,6 +365,28 @@ def test_hardened_valid_multiline_context_before_pinned_uses_passes(tmp_path, ca
     code, out = run(folder, capsys)
     assert code == 0
     assert "1 uses: lines pinned" in out
+
+
+@pytest.mark.parametrize("snippet", [
+    "  - name: Don't skip checkout\n    uses: actions/checkout@v7",
+    "  - name: step 'unclosed\n    uses: actions/checkout@v7",
+    "  - run: echo 'hello\n    uses: actions/checkout@v7",
+    "  - { name: Don't, uses: actions/checkout@v7 }",
+    "  - { name: foo\n      'bar, uses: actions/checkout@v7 }",
+    "  - name: 'unclosed quote at eof",
+])
+def test_apostrophe_or_unclosed_quote_never_hides_unpinned_uses(tmp_path, capsys, snippet):
+    content = (
+        "steps:\n"
+        f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
+        f"{snippet}\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "::error file=" in out
+    assert "ci.yml,line=2" not in out
+
 
 
 

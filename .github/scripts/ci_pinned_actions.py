@@ -23,6 +23,9 @@ FLOW_OPEN_PREFIX_RE = re.compile(
     rf"(?:[^:\[\]{{}},?#\s][^:\[\]{{}}]*:\s*)?(?:(?:\[\s*)|{_NODE_PROP})*$"
 )
 FLOW_USES_KEY_RE = re.compile(rf"(?:^\s*|[,{{\[]\s*){_NODE_PROP}(?:\?\s*{_NODE_PROP})?uses(?:\s*:|\s*$)")
+FLOW_ONLY_WS_AND_PROP_RE = re.compile(rf"^\s*{_NODE_PROP}$")
+FLOW_QUOTE_AFTER_DELIM_RE = re.compile(rf"[,{{\[:\?]\s*{_NODE_PROP}$")
+FLOW_NEXT_NODE_END_RE = re.compile(r"(?:[,{\[:\?]|(?:!<[^>]+>|[&!][^\s\[\]{},]+))\s*$")
 EXPLICIT_INLINE_USES_RE = re.compile(rf"^\s*(?:---\s+)?(?:-\s+)*{_NODE_PROP}\?\s*{_NODE_PROP}uses(?:\s*:|\s*$)")
 EXPLICIT_ONLY_QMARK_RE = re.compile(rf"^(?:---\s+)?(?:-\s+)*{_NODE_PROP}\?$")
 EXPLICIT_NEXT_USES_RE = re.compile(rf"^\s*{_NODE_PROP}uses(?:\s*:|\s*$)")
@@ -104,6 +107,15 @@ def _consume_double_quoted(line: str, j: int, chars: list[str]) -> tuple[int, bo
     return j, False, False
 
 
+def _can_start_quote(prefix: str, depth: int, seq: int, allow_ws_open: bool) -> bool:
+    """Return True only when ``prefix`` ends at a YAML node start position."""
+    if depth == 0 and seq == 0:
+        return bool((prefix.strip() or allow_ws_open) and FLOW_OPEN_PREFIX_RE.match(prefix))
+    if FLOW_ONLY_WS_AND_PROP_RE.match(prefix):
+        return allow_ws_open
+    return bool(FLOW_QUOTE_AFTER_DELIM_RE.search(prefix))
+
+
 def _scan_yaml_line(
     line: str,
     flow_depth: int = 0,
@@ -163,19 +175,16 @@ def _scan_yaml_line(
             out.append('""')
             i = j
             continue
-        if ch == "'":
+        if ch in ("'", '"') and _can_start_quote("".join(out), depth, seq, allow_whitespace_flow_open):
             chars = []
-            j, closed = _consume_single_quoted(line, i + 1, chars)
-            if not closed:
-                return "".join(out), depth, seq, had_flow, "'", chars, False
-            out.append("uses" if "".join(chars) == "uses" else '""')
-            i = j
-            continue
-        if ch == '"':
-            chars = []
-            j, closed, escaped_nl = _consume_double_quoted(line, i + 1, chars)
-            if not closed:
-                return "".join(out), depth, seq, had_flow, '"', chars, escaped_nl
+            if ch == "'":
+                j, closed = _consume_single_quoted(line, i + 1, chars)
+                if not closed:
+                    return "".join(out), depth, seq, had_flow, "'", chars, False
+            else:
+                j, closed, escaped_nl = _consume_double_quoted(line, i + 1, chars)
+                if not closed:
+                    return "".join(out), depth, seq, had_flow, '"', chars, escaped_nl
             out.append("uses" if "".join(chars) == "uses" else '""')
             i = j
             continue
@@ -348,6 +357,8 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
         last_uses_indent: int | None = None
         plain_scalar_indent: int | None = None
         open_quote: str | None = None
+        open_quote_lineno = 0
+        flow_node_ready = True
         quote_chars: list[str] = []
         quote_escaped_nl = False
         pending_explicit_key = False
@@ -379,7 +390,11 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
                     if raw_stripped.startswith("#") or indent <= plain_scalar_indent:
                         plain_scalar_indent = None
 
-            allow_ws_flow = not (plain_scalar_indent is not None and indent > plain_scalar_indent)
+            prev_open_quote = open_quote
+            if flow_depth > 0 or seq_depth > 0:
+                allow_ws_flow = flow_node_ready
+            else:
+                allow_ws_flow = not (plain_scalar_indent is not None and indent > plain_scalar_indent)
             cleaned, flow_depth, seq_depth, in_flow, open_quote, quote_chars, quote_escaped_nl = _scan_yaml_line(
                 line,
                 flow_depth,
@@ -390,6 +405,12 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
                 allow_ws_flow,
             )
             stripped = cleaned.strip()
+            if prev_open_quote is None and open_quote is not None:
+                open_quote_lineno = lineno
+            if flow_depth == 0 and seq_depth == 0:
+                flow_node_ready = True
+            elif open_quote is None and stripped:
+                flow_node_ready = bool(FLOW_NEXT_NODE_END_RE.search(cleaned))
 
             if not in_flow and pending_explicit_key:
                 if not stripped:
@@ -444,6 +465,9 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
             ):
                 prefix_match = re.match(r"^(\s*(?:---\s+)?(?:-\s+)*)", cleaned)
                 plain_scalar_indent = len(prefix_match.group(1)) if prefix_match else 0
+
+        if open_quote is not None:
+            errors.append(f"::error file={file_ref},line={open_quote_lineno}::unclosed YAML {open_quote} quote")
 
     if uses_count == 0:
         errors.append("::error::no uses: lines found")
