@@ -154,6 +154,9 @@ def test_mixed_valid_pinned_and_multiline_uses_fails(tmp_path, capsys):
 @pytest.mark.parametrize("line", [
     "  - {uses: actions/checkout@v7}",
     "  - { name: step, uses: actions/checkout@v7 }",
+    '  - {name: "#", uses: actions/checkout@v7}',
+    "  - {name: '# foo', uses: actions/checkout@v7}",
+    '  - {"uses": "actions/checkout@v7"}',
     f"  - {{uses: actions/checkout@{SHA}}} # v7.0.1",
 ])
 def test_flow_mapping_uses_fails(tmp_path, capsys, line):
@@ -164,11 +167,15 @@ def test_flow_mapping_uses_fails(tmp_path, capsys, line):
     assert "line=2::" in out
 
 
-def test_mixed_valid_pinned_and_flow_mapping_uses_fails(tmp_path, capsys):
+@pytest.mark.parametrize("bad_line", [
+    "  - {uses: actions/checkout@v7}",
+    '  - {name: "#", uses: actions/checkout@v7}',
+])
+def test_mixed_valid_pinned_and_flow_mapping_uses_fails(tmp_path, capsys, bad_line):
     content = (
         f"steps:\n"
         f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
-        f"  - {{uses: actions/checkout@v7}}\n"
+        f"{bad_line}\n"
     )
     folder = workflows(tmp_path, content)
     code, out = run(folder, capsys)

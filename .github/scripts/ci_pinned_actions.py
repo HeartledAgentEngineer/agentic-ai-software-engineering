@@ -17,11 +17,45 @@ import sys
 from pathlib import Path
 
 USES_LINE_RE = re.compile(r"""^\s*(?:-\s+)?(?:uses|['"]uses['"])\s*:(.*)$""")
-FLOW_USES_RE = re.compile(r"""^\s*(?:-\s*)?\{[^#]*(?:uses|['"]uses['"])\s*:""")
+FLOW_START_RE = re.compile(r"^\s*(?:-\s*)?(?:[\[{]|(?!run\b)[A-Za-z0-9_-]+\s*:\s*[\[{])")
+FLOW_USES_KEY_RE = re.compile(r"""(?:^|[,{\[\s])(?:uses|['"]uses['"])\s*:""")
 BLOCK_SCALAR_RE = re.compile(r"^[|>](?:[+-]?\d+|\d+[+-]?|[+-])?(?:\s+#.*|\s*)$")
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST64_RE = re.compile(r"^docker://.+@sha256:[0-9a-f]{64}$")
 VERSION_COMMENT_RE = re.compile(r"#\s*v\S+")
+
+
+def _strip_yaml_comment(line: str) -> str:
+    """Return ``line`` up to any unquoted YAML ``#`` comment."""
+    in_quote: str | None = None
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if in_quote == "'":
+            if ch == "'":
+                if i + 1 < len(line) and line[i + 1] == "'":
+                    i += 2
+                    continue
+                in_quote = None
+        elif in_quote == '"':
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                in_quote = None
+        else:
+            if ch in ("'", '"'):
+                in_quote = ch
+            elif ch == "#" and (i == 0 or line[i - 1].isspace()):
+                return line[:i]
+        i += 1
+    return line
+
+
+def _flow_mapping_has_uses(line: str) -> bool:
+    if not FLOW_START_RE.match(line):
+        return False
+    return bool(FLOW_USES_KEY_RE.search(_strip_yaml_comment(line)))
 
 
 def _split_target_and_comment(raw_rhs: str) -> tuple[str, str] | None:
@@ -92,7 +126,7 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
             errors.append(f"::error file={file_ref}::could not read file ({exc})")
             continue
         for lineno, line in enumerate(lines, start=1):
-            if FLOW_USES_RE.match(line):
+            if _flow_mapping_has_uses(line):
                 uses_count += 1
                 errors.append(
                     f"::error file={file_ref},line={lineno}::flow-mapping uses: is not supported; use block mapping"
