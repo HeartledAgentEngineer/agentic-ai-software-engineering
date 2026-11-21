@@ -109,6 +109,7 @@ def test_yaml_extension_and_subfolders_are_scanned(tmp_path, capsys):
 def test_comment_lines_and_text_mentions_are_ignored(tmp_path, capsys):
     folder = workflows(tmp_path, f"# old: uses: actions/checkout@v4\nsteps:\n"
                                  f"  - run: echo 'uses: actions/checkout@v4'\n"
+                                 f"  - run: echo '[{{uses: actions/checkout@v4}}]'\n"
                                  f"  - uses: actions/checkout@{SHA} # v7.0.1\n")
     code, out = run(folder, capsys)
     assert code == 0
@@ -157,10 +158,12 @@ def test_mixed_valid_pinned_and_multiline_uses_fails(tmp_path, capsys):
     '  - {name: "#", uses: actions/checkout@v7}',
     "  - {name: '# foo', uses: actions/checkout@v7}",
     '  - {"uses": "actions/checkout@v7"}',
+    "  run: {uses: octo/repo/.github/workflows/build.yml@main}",
+    "  steps: [{uses: actions/checkout@v7}]",
     f"  - {{uses: actions/checkout@{SHA}}} # v7.0.1",
 ])
 def test_flow_mapping_uses_fails(tmp_path, capsys, line):
-    folder = workflows(tmp_path, f"steps:\n{line}\n")
+    folder = workflows(tmp_path, f"jobs:\n{line}\n")
     code, out = run(folder, capsys)
     assert code == 1
     assert "::error file=" in out
@@ -170,10 +173,11 @@ def test_flow_mapping_uses_fails(tmp_path, capsys, line):
 @pytest.mark.parametrize("bad_line", [
     "  - {uses: actions/checkout@v7}",
     '  - {name: "#", uses: actions/checkout@v7}',
+    "  run: {uses: octo/repo/.github/workflows/build.yml@main}",
 ])
 def test_mixed_valid_pinned_and_flow_mapping_uses_fails(tmp_path, capsys, bad_line):
     content = (
-        f"steps:\n"
+        f"jobs:\n"
         f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
         f"{bad_line}\n"
     )

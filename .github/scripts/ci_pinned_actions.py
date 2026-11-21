@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 USES_LINE_RE = re.compile(r"""^\s*(?:-\s+)?(?:uses|['"]uses['"])\s*:(.*)$""")
-FLOW_START_RE = re.compile(r"^\s*(?:-\s*)?(?:[\[{]|(?!run\b)[A-Za-z0-9_-]+\s*:\s*[\[{])")
+FLOW_START_RE = re.compile(r"""^\s*(?:-\s*)?(?:[\[{]|(?:[A-Za-z0-9_.-]+|['"][^'"]+['"])\s*:\s*[\[{])""")
 FLOW_USES_KEY_RE = re.compile(r"""(?:^|[,{\[\s])(?:uses|['"]uses['"])\s*:""")
 BLOCK_SCALAR_RE = re.compile(r"^[|>](?:[+-]?\d+|\d+[+-]?|[+-])?(?:\s+#.*|\s*)$")
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
