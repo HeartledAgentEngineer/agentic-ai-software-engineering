@@ -24,10 +24,10 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0          # scan the whole history, not only the last commit
-      - uses: gitleaks/gitleaks-action@v3
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_COMMENTS: 'false'
@@ -37,16 +37,18 @@ jobs:
     needs: secrets          # a leaked key stops the run before any test starts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - run: pip install ruff==0.6.9
       - run: ruff check --output-format=github .
-      - name: Self-tests of the CI report script
+      - name: Self-tests of the CI scripts
         run: |
-          pip install pytest
+          pip install pytest "PyYAML>=6.0,<7"
           python -m pytest -q -p no:cacheprovider .github/scripts
+      - name: Actions are pinned to a commit SHA
+        run: python .github/scripts/ci_pinned_actions.py .github/workflows
 
   python-tests:
     name: Tests · ${{ matrix.name }}
@@ -100,8 +102,8 @@ jobs:
       run:
         working-directory: ${{ matrix.dir }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
           cache: pip
@@ -130,7 +132,7 @@ jobs:
           --junit "$RUNNER_TEMP/reports/junit.xml" --coverage "$RUNNER_TEMP/reports/coverage.xml"
       - name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-reports-${{ matrix.name }}
           path: ${{ runner.temp }}/reports/
@@ -145,7 +147,7 @@ jobs:
       run:
         working-directory: tools/shotreader
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Self-test (rules, fingerprint, local OCR and speech; no network)
         shell: powershell
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\ShotReader.ps1 -Test
@@ -160,7 +162,7 @@ jobs:
         shell: bash
         working-directory: projects/university-foundations/mail-order-c
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: clang --version
       - run: CC=clang bash check.sh
 
@@ -169,8 +171,8 @@ jobs:
     needs: secrets
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           package-manager-cache: false
@@ -191,8 +193,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           package-manager-cache: false
