@@ -62,3 +62,6 @@ missing or changed), and the pytest summary lines of the first run matched the l
 - The [cross-model review demo](../projects/cross-model-review/docs/demo.md) needs a signed-in reviewer (Hermes or
   Codex) and costs a few tenths of a cent per run, so it is a recorded run, not a CI job. The offline rules behind it
   are the `cross-model-review` tests above.
+- Formatting (`ruff format --check`) is currently enforced only for `.github/scripts` and `projects/cross-model-review`
+  (added on 2026-11-21); the remaining Python projects are checked only with `ruff check` (`E9`, `F63`, `F7`, `F82`)
+  and are not format-checked in CI yet.
