@@ -15,7 +15,7 @@ Brueckenwissen:
 """
 
 from dataclasses import dataclass
-from datetime import date
+import datetime
 
 
 @dataclass
@@ -36,8 +36,8 @@ class Concert:
     """
 
     artist_name: str
-    date: date           # WICHTIG: das ist die Python-Klasse `date`,
-                         # nicht das Attribut. Beachte den import oben.
+    date: datetime.date  # Modulqualifiziert, damit der Feldname `date`
+                         # in Methodensignaturen nicht den Typ ueberschattet.
     venue: str
     city: str
     festival: str | None = None
@@ -46,7 +46,7 @@ class Concert:
 
     # ─── Verhalten ──────────────────────────────────────────────────────────
 
-    def is_upcoming(self, today: date | None = None) -> bool:
+    def is_upcoming(self, today: datetime.date | None = None) -> bool:
         """True wenn das Konzert heute oder spaeter ist.
 
         Args:
@@ -54,13 +54,13 @@ class Concert:
                    Default: das echte heutige Datum.
 
         Beispiel:
-            concert = Concert(..., date=date(2026, 6, 1), ...)
-            concert.is_upcoming(today=date(2026, 5, 26))  → True (Zukunft)
-            concert.is_upcoming(today=date(2026, 6, 15))  → False (Vergangenheit)
+            concert = Concert(..., date=datetime.date(2026, 6, 1), ...)
+            concert.is_upcoming(today=datetime.date(2026, 5, 26))  → True (Zukunft)
+            concert.is_upcoming(today=datetime.date(2026, 6, 15))  → False (Vergangenheit)
         """
-        # `today or date.today()` = wenn today None ist, nimm date.today().
+        # `today or datetime.date.today()` = wenn today None ist, nimm das heutige Datum.
         # `or` mit None wirkt wie ein Default-Wert.
-        comparison_date = today or date.today()
+        comparison_date = today or datetime.date.today()
         return self.date >= comparison_date
 
     def is_festival(self) -> bool:

@@ -65,3 +65,6 @@ missing or changed), and the pytest summary lines of the first run matched the l
 - Formatting (`ruff format --check`) is currently enforced only for `.github/scripts` and `projects/cross-model-review`
   (added on 2026-11-21); the remaining Python projects are checked only with `ruff check` (`E9`, `F63`, `F7`, `F82`)
   and are not format-checked in CI yet.
+- Static type checking (`mypy` 1.13.0) currently covers only `.github/scripts/ci_pinned_actions.py`,
+  `.github/scripts/ci_test_report.py`, and `projects/concertify/domain` (added on 2026-11-21); all other modules and
+  test files are not type-checked in CI yet.

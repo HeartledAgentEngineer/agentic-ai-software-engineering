@@ -49,6 +49,10 @@ jobs:
         run: |
           pip install pytest "PyYAML>=6.0,<7"
           python -m pytest -q -p no:cacheprovider .github/scripts
+      - name: Type check (mypy · .github/scripts and concertify/domain)
+        run: |
+          pip install mypy==1.13.0 types-PyYAML==6.0.12.20240917
+          mypy --python-version 3.12 .github/scripts/ci_pinned_actions.py .github/scripts/ci_test_report.py projects/concertify/domain
       - name: Actions are pinned to a commit SHA
         run: python .github/scripts/ci_pinned_actions.py .github/workflows
 
