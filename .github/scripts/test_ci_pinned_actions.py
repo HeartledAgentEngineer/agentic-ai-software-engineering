@@ -246,3 +246,39 @@ def test_multiline_run_block_scalar_with_braces_and_uses_text_passes(tmp_path, c
     assert code == 0
     assert "1 uses: lines pinned" in out
 
+
+@pytest.mark.parametrize("line", [
+    r'  - "us\u0065s": actions/checkout@v7',
+    r'  - "\x75ses": actions/checkout@v7',
+    r'  - {"us\u0065s": actions/checkout@v7}',
+    r'  ? "us\u0065s": actions/checkout@v7',
+])
+def test_escaped_double_quoted_uses_key_fails(tmp_path, capsys, line):
+    content = (
+        "jobs:\n"
+        f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
+        f"{line}\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "ci.yml,line=3::" in out
+    assert "ci.yml,line=2" not in out
+
+
+@pytest.mark.parametrize("shell_line", [
+    "  - run: echo {",
+    "  - run: if [ -f foo; then {",
+])
+def test_plain_scalar_with_brace_or_bracket_before_pinned_uses_passes(tmp_path, capsys, shell_line):
+    content = (
+        "jobs:\n"
+        f"{shell_line}\n"
+        f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 0
+    assert "1 uses: lines pinned" in out
+
+

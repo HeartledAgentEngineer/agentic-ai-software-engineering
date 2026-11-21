@@ -16,7 +16,8 @@ import re
 import sys
 from pathlib import Path
 
-USES_LINE_RE = re.compile(r"""^\s*(?:-\s+)*(?:uses|['"]uses['"])\s*:(.*)$""")
+USES_CLEANED_RE = re.compile(r"^\s*(?:-\s+)*uses\s*:")
+FLOW_OPEN_PREFIX_RE = re.compile(r"^\s*(?:-\s+)*(?:\?\s*)?(?:[^:\[\]{},?#\s][^:\[\]{}]*:\s*)?(?:\[\s*)*$")
 FLOW_USES_KEY_RE = re.compile(r"(?:^|[,{\[\s])uses(?:\s*:|\s*$)")
 FLOW_SEQ_USES_RE = re.compile(r"\[[^\]]*(?:^|[,\[\s])uses\s*:")
 EXPLICIT_INLINE_USES_RE = re.compile(r"^\s*(?:-\s+)*\?\s*uses(?:\s*:|\s*$)")
@@ -28,11 +29,50 @@ SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST64_RE = re.compile(r"^docker://.+@sha256:[0-9a-f]{64}$")
 VERSION_COMMENT_RE = re.compile(r"#\s*v\S+")
 
+_YAML_ESCAPES = {
+    "0": "\x00",
+    "a": "\a",
+    "b": "\b",
+    "t": "\t",
+    "\t": "\t",
+    "n": "\n",
+    "v": "\v",
+    "f": "\f",
+    "r": "\r",
+    "e": "\x1b",
+    " ": " ",
+    '"': '"',
+    "/": "/",
+    "\\": "\\",
+    "N": "\x85",
+    "_": "\xa0",
+    "L": "\u2028",
+    "P": "\u2029",
+}
+_HEX_WIDTHS = {"x": 2, "u": 4, "U": 8}
 
-def _scan_yaml_line(line: str) -> tuple[str, int]:
-    """Strip comments and ``${{ ... }}`` expressions, normalize quoted strings, and count ``{``/``}`` delta."""
+
+def _decode_yaml_escape(line: str, idx: int) -> tuple[str, int]:
+    """Decode one YAML double-quoted escape starting after ``\\`` at ``idx``."""
+    if idx >= len(line):
+        return "", idx
+    esc = line[idx]
+    width = _HEX_WIDTHS.get(esc)
+    if width is not None:
+        hex_part = line[idx + 1 : idx + 1 + width]
+        if len(hex_part) == width and all(c in "0123456789abcdefABCDEF" for c in hex_part):
+            return chr(int(hex_part, 16)), idx + 1 + width
+    if esc in _YAML_ESCAPES:
+        return _YAML_ESCAPES[esc], idx + 1
+    return esc, idx + 1
+
+
+def _scan_yaml_line(line: str, flow_depth: int = 0, seq_depth: int = 0) -> tuple[str, int, int, bool]:
+    """Strip comments/``${{ ... }}``, normalize quoted strings (decoding YAML escapes), and track flow depth."""
     out: list[str] = []
-    brace_delta = 0
+    depth = flow_depth
+    seq = seq_depth
+    had_flow = depth > 0 or seq > 0
     i = 0
     n = len(line)
     while i < n:
@@ -79,9 +119,8 @@ def _scan_yaml_line(line: str) -> tuple[str, int]:
             chars = []
             while j < n:
                 if line[j] == "\\":
-                    if j + 1 < n:
-                        chars.append(line[j + 1])
-                    j += 2
+                    decoded, j = _decode_yaml_escape(line, j + 1)
+                    chars.append(decoded)
                     continue
                 if line[j] == '"':
                     j += 1
@@ -92,12 +131,66 @@ def _scan_yaml_line(line: str) -> tuple[str, int]:
             i = j
             continue
         if ch == "{":
-            brace_delta += 1
+            if depth > 0 or seq > 0 or FLOW_OPEN_PREFIX_RE.match("".join(out)):
+                depth += 1
+                had_flow = True
         elif ch == "}":
-            brace_delta -= 1
+            if depth > 0:
+                depth -= 1
+                had_flow = True
+        elif ch == "[":
+            if depth > 0 or seq > 0 or FLOW_OPEN_PREFIX_RE.match("".join(out)):
+                seq += 1
+                had_flow = True
+        elif ch == "]" and seq > 0:
+            seq -= 1
+            had_flow = True
         out.append(ch)
         i += 1
-    return "".join(out), brace_delta
+    return "".join(out), depth, seq, had_flow
+
+
+def _extract_mapping_rhs(line: str) -> str | None:
+    """Return the raw substring after the first YAML mapping key ``:`` on ``line``."""
+    i = 0
+    n = len(line)
+    while i < n:
+        while i < n and line[i].isspace():
+            i += 1
+        if i < n and line[i] == "-" and (i + 1 == n or line[i + 1].isspace()):
+            i += 1
+            continue
+        break
+    if i >= n:
+        return None
+    if line[i] == "'":
+        i += 1
+        while i < n:
+            if line[i] == "'":
+                if i + 1 < n and line[i + 1] == "'":
+                    i += 2
+                    continue
+                i += 1
+                break
+            i += 1
+    elif line[i] == '"':
+        i += 1
+        while i < n:
+            if line[i] == "\\":
+                i += 2
+                continue
+            if line[i] == '"':
+                i += 1
+                break
+            i += 1
+    else:
+        while i < n and line[i] != ":":
+            i += 1
+    while i < n and line[i].isspace():
+        i += 1
+    if i < n and line[i] == ":":
+        return line[i + 1 :]
+    return None
 
 
 def _split_target_and_comment(raw_rhs: str) -> tuple[str, str] | None:
@@ -168,6 +261,7 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
             errors.append(f"::error file={file_ref}::could not read file ({exc})")
             continue
         flow_depth = 0
+        seq_depth = 0
         block_indent: int | None = None
         pending_explicit_key = False
         for lineno, line in enumerate(lines, start=1):
@@ -178,9 +272,7 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
                     continue
                 block_indent = None
 
-            cleaned, brace_delta = _scan_yaml_line(line)
-            in_flow = (flow_depth > 0) or ("{" in cleaned)
-            flow_depth = max(0, flow_depth + brace_delta)
+            cleaned, flow_depth, seq_depth, in_flow = _scan_yaml_line(line, flow_depth, seq_depth)
             stripped = cleaned.strip()
 
             if not in_flow and pending_explicit_key:
@@ -208,10 +300,10 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
                 pending_explicit_key = True
                 continue
 
-            match = USES_LINE_RE.match(line)
-            if match:
+            if USES_CLEANED_RE.match(cleaned):
                 uses_count += 1
-                parsed = _split_target_and_comment(match.group(1))
+                raw_rhs = _extract_mapping_rhs(line)
+                parsed = None if raw_rhs is None else _split_target_and_comment(raw_rhs)
                 if parsed is None:
                     errors.append(f"::error file={file_ref},line={lineno}::empty or multiline uses: is not supported")
                     continue
@@ -220,7 +312,7 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
                     errors.append(f"::error file={file_ref},line={lineno}::{reason}")
                 continue
 
-            if flow_depth == 0 and BLOCK_SCALAR_START_RE.search(cleaned):
+            if flow_depth == 0 and seq_depth == 0 and BLOCK_SCALAR_START_RE.search(cleaned):
                 prefix_match = re.match(r"^(\s*(?:-\s+)*)", cleaned)
                 block_indent = len(prefix_match.group(1)) if prefix_match else 0
 
