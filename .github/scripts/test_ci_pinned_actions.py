@@ -108,8 +108,8 @@ def test_yaml_extension_and_subfolders_are_scanned(tmp_path, capsys):
 
 def test_comment_lines_and_text_mentions_are_ignored(tmp_path, capsys):
     folder = workflows(tmp_path, f"# old: uses: actions/checkout@v4\nsteps:\n"
-                                 f"  - run: echo 'uses: actions/checkout@v4'\n"
-                                 f"  - run: echo '[{{uses: actions/checkout@v4}}]'\n"
+                                 f'  - run: "echo \'uses: actions/checkout@v4\'"\n'
+                                 f'  - run: "echo \'[{{uses: actions/checkout@v4}}]\'"\n'
                                  f"  - uses: actions/checkout@{SHA} # v7.0.1\n")
     code, out = run(folder, capsys)
     assert code == 0
@@ -129,13 +129,22 @@ def test_missing_folder_fails(tmp_path, capsys):
     assert "::error::" in out
 
 
-@pytest.mark.parametrize("uses_rhs", [">-", ">", "|", "|-", "|+", ">2-", "", "   # only comment"])
-def test_multiline_or_empty_uses_fails(tmp_path, capsys, uses_rhs):
-    folder = workflows(tmp_path, f"steps:\n  - uses: {uses_rhs}\n    actions/checkout@v7\n")
+@pytest.mark.parametrize("uses_rhs", [">-", ">", "|", "|-", "|+", ">2-"])
+def test_multiline_uses_fails(tmp_path, capsys, uses_rhs):
+    folder = workflows(tmp_path, f"steps:\n  - uses: {uses_rhs}\n      actions/checkout@v7\n")
     code, out = run(folder, capsys)
     assert code == 1
     assert "::error file=" in out
-    assert "line=2::" in out
+    assert "line=2::empty, aliased, or multiline" in out
+
+
+@pytest.mark.parametrize("uses_rhs", ["", "   # only comment"])
+def test_empty_uses_fails(tmp_path, capsys, uses_rhs):
+    folder = workflows(tmp_path, f"steps:\n  - uses: {uses_rhs}\n  - run: echo next\n")
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "::error file=" in out
+    assert "line=2::empty, aliased, or multiline" in out
 
 
 def test_mixed_valid_pinned_and_multiline_uses_fails(tmp_path, capsys):
@@ -173,7 +182,6 @@ def test_flow_mapping_uses_fails(tmp_path, capsys, line):
 @pytest.mark.parametrize("bad_line", [
     "  - {uses: actions/checkout@v7}",
     '  - {name: "#", uses: actions/checkout@v7}',
-    "  run: {uses: octo/repo/.github/workflows/build.yml@main}",
 ])
 def test_mixed_valid_pinned_and_flow_mapping_uses_fails(tmp_path, capsys, bad_line):
     content = (
@@ -184,28 +192,43 @@ def test_mixed_valid_pinned_and_flow_mapping_uses_fails(tmp_path, capsys, bad_li
     folder = workflows(tmp_path, content)
     code, out = run(folder, capsys)
     assert code == 1
-    assert "ci.yml,line=3::" in out
+    assert "ci.yml,line=3::flow-mapping uses:" in out
     assert "ci.yml,line=2" not in out
 
 
-@pytest.mark.parametrize("block", [
-    "  - {\n    name: Checkout,\n    uses: actions/checkout@v7\n  }",
-    "  - {\n    name: Checkout,\n    uses\n    : actions/checkout@v7\n  }",
-    f"  - {{\n    name: Checkout,\n    uses: actions/checkout@{SHA}\n  }} # v7.0.1",
+def test_mixed_valid_pinned_and_mapping_job_flow_uses_fails(tmp_path, capsys):
+    content = (
+        "jobs:\n"
+        "  ok:\n"
+        f"    uses: octo/repo/.github/workflows/ok.yml@{SHA} # v1.0.0\n"
+        "  run: {uses: octo/repo/.github/workflows/build.yml@main}\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "ci.yml,line=4::flow-mapping uses:" in out
+    assert "ci.yml,line=3" not in out
+
+
+@pytest.mark.parametrize(("block", "expected_line"), [
+    ("  - {\n    name: Checkout,\n    uses: actions/checkout@v7\n  }", 4),
+    ("  - {\n    name: Checkout,\n    ? uses\n    : actions/checkout@v7\n  }", 5),
+    (f"  - {{\n    name: Checkout,\n    uses: actions/checkout@{SHA}\n  }} # v7.0.1", 4),
 ])
-def test_multiline_flow_mapping_uses_fails(tmp_path, capsys, block):
+def test_multiline_flow_mapping_uses_fails(tmp_path, capsys, block, expected_line):
     folder = workflows(tmp_path, f"jobs:\n{block}\n")
     code, out = run(folder, capsys)
     assert code == 1
     assert "::error file=" in out
-    assert "line=4::" in out
+    assert "flow-mapping uses:" in out
+    assert f"line={expected_line}::" in out
 
 
-@pytest.mark.parametrize("block", [
-    "  - {\n    name: Checkout,\n    uses: actions/checkout@v7\n  }",
-    "  - {\n    name: Checkout,\n    uses\n    : actions/checkout@v7\n  }",
+@pytest.mark.parametrize(("block", "expected_line"), [
+    ("  - {\n    name: Checkout,\n    uses: actions/checkout@v7\n  }", 5),
+    ("  - {\n    name: Checkout,\n    ? uses\n    : actions/checkout@v7\n  }", 6),
 ])
-def test_mixed_valid_pinned_and_multiline_flow_mapping_uses_fails(tmp_path, capsys, block):
+def test_mixed_valid_pinned_and_multiline_flow_mapping_uses_fails(tmp_path, capsys, block, expected_line):
     content = (
         f"jobs:\n"
         f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
@@ -214,7 +237,7 @@ def test_mixed_valid_pinned_and_multiline_flow_mapping_uses_fails(tmp_path, caps
     folder = workflows(tmp_path, content)
     code, out = run(folder, capsys)
     assert code == 1
-    assert "ci.yml,line=5::" in out
+    assert f"ci.yml,line={expected_line}::flow-mapping uses:" in out
     assert "ci.yml,line=2" not in out
 
 
@@ -251,7 +274,7 @@ def test_multiline_run_block_scalar_with_braces_and_uses_text_passes(tmp_path, c
     r'  - "us\u0065s": actions/checkout@v7',
     r'  - "\x75ses": actions/checkout@v7',
     r'  - {"us\u0065s": actions/checkout@v7}',
-    r'  ? "us\u0065s": actions/checkout@v7',
+    r'  - ? "us\u0065s": actions/checkout@v7',
 ])
 def test_escaped_double_quoted_uses_key_fails(tmp_path, capsys, line):
     content = (
@@ -287,7 +310,6 @@ def test_plain_scalar_with_brace_or_bracket_before_pinned_uses_passes(tmp_path, 
 @pytest.mark.parametrize("line", [
     "  - &checkout {uses: actions/checkout@v7}",
     "  - !custom {uses: actions/checkout@v7}",
-    "  build: &checkout {uses: actions/checkout@v7}",
     "  - &checkout uses: actions/checkout@v7",
     "  - !!map {uses: actions/checkout@v7}",
     "  - !<tag:yaml.org,2002:map> {uses: actions/checkout@v7}",
@@ -305,11 +327,25 @@ def test_anchored_or_tagged_uses_fails(tmp_path, capsys, line):
     assert "ci.yml,line=2" not in out
 
 
+def test_anchored_mapping_job_uses_fails(tmp_path, capsys):
+    content = (
+        "jobs:\n"
+        "  ok:\n"
+        f"    uses: octo/repo/.github/workflows/ok.yml@{SHA} # v1.0.0\n"
+        "  build: &checkout {uses: actions/checkout@v7}\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "ci.yml,line=4::flow-mapping uses:" in out
+    assert "ci.yml,line=3" not in out
+
+
 def test_doc_start_flow_uses_fails(tmp_path, capsys):
     folder = workflows(tmp_path, "--- {uses: actions/checkout@v7}\n")
     code, out = run(folder, capsys)
     assert code == 1
-    assert "ci.yml,line=1::" in out
+    assert "ci.yml,line=1::flow-mapping uses:" in out
 
 
 def test_anchored_multiline_flow_mapping_uses_fails(tmp_path, capsys):
@@ -318,14 +354,13 @@ def test_anchored_multiline_flow_mapping_uses_fails(tmp_path, capsys):
         f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
         "  - &checkout {\n"
         "    name: Checkout,\n"
-        "    uses\n"
-        "    : actions/checkout@v7\n"
+        "    uses: actions/checkout@v7\n"
         "  }\n"
     )
     folder = workflows(tmp_path, content)
     code, out = run(folder, capsys)
     assert code == 1
-    assert "ci.yml,line=5::" in out
+    assert "ci.yml,line=5::flow-mapping uses:" in out
     assert "ci.yml,line=2" not in out
 
 
@@ -334,7 +369,7 @@ def test_anchored_multiline_flow_mapping_uses_fails(tmp_path, capsys):
     f'  - uses: "actions/checkout@{SHA}" @v7 # v7.0.1',
     f"  - uses: actions/checkout@v7@{SHA} # v7.0.1",
     "  - uses: ./local\n      extra",
-    '  ? "us\\\n    es"\n  : actions/checkout@v7',
+    '  - ? "us\\\n    es"\n    : actions/checkout@v7',
 ])
 def test_hardened_target_and_multiline_key_edge_cases_fail(tmp_path, capsys, bad_uses):
     content = (
@@ -351,7 +386,7 @@ def test_hardened_target_and_multiline_key_edge_cases_fail(tmp_path, capsys, bad
 @pytest.mark.parametrize("snippet", [
     '  - run: "echo\n      uses: actions/checkout@v4"',
     "  - run: echo\n      {",
-    "  env: {\n    MODE: uses\n  }",
+    "  - env: {\n    MODE: uses\n  }",
     "  - name: Don't skip checkout",
     "  - name: 'Don''t skip checkout'",
     '  - with: {a: "x", "b":\'y\'}',
@@ -375,22 +410,16 @@ def test_hardened_valid_multiline_context_before_pinned_uses_passes(tmp_path, ca
     "  - { name: Don't, uses: actions/checkout@v7 }",
     "  - { name: foo\n      'bar, uses: actions/checkout@v7 }",
     "  - {name: foo:'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}",
-    "  - {name: foo:\n      'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}",
     "  - {name:http:'bar, uses: actions/checkout@v7, env: {X: '1'}}",
-    "  - {name: foo?'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}",
-    "  - {name: foo?\n      'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}",
-    "  - {name: foo ? 'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}",
     "  - {? 'uses': actions/checkout@v7}",
-    "  - {name: 'unclosed?\n    uses: actions/checkout@v7}",
     "  - foo:'bar\n  - uses: actions/checkout@v7\n  - name: '0'",
     "  - name: foo\n      ? 'bar\n  - uses: actions/checkout@v7\n  - name: '0'",
     "  - {name:\n      foo:'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}",
     "  - run: &script |\n      cat <<'EOF'\n      name: 'hello\n      EOF\n  - uses: actions/checkout@v7\n  - name: '0'\n    run: echo done",
-    "  - run: !!str >-\n      name: 'hello\n  - uses: actions/checkout@v7\n  - name: '0'",
     "  - &item |\n      name: 'hello\n  - uses: actions/checkout@v7\n  - name: '0'",
-    "  - name: 'unclosed quote at eof",
+    "  - run:\n      &script |\n        cat <<'EOF'\n        name: 'hello\n        EOF\n  - uses: actions/checkout@v7\n  - name: '0'\n    run: echo done",
 ])
-def test_apostrophe_or_unclosed_quote_never_hides_unpinned_uses(tmp_path, capsys, snippet):
+def test_apostrophe_and_block_scalar_never_hide_unpinned_uses(tmp_path, capsys, snippet):
     content = (
         "steps:\n"
         f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
@@ -400,6 +429,27 @@ def test_apostrophe_or_unclosed_quote_never_hides_unpinned_uses(tmp_path, capsys
     code, out = run(folder, capsys)
     assert code == 1
     assert "::error file=" in out
+    assert "invalid YAML" not in out
+    assert "ci.yml,line=2" not in out
+
+
+def test_codex_r11_next_line_anchored_block_scalar_fails(tmp_path, capsys):
+    content = (
+        "steps:\n"
+        f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
+        "  - run:\n"
+        "      &script |\n"
+        "        cat <<'EOF'\n"
+        "        name: 'hello\n"
+        "        EOF\n"
+        "  - uses: actions/checkout@v7\n"
+        "  - name: '0'\n"
+        "    run: echo done\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "ci.yml,line=8::" in out
     assert "ci.yml,line=2" not in out
 
 
@@ -414,6 +464,88 @@ def test_anchored_block_scalar_with_unclosed_quote_before_pinned_uses_passes(tmp
     code, out = run(folder, capsys)
     assert code == 0
     assert "1 uses: lines pinned" in out
+
+
+def test_yaml_alias_value_is_rejected(tmp_path, capsys):
+    content = (
+        "defs:\n"
+        f"  a: &u actions/checkout@{SHA} # v7.0.1\n"
+        "steps:\n"
+        "  - uses: *u\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "ci.yml,line=4::empty, aliased, or multiline" in out
+
+
+def test_yaml_alias_key_is_rejected(tmp_path, capsys):
+    content = (
+        "defs:\n"
+        "  k: &k uses\n"
+        "steps:\n"
+        "  - *k: actions/checkout@v7\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "ci.yml,line=4::" in out
+
+
+def test_duplicate_uses_key_in_same_step_fails(tmp_path, capsys):
+    content = (
+        "steps:\n"
+        f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
+        "    uses: actions/checkout@v7\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "ci.yml,line=3::" in out
+    assert "ci.yml,line=2" not in out
+
+
+def test_yaml_merge_key_unpinned_uses_fails(tmp_path, capsys):
+    content = (
+        "defs:\n"
+        "  base: &step\n"
+        "    uses: actions/checkout@v7\n"
+        "steps:\n"
+        "  - <<: *step\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "ci.yml,line=3::" in out
+
+
+def test_cyclic_anchor_does_not_crash_and_unpinned_fails(tmp_path, capsys):
+    content = (
+        "cyclic: &x\n"
+        "  next: *x\n"
+        "steps:\n"
+        "  - uses: actions/checkout@v7\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "ci.yml,line=4::" in out
+
+
+@pytest.mark.parametrize("bad_yaml", [
+    "steps:\n  - name: 'unclosed quote at eof\n",
+    "steps:\n  - {name: foo?'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}\n",
+    "steps:\n  - {name: foo:\n      'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}\n",
+    "steps:\n  - {\n    name: Checkout,\n    uses\n    : actions/checkout@v7\n  }\n",
+    f"steps:\n  - uses: \"actions/checkout@{SHA}\" @v7 # v7.0.1\n",
+])
+def test_invalid_yaml_fails_closed(tmp_path, capsys, bad_yaml):
+    folder = workflows(tmp_path, bad_yaml)
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "::error file=" in out
+    assert "invalid YAML" in out
+
 
 
 

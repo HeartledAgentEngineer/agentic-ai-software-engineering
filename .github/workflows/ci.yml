@@ -45,7 +45,7 @@ jobs:
       - run: ruff check --output-format=github .
       - name: Self-tests of the CI scripts
         run: |
-          pip install pytest
+          pip install pytest "PyYAML>=6.0,<7"
           python -m pytest -q -p no:cacheprovider .github/scripts
       - name: Actions are pinned to a commit SHA
         run: python .github/scripts/ci_pinned_actions.py .github/workflows
