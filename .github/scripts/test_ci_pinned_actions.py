@@ -269,6 +269,8 @@ def test_escaped_double_quoted_uses_key_fails(tmp_path, capsys, line):
 @pytest.mark.parametrize("shell_line", [
     "  - run: echo {",
     "  - run: if [ -f foo; then {",
+    "  - run: echo [ uses:example ]",
+    "  - run: echo { uses:example }",
 ])
 def test_plain_scalar_with_brace_or_bracket_before_pinned_uses_passes(tmp_path, capsys, shell_line):
     content = (
@@ -280,5 +282,88 @@ def test_plain_scalar_with_brace_or_bracket_before_pinned_uses_passes(tmp_path, 
     code, out = run(folder, capsys)
     assert code == 0
     assert "1 uses: lines pinned" in out
+
+
+@pytest.mark.parametrize("line", [
+    "  - &checkout {uses: actions/checkout@v7}",
+    "  - !custom {uses: actions/checkout@v7}",
+    "  build: &checkout {uses: actions/checkout@v7}",
+    "  - &checkout uses: actions/checkout@v7",
+    "  - !!map {uses: actions/checkout@v7}",
+    "  - !<tag:yaml.org,2002:map> {uses: actions/checkout@v7}",
+])
+def test_anchored_or_tagged_uses_fails(tmp_path, capsys, line):
+    content = (
+        "jobs:\n"
+        f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
+        f"{line}\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "ci.yml,line=3::" in out
+    assert "ci.yml,line=2" not in out
+
+
+def test_doc_start_flow_uses_fails(tmp_path, capsys):
+    folder = workflows(tmp_path, "--- {uses: actions/checkout@v7}\n")
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "ci.yml,line=1::" in out
+
+
+def test_anchored_multiline_flow_mapping_uses_fails(tmp_path, capsys):
+    content = (
+        "jobs:\n"
+        f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
+        "  - &checkout {\n"
+        "    name: Checkout,\n"
+        "    uses\n"
+        "    : actions/checkout@v7\n"
+        "  }\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "ci.yml,line=5::" in out
+    assert "ci.yml,line=2" not in out
+
+
+@pytest.mark.parametrize("bad_uses", [
+    f"  - uses: 'actions/checkout@{SHA}''@v7' # v7.0.1",
+    f'  - uses: "actions/checkout@{SHA}" @v7 # v7.0.1',
+    f"  - uses: actions/checkout@v7@{SHA} # v7.0.1",
+    "  - uses: ./local\n      extra",
+    '  ? "us\\\n    es"\n  : actions/checkout@v7',
+])
+def test_hardened_target_and_multiline_key_edge_cases_fail(tmp_path, capsys, bad_uses):
+    content = (
+        "jobs:\n"
+        f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
+        f"{bad_uses}\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "ci.yml,line=2" not in out
+
+
+@pytest.mark.parametrize("snippet", [
+    '  - run: "echo\n      uses: actions/checkout@v4"',
+    "  - run: echo\n      {",
+    "  env: {\n    MODE: uses\n  }",
+])
+def test_hardened_valid_multiline_context_before_pinned_uses_passes(tmp_path, capsys, snippet):
+    content = (
+        "jobs:\n"
+        f"{snippet}\n"
+        f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 0
+    assert "1 uses: lines pinned" in out
+
+
 
 

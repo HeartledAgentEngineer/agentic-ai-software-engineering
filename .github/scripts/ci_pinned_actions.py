@@ -16,17 +16,24 @@ import re
 import sys
 from pathlib import Path
 
-USES_CLEANED_RE = re.compile(r"^\s*(?:-\s+)*uses\s*:")
-FLOW_OPEN_PREFIX_RE = re.compile(r"^\s*(?:-\s+)*(?:\?\s*)?(?:[^:\[\]{},?#\s][^:\[\]{}]*:\s*)?(?:\[\s*)*$")
-FLOW_USES_KEY_RE = re.compile(r"(?:^|[,{\[\s])uses(?:\s*:|\s*$)")
-FLOW_SEQ_USES_RE = re.compile(r"\[[^\]]*(?:^|[,\[\s])uses\s*:")
-EXPLICIT_INLINE_USES_RE = re.compile(r"^\s*(?:-\s+)*\?\s*uses(?:\s*:|\s*$)")
-EXPLICIT_ONLY_QMARK_RE = re.compile(r"^(?:-\s+)*\?$")
-EXPLICIT_NEXT_USES_RE = re.compile(r"^\s*uses(?:\s*:|\s*$)")
+_NODE_PROP = r"(?:(?:!<[^>]+>|[&!][^\s\[\]{},]+)\s+)*"
+USES_CLEANED_RE = re.compile(rf"^\s*(?:---\s+)?(?:-\s+)*{_NODE_PROP}uses\s*:")
+FLOW_OPEN_PREFIX_RE = re.compile(
+    rf"^\s*(?:---\s+)?(?:-\s+)*(?:\?\s*)?{_NODE_PROP}"
+    rf"(?:[^:\[\]{{}},?#\s][^:\[\]{{}}]*:\s*)?(?:(?:\[\s*)|{_NODE_PROP})*$"
+)
+FLOW_USES_KEY_RE = re.compile(rf"(?:^\s*|[,{{\[]\s*){_NODE_PROP}(?:\?\s*{_NODE_PROP})?uses(?:\s*:|\s*$)")
+EXPLICIT_INLINE_USES_RE = re.compile(rf"^\s*(?:---\s+)?(?:-\s+)*{_NODE_PROP}\?\s*{_NODE_PROP}uses(?:\s*:|\s*$)")
+EXPLICIT_ONLY_QMARK_RE = re.compile(rf"^(?:---\s+)?(?:-\s+)*{_NODE_PROP}\?$")
+EXPLICIT_NEXT_USES_RE = re.compile(rf"^\s*{_NODE_PROP}uses(?:\s*:|\s*$)")
 BLOCK_SCALAR_START_RE = re.compile(r":\s*[|>](?:[+-]?\d+|\d+[+-]?|[+-])?\s*$")
 BLOCK_SCALAR_RE = re.compile(r"^[|>](?:[+-]?\d+|\d+[+-]?|[+-])?(?:\s+#.*|\s*)$")
+PLAIN_SCALAR_MAPPING_RE = re.compile(
+    rf"^\s*(?:---\s+)?(?:-\s+)*{_NODE_PROP}[^:\[\]{{}},?#\s][^:\[\]{{}}]*:\s*{_NODE_PROP}\S"
+)
+NODE_PROP_PREFIX_RE = re.compile(r"^(?:(?:!<[^>]+>|[&!][^\s#]+)\s+)+")
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
-DIGEST64_RE = re.compile(r"^docker://.+@sha256:[0-9a-f]{64}$")
+DIGEST64_RE = re.compile(r"^docker://[^@\s]+@sha256:[0-9a-f]{64}$")
 VERSION_COMMENT_RE = re.compile(r"#\s*v\S+")
 
 _YAML_ESCAPES = {
@@ -67,14 +74,72 @@ def _decode_yaml_escape(line: str, idx: int) -> tuple[str, int]:
     return esc, idx + 1
 
 
-def _scan_yaml_line(line: str, flow_depth: int = 0, seq_depth: int = 0) -> tuple[str, int, int, bool]:
-    """Strip comments/``${{ ... }}``, normalize quoted strings (decoding YAML escapes), and track flow depth."""
+def _consume_single_quoted(line: str, j: int, chars: list[str]) -> tuple[int, bool]:
+    n = len(line)
+    while j < n:
+        if line[j] == "'":
+            if j + 1 < n and line[j + 1] == "'":
+                chars.append("'")
+                j += 2
+                continue
+            return j + 1, True
+        chars.append(line[j])
+        j += 1
+    return j, False
+
+
+def _consume_double_quoted(line: str, j: int, chars: list[str]) -> tuple[int, bool, bool]:
+    n = len(line)
+    while j < n:
+        if line[j] == "\\":
+            if j + 1 == n:
+                return j + 1, False, True
+            decoded, j = _decode_yaml_escape(line, j + 1)
+            chars.append(decoded)
+            continue
+        if line[j] == '"':
+            return j + 1, True, False
+        chars.append(line[j])
+        j += 1
+    return j, False, False
+
+
+def _scan_yaml_line(
+    line: str,
+    flow_depth: int = 0,
+    seq_depth: int = 0,
+    open_quote: str | None = None,
+    quote_chars: list[str] | None = None,
+    quote_escaped_nl: bool = False,
+    allow_whitespace_flow_open: bool = True,
+) -> tuple[str, int, int, bool, str | None, list[str], bool]:
+    """Strip comments/``${{ ... }}``, track multiline quotes, normalize ``'uses'``/``\"uses\"``, and track flow."""
     out: list[str] = []
     depth = flow_depth
     seq = seq_depth
     had_flow = depth > 0 or seq > 0
     i = 0
     n = len(line)
+
+    if open_quote is not None:
+        chars = list(quote_chars or ())
+        while i < n and line[i].isspace():
+            i += 1
+        if open_quote == "'":
+            if i < n and chars:
+                chars.append(" ")
+            j, closed = _consume_single_quoted(line, i, chars)
+            if not closed:
+                return "", depth, seq, had_flow, "'", chars, False
+        else:
+            if not quote_escaped_nl and i < n and chars:
+                chars.append(" ")
+            j, closed, escaped_nl = _consume_double_quoted(line, i, chars)
+            if not closed:
+                return "", depth, seq, had_flow, '"', chars, escaped_nl
+        out.append("uses" if "".join(chars) == "uses" else '""')
+        i = j
+
     while i < n:
         ch = line[i]
         if ch == "#" and (i == 0 or line[i - 1].isspace()):
@@ -99,39 +164,24 @@ def _scan_yaml_line(line: str, flow_depth: int = 0, seq_depth: int = 0) -> tuple
             i = j
             continue
         if ch == "'":
-            j = i + 1
-            chars: list[str] = []
-            while j < n:
-                if line[j] == "'":
-                    if j + 1 < n and line[j + 1] == "'":
-                        chars.append("'")
-                        j += 2
-                        continue
-                    j += 1
-                    break
-                chars.append(line[j])
-                j += 1
+            chars = []
+            j, closed = _consume_single_quoted(line, i + 1, chars)
+            if not closed:
+                return "".join(out), depth, seq, had_flow, "'", chars, False
             out.append("uses" if "".join(chars) == "uses" else '""')
             i = j
             continue
         if ch == '"':
-            j = i + 1
             chars = []
-            while j < n:
-                if line[j] == "\\":
-                    decoded, j = _decode_yaml_escape(line, j + 1)
-                    chars.append(decoded)
-                    continue
-                if line[j] == '"':
-                    j += 1
-                    break
-                chars.append(line[j])
-                j += 1
+            j, closed, escaped_nl = _consume_double_quoted(line, i + 1, chars)
+            if not closed:
+                return "".join(out), depth, seq, had_flow, '"', chars, escaped_nl
             out.append("uses" if "".join(chars) == "uses" else '""')
             i = j
             continue
         if ch == "{":
-            if depth > 0 or seq > 0 or FLOW_OPEN_PREFIX_RE.match("".join(out)):
+            prefix = "".join(out)
+            if depth > 0 or seq > 0 or ((prefix.strip() or allow_whitespace_flow_open) and FLOW_OPEN_PREFIX_RE.match(prefix)):
                 depth += 1
                 had_flow = True
         elif ch == "}":
@@ -139,7 +189,8 @@ def _scan_yaml_line(line: str, flow_depth: int = 0, seq_depth: int = 0) -> tuple
                 depth -= 1
                 had_flow = True
         elif ch == "[":
-            if depth > 0 or seq > 0 or FLOW_OPEN_PREFIX_RE.match("".join(out)):
+            prefix = "".join(out)
+            if depth > 0 or seq > 0 or ((prefix.strip() or allow_whitespace_flow_open) and FLOW_OPEN_PREFIX_RE.match(prefix)):
                 seq += 1
                 had_flow = True
         elif ch == "]" and seq > 0:
@@ -147,18 +198,31 @@ def _scan_yaml_line(line: str, flow_depth: int = 0, seq_depth: int = 0) -> tuple
             had_flow = True
         out.append(ch)
         i += 1
-    return "".join(out), depth, seq, had_flow
+    return "".join(out), depth, seq, had_flow, None, [], False
 
 
 def _extract_mapping_rhs(line: str) -> str | None:
     """Return the raw substring after the first YAML mapping key ``:`` on ``line``."""
     i = 0
     n = len(line)
+    while i < n and line[i].isspace():
+        i += 1
+    if line.startswith("---", i) and (i + 3 == n or line[i + 3].isspace()):
+        i += 3
     while i < n:
         while i < n and line[i].isspace():
             i += 1
         if i < n and line[i] == "-" and (i + 1 == n or line[i + 1].isspace()):
             i += 1
+            continue
+        if line.startswith("!<", i):
+            gt = line.find(">", i + 2)
+            if gt != -1:
+                i = gt + 1
+                continue
+        if i < n and line[i] in ("&", "!"):
+            while i < n and not line[i].isspace():
+                i += 1
             continue
         break
     if i >= n:
@@ -195,23 +259,41 @@ def _extract_mapping_rhs(line: str) -> str | None:
 
 def _split_target_and_comment(raw_rhs: str) -> tuple[str, str] | None:
     """Return ``(target, trailing_text)`` for a single-line ``uses:`` value, or ``None`` if invalid/multiline."""
-    rest = raw_rhs.strip()
-    if not rest or rest.startswith("#") or BLOCK_SCALAR_RE.match(rest):
+    rest = NODE_PROP_PREFIX_RE.sub("", raw_rhs.strip())
+    if not rest or rest.startswith(("#", "&", "!", "*")) or BLOCK_SCALAR_RE.match(rest):
         return None
     if rest[0] in ("'", '"'):
-        quote = rest[0]
-        end = rest.find(quote, 1)
-        if end == -1:
+        chars: list[str] = []
+        if rest[0] == "'":
+            end, closed = _consume_single_quoted(rest, 1, chars)
+            if not closed:
+                return None
+        else:
+            end, closed, escaped_nl = _consume_double_quoted(rest, 1, chars)
+            if not closed or escaped_nl:
+                return None
+        after = rest[end:]
+        trailing = after.strip()
+        if trailing and not (after[0].isspace() and trailing.startswith("#")):
             return None
-        target = rest[1:end].strip()
-        trailing = rest[end + 1 :].strip()
-        return (target, trailing) if target else None
-    parts = rest.split(None, 1)
-    return parts[0], (parts[1].strip() if len(parts) > 1 else "")
+        target = "".join(chars).strip()
+        if not target or any(ch.isspace() for ch in target):
+            return None
+        return target, trailing
+    comment_idx = next((idx for idx, ch in enumerate(rest) if ch == "#" and idx > 0 and rest[idx - 1].isspace()), -1)
+    if comment_idx == -1:
+        target, trailing = rest, ""
+    else:
+        target, trailing = rest[:comment_idx].strip(), rest[comment_idx:].strip()
+    if not target or any(ch.isspace() for ch in target):
+        return None
+    return target, trailing
 
 
 def _validate_target(target: str, trailing: str) -> str | None:
     """Return an error reason if ``target``/``trailing`` violates pinning policy, else ``None``."""
+    if any(ch.isspace() for ch in target):
+        return f"invalid whitespace in uses: target ({target})"
     if target.startswith("./"):
         return None
     if target.startswith("docker://"):
@@ -220,7 +302,7 @@ def _validate_target(target: str, trailing: str) -> str | None:
         return f"docker action must pin a 64-char sha256 digest ({target})"
     if "@" not in target:
         return f"missing @<commit-sha> in {target}"
-    action, ref = target.rsplit("@", 1)
+    action, ref = target.split("@", 1)
     if not action or not SHA40_RE.fullmatch(ref):
         return f"must pin a 40-char lowercase commit SHA instead of '{ref}' ({target})"
     if not VERSION_COMMENT_RE.search(trailing):
@@ -263,6 +345,11 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
         flow_depth = 0
         seq_depth = 0
         block_indent: int | None = None
+        last_uses_indent: int | None = None
+        plain_scalar_indent: int | None = None
+        open_quote: str | None = None
+        quote_chars: list[str] = []
+        quote_escaped_nl = False
         pending_explicit_key = False
         for lineno, line in enumerate(lines, start=1):
             if block_indent is not None:
@@ -272,7 +359,36 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
                     continue
                 block_indent = None
 
-            cleaned, flow_depth, seq_depth, in_flow = _scan_yaml_line(line, flow_depth, seq_depth)
+            raw_stripped = line.strip()
+            indent = len(line) - len(line.lstrip(" \t"))
+            if open_quote is None:
+                if last_uses_indent is not None:
+                    if not raw_stripped:
+                        continue
+                    if raw_stripped.startswith("#"):
+                        last_uses_indent = None
+                        continue
+                    if indent > last_uses_indent:
+                        errors.append(f"::error file={file_ref},line={lineno}::empty or multiline uses: is not supported")
+                        last_uses_indent = None
+                        continue
+                    last_uses_indent = None
+                if plain_scalar_indent is not None:
+                    if not raw_stripped:
+                        continue
+                    if raw_stripped.startswith("#") or indent <= plain_scalar_indent:
+                        plain_scalar_indent = None
+
+            allow_ws_flow = not (plain_scalar_indent is not None and indent > plain_scalar_indent)
+            cleaned, flow_depth, seq_depth, in_flow, open_quote, quote_chars, quote_escaped_nl = _scan_yaml_line(
+                line,
+                flow_depth,
+                seq_depth,
+                open_quote,
+                quote_chars,
+                quote_escaped_nl,
+                allow_ws_flow,
+            )
             stripped = cleaned.strip()
 
             if not in_flow and pending_explicit_key:
@@ -284,7 +400,7 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
                     errors.append(f"::error file={file_ref},line={lineno}::explicit '? uses' key is not supported")
                     continue
 
-            if (in_flow and FLOW_USES_KEY_RE.search(cleaned)) or FLOW_SEQ_USES_RE.search(cleaned):
+            if in_flow and FLOW_USES_KEY_RE.search(cleaned):
                 uses_count += 1
                 errors.append(
                     f"::error file={file_ref},line={lineno}::flow-mapping uses: is not supported; use block mapping"
@@ -310,11 +426,24 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
                 reason = _validate_target(*parsed)
                 if reason is not None:
                     errors.append(f"::error file={file_ref},line={lineno}::{reason}")
+                elif not parsed[1]:
+                    prefix_match = re.match(r"^(\s*(?:---\s+)?(?:-\s+)*)", cleaned)
+                    last_uses_indent = len(prefix_match.group(1)) if prefix_match else 0
                 continue
 
             if flow_depth == 0 and seq_depth == 0 and BLOCK_SCALAR_START_RE.search(cleaned):
                 prefix_match = re.match(r"^(\s*(?:-\s+)*)", cleaned)
                 block_indent = len(prefix_match.group(1)) if prefix_match else 0
+            elif (
+                flow_depth == 0
+                and seq_depth == 0
+                and not in_flow
+                and open_quote is None
+                and plain_scalar_indent is None
+                and PLAIN_SCALAR_MAPPING_RE.match(cleaned)
+            ):
+                prefix_match = re.match(r"^(\s*(?:---\s+)?(?:-\s+)*)", cleaned)
+                plain_scalar_indent = len(prefix_match.group(1)) if prefix_match else 0
 
     if uses_count == 0:
         errors.append("::error::no uses: lines found")
