@@ -149,3 +149,29 @@ def test_mixed_valid_pinned_and_multiline_uses_fails(tmp_path, capsys):
     assert code == 1
     assert "ci.yml,line=3::" in out
     assert "ci.yml,line=2" not in out
+
+
+@pytest.mark.parametrize("line", [
+    "  - {uses: actions/checkout@v7}",
+    "  - { name: step, uses: actions/checkout@v7 }",
+    f"  - {{uses: actions/checkout@{SHA}}} # v7.0.1",
+])
+def test_flow_mapping_uses_fails(tmp_path, capsys, line):
+    folder = workflows(tmp_path, f"steps:\n{line}\n")
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "::error file=" in out
+    assert "line=2::" in out
+
+
+def test_mixed_valid_pinned_and_flow_mapping_uses_fails(tmp_path, capsys):
+    content = (
+        f"steps:\n"
+        f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
+        f"  - {{uses: actions/checkout@v7}}\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "ci.yml,line=3::" in out
+    assert "ci.yml,line=2" not in out

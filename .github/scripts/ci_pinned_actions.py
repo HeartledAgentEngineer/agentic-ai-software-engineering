@@ -5,8 +5,8 @@ Usage (from the repository root):
     python .github/scripts/ci_pinned_actions.py .github/workflows
 
 Line-based by design (standard library only, no PyYAML dependency): inspects every ``*.yml`` and ``*.yaml`` file
-under the given paths and rejects empty or multiline ``uses:`` block scalars (``|``, ``>``, etc.) with exit code 1
-so unpinned actions cannot slip past silently.
+under the given paths and rejects empty, multiline block-scalar (``|``, ``>``, etc.) or flow-mapping
+(``{uses: ...}``) ``uses:`` entries with exit code 1 so unpinned actions cannot slip past silently.
 """
 
 from __future__ import annotations
@@ -16,7 +16,8 @@ import re
 import sys
 from pathlib import Path
 
-USES_LINE_RE = re.compile(r"^\s*(?:-\s+)?uses\s*:(.*)$")
+USES_LINE_RE = re.compile(r"""^\s*(?:-\s+)?(?:uses|['"]uses['"])\s*:(.*)$""")
+FLOW_USES_RE = re.compile(r"""^\s*(?:-\s*)?\{[^#]*(?:uses|['"]uses['"])\s*:""")
 BLOCK_SCALAR_RE = re.compile(r"^[|>](?:[+-]?\d+|\d+[+-]?|[+-])?(?:\s+#.*|\s*)$")
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST64_RE = re.compile(r"^docker://.+@sha256:[0-9a-f]{64}$")
@@ -91,6 +92,12 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
             errors.append(f"::error file={file_ref}::could not read file ({exc})")
             continue
         for lineno, line in enumerate(lines, start=1):
+            if FLOW_USES_RE.match(line):
+                uses_count += 1
+                errors.append(
+                    f"::error file={file_ref},line={lineno}::flow-mapping uses: is not supported; use block mapping"
+                )
+                continue
             match = USES_LINE_RE.match(line)
             if not match:
                 continue
