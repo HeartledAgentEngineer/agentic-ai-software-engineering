@@ -66,5 +66,5 @@ missing or changed), and the pytest summary lines of the first run matched the l
   (added on 2026-11-21); the remaining Python projects are checked only with `ruff check` (`E9`, `F63`, `F7`, `F82`)
   and are not format-checked in CI yet.
 - Static type checking (`mypy` 1.13.0) currently covers only `.github/scripts/ci_pinned_actions.py`,
-  `.github/scripts/ci_test_report.py`, and `projects/concertify/domain` (added on 2026-11-21); all other modules and
-  test files are not type-checked in CI yet.
+  `.github/scripts/ci_test_report.py`, `.github/scripts/ci_release_readiness.py`, and `projects/concertify/domain`
+  (updated on 2026-11-21); all other modules and test files are not type-checked in CI yet.

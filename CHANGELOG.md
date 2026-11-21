@@ -1,0 +1,11 @@
+# Changelog
+
+All notable changes to the public showcase repository (`agentic-ai-software-engineering`) are tracked here in Keep a Changelog + Semantic Versioning (`vX.Y.Z`) format.
+
+No SemVer release has been published yet.
+
+## [Unreleased]
+
+- Pinned all 13 GitHub Actions uses in `.github/workflows/ci.yml` to full commit SHAs with an AST guard (`ci_pinned_actions.py`) and Dependabot config.
+- Added scoped formatting (`ruff format --check` for `.github/scripts` and `projects/cross-model-review`) and `mypy` type checking (`.github/scripts` and `projects/concertify/domain`).
+- Added the release readiness checklist (`docs/release-checklist.md`), this changelog structure, and the baseline validator (`.github/scripts/ci_release_readiness.py`).
