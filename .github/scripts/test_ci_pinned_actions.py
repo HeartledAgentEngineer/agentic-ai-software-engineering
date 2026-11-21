@@ -385,6 +385,9 @@ def test_hardened_valid_multiline_context_before_pinned_uses_passes(tmp_path, ca
     "  - foo:'bar\n  - uses: actions/checkout@v7\n  - name: '0'",
     "  - name: foo\n      ? 'bar\n  - uses: actions/checkout@v7\n  - name: '0'",
     "  - {name:\n      foo:'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}",
+    "  - run: &script |\n      cat <<'EOF'\n      name: 'hello\n      EOF\n  - uses: actions/checkout@v7\n  - name: '0'\n    run: echo done",
+    "  - run: !!str >-\n      name: 'hello\n  - uses: actions/checkout@v7\n  - name: '0'",
+    "  - &item |\n      name: 'hello\n  - uses: actions/checkout@v7\n  - name: '0'",
     "  - name: 'unclosed quote at eof",
 ])
 def test_apostrophe_or_unclosed_quote_never_hides_unpinned_uses(tmp_path, capsys, snippet):
@@ -398,6 +401,20 @@ def test_apostrophe_or_unclosed_quote_never_hides_unpinned_uses(tmp_path, capsys
     assert code == 1
     assert "::error file=" in out
     assert "ci.yml,line=2" not in out
+
+
+def test_anchored_block_scalar_with_unclosed_quote_before_pinned_uses_passes(tmp_path, capsys):
+    content = (
+        "steps:\n"
+        "  - run: &script |\n"
+        "      name: 'hello\n"
+        f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 0
+    assert "1 uses: lines pinned" in out
+
 
 
 

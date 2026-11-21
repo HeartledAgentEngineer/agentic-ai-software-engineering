@@ -35,7 +35,9 @@ FLOW_VALUE_END_RE = re.compile(
 EXPLICIT_INLINE_USES_RE = re.compile(rf"^\s*(?:---\s+)?(?:-\s+)*{_NODE_PROP}\?\s*{_NODE_PROP}uses(?:\s*:|\s*$)")
 EXPLICIT_ONLY_QMARK_RE = re.compile(rf"^(?:---\s+)?(?:-\s+)*{_NODE_PROP}\?$")
 EXPLICIT_NEXT_USES_RE = re.compile(rf"^\s*{_NODE_PROP}uses(?:\s*:|\s*$)")
-BLOCK_SCALAR_START_RE = re.compile(r":\s*[|>](?:[+-]?\d+|\d+[+-]?|[+-])?\s*$")
+BLOCK_SCALAR_START_RE = re.compile(
+    rf"(?:^\s*(?:---\s+)?(?:-\s+)+(?:\?\s+)?|:\s+){_NODE_PROP}[|>](?:[+-]?\d+|\d+[+-]?|[+-])?\s*$"
+)
 BLOCK_SCALAR_RE = re.compile(r"^[|>](?:[+-]?\d+|\d+[+-]?|[+-])?(?:\s+#.*|\s*)$")
 PLAIN_SCALAR_MAPPING_RE = re.compile(
     rf"^\s*(?:---\s+)?(?:-\s+)*{_NODE_PROP}{_BLOCK_KEY}{_NODE_PROP}[^&!*|>\[{{#\s\"']"
@@ -478,7 +480,7 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
                 continue
 
             if flow_depth == 0 and seq_depth == 0 and BLOCK_SCALAR_START_RE.search(cleaned):
-                prefix_match = re.match(r"^(\s*(?:-\s+)*)", cleaned)
+                prefix_match = re.match(r"^(\s*(?:---\s+)?(?:-\s+)*)", cleaned)
                 block_indent = len(prefix_match.group(1)) if prefix_match else 0
             elif (
                 flow_depth == 0
