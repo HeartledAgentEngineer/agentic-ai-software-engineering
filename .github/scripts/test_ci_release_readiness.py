@@ -145,6 +145,25 @@ def test_user_path_allowlist_scope_and_case_folding(
     assert readiness.main(["--repo-root", str(repo)]) == expected
 
 
+def test_user_path_in_markdown_backticks(tmp_path: Path) -> None:
+    repo = _make_minimal_repo(tmp_path / "repo")
+    allowed = "C:" + "\\" + "Users" + "\\" + "<user>"
+    (repo / "docs/release-checklist.md").write_text(
+        f"# Release Checklist\n\nCheck `{allowed}` paths.\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    assert readiness.main(["--repo-root", str(repo)]) == 0
+
+    blocked = "C:" + "\\" + "Users" + "\\" + "alice"
+    (repo / "docs/release-checklist.md").write_text(
+        f"# Release Checklist\n\nCheck `{blocked}` paths.\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    assert readiness.main(["--repo-root", str(repo)]) == 1
+
+
 def test_conflict_marker_fails(tmp_path: Path, capsys) -> None:
     repo = _make_minimal_repo(tmp_path / "repo")
     marker = "<" * 7 + " HEAD"

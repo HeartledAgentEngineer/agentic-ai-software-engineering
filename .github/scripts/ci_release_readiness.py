@@ -24,7 +24,7 @@ SEMVER_RE = re.compile(
     r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$"
 )
 SECTION_RE = re.compile(r"^## \[([^\]]+)\](?:\s+-\s+(\d{4}-\d{2}-\d{2}))?\s*$")
-USER_PATH_RE = re.compile(r"C:[\\/]Users[\\/]([^\\/\s\"']+)", re.IGNORECASE)
+USER_PATH_RE = re.compile(r"C:[\\/]Users[\\/]([^\\/\s\"'`]+)", re.IGNORECASE)
 CONFLICT_RE = re.compile(r"^(?:<{7}|={7}|>{7})(?:\s|$)")
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 BULLET_RE = re.compile(r"^\s*-\s+\S+")
