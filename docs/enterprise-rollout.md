@@ -66,7 +66,7 @@ GitHub automatically runs the configured checks for the selected commit. Review 
 | Dependency update pull requests ([Dependabot](../.github/dependabot.yml)) | monthly for GitHub Actions, pip and npm | Automatic to open; an update reaches `main` only through the same CI and review path |
 | Review by a model of another family | started for each change; verdict, model and route recorded locally | Semi-automatic |
 | Merge to `main` | after green CI and an approving review | Controlled by convention; no branch rule enforces the checks yet |
-| Windows build and draft release (Playground) | version tag `typefree-v*` or `orbitdesk-v*` | Automatic after a manual tag; publishing stays manual. No tag has been pushed yet, so no release exists |
+| Windows build and draft release (Playground) | version tag `typefree-v*` or `orbitdesk-v*` | Automatic after a manual tag; publishing stays manual. No `typefree-v*` or `orbitdesk-v*` tag has been pushed yet (older `master-schalter-v*` tags exist from earlier versions), so no GitHub release exists |
 | Sync of the phone agent with `main` (Playground) | start of the agent | Automatic in both directions: if `main` is ahead, fast-forward (`git pull --ff-only`); if the phone has newer commits, it pushes them to `main` directly, which bypasses CI and review; if both diverged or the fetch fails, it prints a warning and starts the version already on the phone, leaving the merge to me. No deploy job |
 | Cloud resources, PLC/OT systems | — | Manual only |
 
