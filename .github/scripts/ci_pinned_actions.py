@@ -17,20 +17,20 @@ import sys
 from pathlib import Path
 
 _NODE_PROP = r"(?:(?:!<[^>]+>|[&!][^\s\[\]{},]+)\s+)*"
+_FLOW_ENTRY_START = rf"(?:^|[,{{\[])\s*{_NODE_PROP}(?:\?\s+{_NODE_PROP})?"
+_BLOCK_KEY = rf"(?:[^:\[\]{{}},?#\s]|:(?!\s))(?:[^:\[\]{{}}]|:(?!\s))*:\s+"
 USES_CLEANED_RE = re.compile(rf"^\s*(?:---\s+)?(?:-\s+)*{_NODE_PROP}uses\s*:")
 FLOW_OPEN_PREFIX_RE = re.compile(
-    rf"^\s*(?:---\s+)?(?:-\s+)*(?:\?\s*)?{_NODE_PROP}"
-    rf"(?:[^:\[\]{{}},?#\s][^:\[\]{{}}]*:\s*)?(?:(?:\[\s*)|{_NODE_PROP})*$"
+    rf"^\s*(?:---\s+)?(?:-\s+)*(?:\?\s+)?{_NODE_PROP}(?:{_BLOCK_KEY})?(?:(?:\[\s*)|{_NODE_PROP})*$"
 )
 FLOW_USES_KEY_RE = re.compile(rf"(?:^\s*|[,{{\[]\s*){_NODE_PROP}(?:\?\s*{_NODE_PROP})?uses(?:\s*:|\s*$)")
 FLOW_ONLY_WS_AND_PROP_RE = re.compile(rf"^\s*{_NODE_PROP}$")
-FLOW_QUOTE_AFTER_DELIM_RE = re.compile(rf"[,{{\[\?]\s*{_NODE_PROP}$")
-FLOW_COLON_WS_QUOTE_RE = re.compile(
-    rf"(?:^|[,{{\[\?])\s*{_NODE_PROP}(?:[^:\[\]{{}},]|:(?!\s))+:\s+{_NODE_PROP}$"
-)
-FLOW_QUOTED_KEY_COLON_RE = re.compile(rf"(?:^|[,{{\[\?])\s*{_NODE_PROP}(?:\"\"|uses)\s*:\s*{_NODE_PROP}$")
-FLOW_NEXT_NODE_END_RE = re.compile(
-    rf"(?:[,{{\[\?]\s*{_NODE_PROP}$|(?:^|[,{{\[\?])\s*{_NODE_PROP}(?:[^:\[\]{{}},]|:(?!\s))+:\s*{_NODE_PROP}$)"
+FLOW_QUOTE_AFTER_DELIM_RE = re.compile(rf"(?:[,{{\[]\s*|(?:^|[,{{\[])\s*{_NODE_PROP}\?\s+){_NODE_PROP}$")
+FLOW_COLON_WS_QUOTE_RE = re.compile(rf"{_FLOW_ENTRY_START}(?:[^:\[\]{{}},]|:(?!\s))+:\s+{_NODE_PROP}$")
+FLOW_QUOTED_KEY_COLON_RE = re.compile(rf"{_FLOW_ENTRY_START}(?:\"\"|uses)\s*:\s*{_NODE_PROP}$")
+FLOW_ENTRY_END_RE = re.compile(rf"(?:[,{{\[]\s*{_NODE_PROP}|(?:^|[,{{\[])\s*{_NODE_PROP}\?\s*{_NODE_PROP})$")
+FLOW_VALUE_END_RE = re.compile(
+    rf"{_FLOW_ENTRY_START}(?:(?:[^:\[\]{{}},]|:(?!\s))+:\s*|(?:\"\"|uses)\s*:\s*){_NODE_PROP}$"
 )
 EXPLICIT_INLINE_USES_RE = re.compile(rf"^\s*(?:---\s+)?(?:-\s+)*{_NODE_PROP}\?\s*{_NODE_PROP}uses(?:\s*:|\s*$)")
 EXPLICIT_ONLY_QMARK_RE = re.compile(rf"^(?:---\s+)?(?:-\s+)*{_NODE_PROP}\?$")
@@ -38,7 +38,7 @@ EXPLICIT_NEXT_USES_RE = re.compile(rf"^\s*{_NODE_PROP}uses(?:\s*:|\s*$)")
 BLOCK_SCALAR_START_RE = re.compile(r":\s*[|>](?:[+-]?\d+|\d+[+-]?|[+-])?\s*$")
 BLOCK_SCALAR_RE = re.compile(r"^[|>](?:[+-]?\d+|\d+[+-]?|[+-])?(?:\s+#.*|\s*)$")
 PLAIN_SCALAR_MAPPING_RE = re.compile(
-    rf"^\s*(?:---\s+)?(?:-\s+)*{_NODE_PROP}[^:\[\]{{}},?#\s][^:\[\]{{}}]*:\s*{_NODE_PROP}\S"
+    rf"^\s*(?:---\s+)?(?:-\s+)*{_NODE_PROP}{_BLOCK_KEY}{_NODE_PROP}[^&!*|>\[{{#\s\"']"
 )
 NODE_PROP_PREFIX_RE = re.compile(r"^(?:(?:!<[^>]+>|[&!][^\s#]+)\s+)+")
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -113,16 +113,23 @@ def _consume_double_quoted(line: str, j: int, chars: list[str]) -> tuple[int, bo
     return j, False, False
 
 
-def _can_start_quote(prefix: str, depth: int, seq: int, allow_ws_open: bool) -> bool:
+def _can_start_quote(
+    prefix: str,
+    depth: int,
+    seq: int,
+    allow_ws_open: bool,
+    flow_line_state: str = "entry",
+) -> bool:
     """Return True only when ``prefix`` ends at a YAML node start position."""
     if depth == 0 and seq == 0:
-        return bool((prefix.strip() or allow_ws_open) and FLOW_OPEN_PREFIX_RE.match(prefix))
+        return bool(allow_ws_open and FLOW_OPEN_PREFIX_RE.match(prefix))
     if FLOW_ONLY_WS_AND_PROP_RE.match(prefix):
-        return allow_ws_open
+        return allow_ws_open and flow_line_state in ("entry", "value")
+    check_prefix = prefix if flow_line_state == "entry" else f"k: x{prefix}"
     return bool(
-        FLOW_QUOTE_AFTER_DELIM_RE.search(prefix)
-        or FLOW_COLON_WS_QUOTE_RE.search(prefix)
-        or FLOW_QUOTED_KEY_COLON_RE.search(prefix)
+        FLOW_QUOTE_AFTER_DELIM_RE.search(check_prefix)
+        or FLOW_COLON_WS_QUOTE_RE.search(check_prefix)
+        or FLOW_QUOTED_KEY_COLON_RE.search(check_prefix)
     )
 
 
@@ -134,6 +141,7 @@ def _scan_yaml_line(
     quote_chars: list[str] | None = None,
     quote_escaped_nl: bool = False,
     allow_whitespace_flow_open: bool = True,
+    flow_line_state: str = "entry",
 ) -> tuple[str, int, int, bool, str | None, list[str], bool]:
     """Strip comments/``${{ ... }}``, track multiline quotes, normalize ``'uses'``/``\"uses\"``, and track flow."""
     out: list[str] = []
@@ -185,7 +193,7 @@ def _scan_yaml_line(
             out.append('""')
             i = j
             continue
-        if ch in ("'", '"') and _can_start_quote("".join(out), depth, seq, allow_whitespace_flow_open):
+        if ch in ("'", '"') and _can_start_quote("".join(out), depth, seq, allow_whitespace_flow_open, flow_line_state):
             chars = []
             if ch == "'":
                 j, closed = _consume_single_quoted(line, i + 1, chars)
@@ -200,7 +208,7 @@ def _scan_yaml_line(
             continue
         if ch == "{":
             prefix = "".join(out)
-            if depth > 0 or seq > 0 or ((prefix.strip() or allow_whitespace_flow_open) and FLOW_OPEN_PREFIX_RE.match(prefix)):
+            if depth > 0 or seq > 0 or (allow_whitespace_flow_open and FLOW_OPEN_PREFIX_RE.match(prefix)):
                 depth += 1
                 had_flow = True
         elif ch == "}":
@@ -209,7 +217,7 @@ def _scan_yaml_line(
                 had_flow = True
         elif ch == "[":
             prefix = "".join(out)
-            if depth > 0 or seq > 0 or ((prefix.strip() or allow_whitespace_flow_open) and FLOW_OPEN_PREFIX_RE.match(prefix)):
+            if depth > 0 or seq > 0 or (allow_whitespace_flow_open and FLOW_OPEN_PREFIX_RE.match(prefix)):
                 seq += 1
                 had_flow = True
         elif ch == "]" and seq > 0:
@@ -368,7 +376,7 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
         plain_scalar_indent: int | None = None
         open_quote: str | None = None
         open_quote_lineno = 0
-        flow_node_ready = True
+        flow_line_state = "entry"
         quote_chars: list[str] = []
         quote_escaped_nl = False
         pending_explicit_key = False
@@ -402,7 +410,7 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
 
             prev_open_quote = open_quote
             if flow_depth > 0 or seq_depth > 0:
-                allow_ws_flow = flow_node_ready
+                allow_ws_flow = flow_line_state in ("entry", "value")
             else:
                 allow_ws_flow = not (plain_scalar_indent is not None and indent > plain_scalar_indent)
             cleaned, flow_depth, seq_depth, in_flow, open_quote, quote_chars, quote_escaped_nl = _scan_yaml_line(
@@ -413,14 +421,21 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
                 quote_chars,
                 quote_escaped_nl,
                 allow_ws_flow,
+                flow_line_state,
             )
             stripped = cleaned.strip()
             if prev_open_quote is None and open_quote is not None:
                 open_quote_lineno = lineno
             if flow_depth == 0 and seq_depth == 0:
-                flow_node_ready = True
-            elif open_quote is None and stripped:
-                flow_node_ready = bool(FLOW_NEXT_NODE_END_RE.search(cleaned))
+                flow_line_state = "entry"
+            elif open_quote is None and stripped and not FLOW_ONLY_WS_AND_PROP_RE.match(cleaned):
+                eff = cleaned if flow_line_state == "entry" else f"k: x{cleaned}"
+                if FLOW_ENTRY_END_RE.search(eff):
+                    flow_line_state = "entry"
+                elif FLOW_VALUE_END_RE.search(eff):
+                    flow_line_state = "value"
+                else:
+                    flow_line_state = "mid_scalar"
 
             if not in_flow and pending_explicit_key:
                 if not stripped:

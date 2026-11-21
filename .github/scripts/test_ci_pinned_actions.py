@@ -377,6 +377,14 @@ def test_hardened_valid_multiline_context_before_pinned_uses_passes(tmp_path, ca
     "  - {name: foo:'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}",
     "  - {name: foo:\n      'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}",
     "  - {name:http:'bar, uses: actions/checkout@v7, env: {X: '1'}}",
+    "  - {name: foo?'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}",
+    "  - {name: foo?\n      'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}",
+    "  - {name: foo ? 'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}",
+    "  - {? 'uses': actions/checkout@v7}",
+    "  - {name: 'unclosed?\n    uses: actions/checkout@v7}",
+    "  - foo:'bar\n  - uses: actions/checkout@v7\n  - name: '0'",
+    "  - name: foo\n      ? 'bar\n  - uses: actions/checkout@v7\n  - name: '0'",
+    "  - {name:\n      foo:'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}",
     "  - name: 'unclosed quote at eof",
 ])
 def test_apostrophe_or_unclosed_quote_never_hides_unpinned_uses(tmp_path, capsys, snippet):
