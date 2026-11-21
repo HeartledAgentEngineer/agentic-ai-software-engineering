@@ -52,7 +52,9 @@ jobs:
       - name: Type check (mypy · .github/scripts and concertify/domain)
         run: |
           pip install mypy==1.13.0 types-PyYAML==6.0.12.20240917
-          mypy --python-version 3.12 .github/scripts/ci_pinned_actions.py .github/scripts/ci_test_report.py projects/concertify/domain
+          mypy --python-version 3.12 .github/scripts/ci_pinned_actions.py .github/scripts/ci_test_report.py .github/scripts/ci_release_readiness.py projects/concertify/domain
+      - name: Release readiness baseline
+        run: python .github/scripts/ci_release_readiness.py --repo-root .
       - name: Actions are pinned to a commit SHA
         run: python .github/scripts/ci_pinned_actions.py .github/workflows
 
