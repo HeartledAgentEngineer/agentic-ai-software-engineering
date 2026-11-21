@@ -354,6 +354,7 @@ def test_hardened_target_and_multiline_key_edge_cases_fail(tmp_path, capsys, bad
     "  env: {\n    MODE: uses\n  }",
     "  - name: Don't skip checkout",
     "  - name: 'Don''t skip checkout'",
+    '  - with: {a: "x", "b":\'y\'}',
 ])
 def test_hardened_valid_multiline_context_before_pinned_uses_passes(tmp_path, capsys, snippet):
     content = (
@@ -373,6 +374,9 @@ def test_hardened_valid_multiline_context_before_pinned_uses_passes(tmp_path, ca
     "  - run: echo 'hello\n    uses: actions/checkout@v7",
     "  - { name: Don't, uses: actions/checkout@v7 }",
     "  - { name: foo\n      'bar, uses: actions/checkout@v7 }",
+    "  - {name: foo:'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}",
+    "  - {name: foo:\n      'bar, uses: actions/checkout@v7, with: {fetch-depth: '0'}}",
+    "  - {name:http:'bar, uses: actions/checkout@v7, env: {X: '1'}}",
     "  - name: 'unclosed quote at eof",
 ])
 def test_apostrophe_or_unclosed_quote_never_hides_unpinned_uses(tmp_path, capsys, snippet):

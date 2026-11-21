@@ -24,8 +24,14 @@ FLOW_OPEN_PREFIX_RE = re.compile(
 )
 FLOW_USES_KEY_RE = re.compile(rf"(?:^\s*|[,{{\[]\s*){_NODE_PROP}(?:\?\s*{_NODE_PROP})?uses(?:\s*:|\s*$)")
 FLOW_ONLY_WS_AND_PROP_RE = re.compile(rf"^\s*{_NODE_PROP}$")
-FLOW_QUOTE_AFTER_DELIM_RE = re.compile(rf"[,{{\[:\?]\s*{_NODE_PROP}$")
-FLOW_NEXT_NODE_END_RE = re.compile(r"(?:[,{\[:\?]|(?:!<[^>]+>|[&!][^\s\[\]{},]+))\s*$")
+FLOW_QUOTE_AFTER_DELIM_RE = re.compile(rf"[,{{\[\?]\s*{_NODE_PROP}$")
+FLOW_COLON_WS_QUOTE_RE = re.compile(
+    rf"(?:^|[,{{\[\?])\s*{_NODE_PROP}(?:[^:\[\]{{}},]|:(?!\s))+:\s+{_NODE_PROP}$"
+)
+FLOW_QUOTED_KEY_COLON_RE = re.compile(rf"(?:^|[,{{\[\?])\s*{_NODE_PROP}(?:\"\"|uses)\s*:\s*{_NODE_PROP}$")
+FLOW_NEXT_NODE_END_RE = re.compile(
+    rf"(?:[,{{\[\?]\s*{_NODE_PROP}$|(?:^|[,{{\[\?])\s*{_NODE_PROP}(?:[^:\[\]{{}},]|:(?!\s))+:\s*{_NODE_PROP}$)"
+)
 EXPLICIT_INLINE_USES_RE = re.compile(rf"^\s*(?:---\s+)?(?:-\s+)*{_NODE_PROP}\?\s*{_NODE_PROP}uses(?:\s*:|\s*$)")
 EXPLICIT_ONLY_QMARK_RE = re.compile(rf"^(?:---\s+)?(?:-\s+)*{_NODE_PROP}\?$")
 EXPLICIT_NEXT_USES_RE = re.compile(rf"^\s*{_NODE_PROP}uses(?:\s*:|\s*$)")
@@ -113,7 +119,11 @@ def _can_start_quote(prefix: str, depth: int, seq: int, allow_ws_open: bool) -> 
         return bool((prefix.strip() or allow_ws_open) and FLOW_OPEN_PREFIX_RE.match(prefix))
     if FLOW_ONLY_WS_AND_PROP_RE.match(prefix):
         return allow_ws_open
-    return bool(FLOW_QUOTE_AFTER_DELIM_RE.search(prefix))
+    return bool(
+        FLOW_QUOTE_AFTER_DELIM_RE.search(prefix)
+        or FLOW_COLON_WS_QUOTE_RE.search(prefix)
+        or FLOW_QUOTED_KEY_COLON_RE.search(prefix)
+    )
 
 
 def _scan_yaml_line(
