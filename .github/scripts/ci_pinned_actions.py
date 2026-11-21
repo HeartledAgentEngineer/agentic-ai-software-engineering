@@ -4,9 +4,9 @@ Usage (from the repository root):
 
     python .github/scripts/ci_pinned_actions.py .github/workflows
 
-Line-based by design (standard library only, no PyYAML dependency): inspects every ``*.yml`` and ``*.yaml`` file
-under the given paths and rejects empty, multiline block-scalar (``|``, ``>``, etc.) or flow-mapping
-(``{uses: ...}``) ``uses:`` entries with exit code 1 so unpinned actions cannot slip past silently.
+Scans every ``*.yml`` and ``*.yaml`` file under the given paths using standard library only (no PyYAML dependency)
+and rejects empty, multiline block-scalar (``|``, ``>``), single-line or multiline flow-mapping (``{uses: ...}``),
+and explicit ``? uses`` entries with exit code 1 so unpinned actions cannot slip past silently.
 """
 
 from __future__ import annotations
@@ -16,46 +16,88 @@ import re
 import sys
 from pathlib import Path
 
-USES_LINE_RE = re.compile(r"""^\s*(?:-\s+)?(?:uses|['"]uses['"])\s*:(.*)$""")
-FLOW_START_RE = re.compile(r"""^\s*(?:-\s*)?(?:[\[{]|(?:[A-Za-z0-9_.-]+|['"][^'"]+['"])\s*:\s*[\[{])""")
-FLOW_USES_KEY_RE = re.compile(r"""(?:^|[,{\[\s])(?:uses|['"]uses['"])\s*:""")
+USES_LINE_RE = re.compile(r"""^\s*(?:-\s+)*(?:uses|['"]uses['"])\s*:(.*)$""")
+FLOW_USES_KEY_RE = re.compile(r"(?:^|[,{\[\s])uses(?:\s*:|\s*$)")
+FLOW_SEQ_USES_RE = re.compile(r"\[[^\]]*(?:^|[,\[\s])uses\s*:")
+EXPLICIT_INLINE_USES_RE = re.compile(r"^\s*(?:-\s+)*\?\s*uses(?:\s*:|\s*$)")
+EXPLICIT_ONLY_QMARK_RE = re.compile(r"^(?:-\s+)*\?$")
+EXPLICIT_NEXT_USES_RE = re.compile(r"^\s*uses(?:\s*:|\s*$)")
+BLOCK_SCALAR_START_RE = re.compile(r":\s*[|>](?:[+-]?\d+|\d+[+-]?|[+-])?\s*$")
 BLOCK_SCALAR_RE = re.compile(r"^[|>](?:[+-]?\d+|\d+[+-]?|[+-])?(?:\s+#.*|\s*)$")
 SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST64_RE = re.compile(r"^docker://.+@sha256:[0-9a-f]{64}$")
 VERSION_COMMENT_RE = re.compile(r"#\s*v\S+")
 
 
-def _strip_yaml_comment(line: str) -> str:
-    """Return ``line`` up to any unquoted YAML ``#`` comment."""
-    in_quote: str | None = None
+def _scan_yaml_line(line: str) -> tuple[str, int]:
+    """Strip comments and ``${{ ... }}`` expressions, normalize quoted strings, and count ``{``/``}`` delta."""
+    out: list[str] = []
+    brace_delta = 0
     i = 0
-    while i < len(line):
+    n = len(line)
+    while i < n:
         ch = line[i]
-        if in_quote == "'":
-            if ch == "'":
-                if i + 1 < len(line) and line[i + 1] == "'":
-                    i += 2
+        if ch == "#" and (i == 0 or line[i - 1].isspace()):
+            break
+        if line.startswith("${{", i):
+            j = i + 3
+            expr_quote = False
+            while j < n:
+                if expr_quote:
+                    if line[j] == "'":
+                        if j + 1 < n and line[j + 1] == "'":
+                            j += 2
+                            continue
+                        expr_quote = False
+                elif line[j] == "'":
+                    expr_quote = True
+                elif line.startswith("}}", j):
+                    j += 2
+                    break
+                j += 1
+            out.append('""')
+            i = j
+            continue
+        if ch == "'":
+            j = i + 1
+            chars: list[str] = []
+            while j < n:
+                if line[j] == "'":
+                    if j + 1 < n and line[j + 1] == "'":
+                        chars.append("'")
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                chars.append(line[j])
+                j += 1
+            out.append("uses" if "".join(chars) == "uses" else '""')
+            i = j
+            continue
+        if ch == '"':
+            j = i + 1
+            chars = []
+            while j < n:
+                if line[j] == "\\":
+                    if j + 1 < n:
+                        chars.append(line[j + 1])
+                    j += 2
                     continue
-                in_quote = None
-        elif in_quote == '"':
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == '"':
-                in_quote = None
-        else:
-            if ch in ("'", '"'):
-                in_quote = ch
-            elif ch == "#" and (i == 0 or line[i - 1].isspace()):
-                return line[:i]
+                if line[j] == '"':
+                    j += 1
+                    break
+                chars.append(line[j])
+                j += 1
+            out.append("uses" if "".join(chars) == "uses" else '""')
+            i = j
+            continue
+        if ch == "{":
+            brace_delta += 1
+        elif ch == "}":
+            brace_delta -= 1
+        out.append(ch)
         i += 1
-    return line
-
-
-def _flow_mapping_has_uses(line: str) -> bool:
-    if not FLOW_START_RE.match(line):
-        return False
-    return bool(FLOW_USES_KEY_RE.search(_strip_yaml_comment(line)))
+    return "".join(out), brace_delta
 
 
 def _split_target_and_comment(raw_rhs: str) -> tuple[str, str] | None:
@@ -125,24 +167,62 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
         except OSError as exc:
             errors.append(f"::error file={file_ref}::could not read file ({exc})")
             continue
+        flow_depth = 0
+        block_indent: int | None = None
+        pending_explicit_key = False
         for lineno, line in enumerate(lines, start=1):
-            if _flow_mapping_has_uses(line):
+            if block_indent is not None:
+                if not line.strip():
+                    continue
+                if len(line) - len(line.lstrip(" ")) > block_indent:
+                    continue
+                block_indent = None
+
+            cleaned, brace_delta = _scan_yaml_line(line)
+            in_flow = (flow_depth > 0) or ("{" in cleaned)
+            flow_depth = max(0, flow_depth + brace_delta)
+            stripped = cleaned.strip()
+
+            if not in_flow and pending_explicit_key:
+                if not stripped:
+                    continue
+                pending_explicit_key = False
+                if EXPLICIT_NEXT_USES_RE.match(cleaned):
+                    uses_count += 1
+                    errors.append(f"::error file={file_ref},line={lineno}::explicit '? uses' key is not supported")
+                    continue
+
+            if (in_flow and FLOW_USES_KEY_RE.search(cleaned)) or FLOW_SEQ_USES_RE.search(cleaned):
                 uses_count += 1
                 errors.append(
                     f"::error file={file_ref},line={lineno}::flow-mapping uses: is not supported; use block mapping"
                 )
                 continue
+
+            if not in_flow and EXPLICIT_INLINE_USES_RE.match(cleaned):
+                uses_count += 1
+                errors.append(f"::error file={file_ref},line={lineno}::explicit '? uses' key is not supported")
+                continue
+
+            if not in_flow and EXPLICIT_ONLY_QMARK_RE.match(stripped):
+                pending_explicit_key = True
+                continue
+
             match = USES_LINE_RE.match(line)
-            if not match:
+            if match:
+                uses_count += 1
+                parsed = _split_target_and_comment(match.group(1))
+                if parsed is None:
+                    errors.append(f"::error file={file_ref},line={lineno}::empty or multiline uses: is not supported")
+                    continue
+                reason = _validate_target(*parsed)
+                if reason is not None:
+                    errors.append(f"::error file={file_ref},line={lineno}::{reason}")
                 continue
-            uses_count += 1
-            parsed = _split_target_and_comment(match.group(1))
-            if parsed is None:
-                errors.append(f"::error file={file_ref},line={lineno}::empty or multiline uses: is not supported")
-                continue
-            reason = _validate_target(*parsed)
-            if reason is not None:
-                errors.append(f"::error file={file_ref},line={lineno}::{reason}")
+
+            if flow_depth == 0 and BLOCK_SCALAR_START_RE.search(cleaned):
+                prefix_match = re.match(r"^(\s*(?:-\s+)*)", cleaned)
+                block_indent = len(prefix_match.group(1)) if prefix_match else 0
 
     if uses_count == 0:
         errors.append("::error::no uses: lines found")

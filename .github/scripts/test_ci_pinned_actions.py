@@ -186,3 +186,63 @@ def test_mixed_valid_pinned_and_flow_mapping_uses_fails(tmp_path, capsys, bad_li
     assert code == 1
     assert "ci.yml,line=3::" in out
     assert "ci.yml,line=2" not in out
+
+
+@pytest.mark.parametrize("block", [
+    "  - {\n    name: Checkout,\n    uses: actions/checkout@v7\n  }",
+    "  - {\n    name: Checkout,\n    uses\n    : actions/checkout@v7\n  }",
+    f"  - {{\n    name: Checkout,\n    uses: actions/checkout@{SHA}\n  }} # v7.0.1",
+])
+def test_multiline_flow_mapping_uses_fails(tmp_path, capsys, block):
+    folder = workflows(tmp_path, f"jobs:\n{block}\n")
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "::error file=" in out
+    assert "line=4::" in out
+
+
+@pytest.mark.parametrize("block", [
+    "  - {\n    name: Checkout,\n    uses: actions/checkout@v7\n  }",
+    "  - {\n    name: Checkout,\n    uses\n    : actions/checkout@v7\n  }",
+])
+def test_mixed_valid_pinned_and_multiline_flow_mapping_uses_fails(tmp_path, capsys, block):
+    content = (
+        f"jobs:\n"
+        f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
+        f"{block}\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "ci.yml,line=5::" in out
+    assert "ci.yml,line=2" not in out
+
+
+@pytest.mark.parametrize("block", [
+    "  ? uses: actions/checkout@v7",
+    "  - ? uses: actions/checkout@v7",
+    "  ?\n    uses\n  : actions/checkout@v7",
+    "  - - uses: actions/checkout@v7",
+])
+def test_explicit_or_nested_uses_fails(tmp_path, capsys, block):
+    folder = workflows(tmp_path, f"jobs:\n{block}\n")
+    code, out = run(folder, capsys)
+    assert code == 1
+    assert "::error file=" in out
+
+
+def test_multiline_run_block_scalar_with_braces_and_uses_text_passes(tmp_path, capsys):
+    content = (
+        "jobs:\n"
+        f"  - uses: actions/checkout@{SHA} # v7.0.1\n"
+        "  - name: Check shell snippet\n"
+        "    run: |\n"
+        "      if true; then {\n"
+        '        echo "uses: actions/checkout@v4"\n'
+        "      }; fi\n"
+    )
+    folder = workflows(tmp_path, content)
+    code, out = run(folder, capsys)
+    assert code == 0
+    assert "1 uses: lines pinned" in out
+
