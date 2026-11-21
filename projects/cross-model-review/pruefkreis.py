@@ -51,6 +51,7 @@ Waehrend eines Laufs steht "Pruefung R<n> laeuft" als Wartemeldung des Master-Sc
 
 Exit-Code: 0 = FREI, 1 = EINWAND, 2 = Fehler (Lauf, Urteilszeile, Aufruf).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -71,7 +72,9 @@ HERMES_MODELL = "deepseek/deepseek-v4.1-flash"
 HERMES_ANBIETER = "openrouter"  # the model id above is an OpenRouter id; without it Hermes uses its own default provider
 CODEX_GRUENDLICH_MODELL = "gpt-6-astra"
 ZEITGRENZE_STANDARD = 900
-MESSUNG_FRISCH_SEKUNDEN = 15 * 60   # aeltere Codex-Messung zaehlt nicht (Leiste misst alle 5 min)
+MESSUNG_FRISCH_SEKUNDEN = (
+    15 * 60
+)  # aeltere Codex-Messung zaehlt nicht (Leiste misst alle 5 min)
 URTEIL_MUSTER = re.compile(r"^URTEIL:\s*(FREI|EINWAND)\s*$")
 THEMA_MUSTER = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
 FASSUNG_MUSTER = re.compile(r"Fassung\s*(\d+)", re.IGNORECASE)
@@ -95,21 +98,28 @@ def haupt_repo(repo: Path = REPO) -> Path:
         zeile = verweis.read_text(encoding="utf-8").strip()
         if not zeile.startswith("gitdir:"):
             return repo
-        gitdir = Path(zeile[len("gitdir:"):].strip())
+        gitdir = Path(zeile[len("gitdir:") :].strip())
         if not gitdir.is_absolute():
             gitdir = repo / gitdir
-        common = (gitdir / (gitdir / "commondir").read_text(encoding="utf-8").strip()).resolve()
+        common = (
+            gitdir / (gitdir / "commondir").read_text(encoding="utf-8").strip()
+        ).resolve()
     except OSError:
         return repo
     return common.parent if common.name == ".git" else repo
 
 
 def protokoll_ordner() -> Path:
-    return Path(os.environ.get("PRUEFKREIS_DIR") or haupt_repo() / ".hermes" / "pruefkreis")
+    return Path(
+        os.environ.get("PRUEFKREIS_DIR") or haupt_repo() / ".hermes" / "pruefkreis"
+    )
 
 
 def besitz_ordner() -> Path:
-    return Path(os.environ.get("PRUEFKREIS_BESITZ_DIR") or haupt_repo() / ".hermes" / "uebergabe" / "laufend")
+    return Path(
+        os.environ.get("PRUEFKREIS_BESITZ_DIR")
+        or haupt_repo() / ".hermes" / "uebergabe" / "laufend"
+    )
 
 
 def codex_programm() -> str | None:
@@ -117,7 +127,9 @@ def codex_programm() -> str | None:
     if os.environ.get("PRUEFKREIS_CODEX"):
         return os.environ["PRUEFKREIS_CODEX"]
     basis = Path(os.environ.get("LOCALAPPDATA", "")) / "OpenAI" / "Codex" / "bin"
-    treffer = sorted(basis.glob("*/codex.exe"), key=lambda p: p.stat().st_mtime, reverse=True)
+    treffer = sorted(
+        basis.glob("*/codex.exe"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
     return str(treffer[0]) if treffer else None
 
 
@@ -139,7 +151,9 @@ WAHL_WERTE = ("codex", "hermes")
 
 def pruefer_datei() -> Path:
     """Prueferwahl je Thema des Master-Schalters (`masterwechsel pruefer-setzen`, `pruefer.json`)."""
-    basis = os.environ.get("MASTER_SCHALTER_DATEN") or str(Path.home() / ".master-schalter")
+    basis = os.environ.get("MASTER_SCHALTER_DATEN") or str(
+        Path.home() / ".master-schalter"
+    )
     return Path(basis) / "pruefer.json"
 
 
@@ -159,10 +173,18 @@ def pruefer_wahl_lesen(thema: str) -> tuple[str | None, str]:
     except (OSError, ValueError):
         return None, f"{pfad.name} unlesbar - Regel angewandt"
     themen = roh.get("themen") if isinstance(roh, dict) else None
-    if (not isinstance(roh, dict) or set(roh) != {"version", "themen"} or roh["version"] != 1
-            or not isinstance(themen, dict)
-            or any(not isinstance(k, str) or not THEMA_MUSTER.fullmatch(k) or v not in WAHL_WERTE
-                   for k, v in themen.items())):
+    if (
+        not isinstance(roh, dict)
+        or set(roh) != {"version", "themen"}
+        or roh["version"] != 1
+        or not isinstance(themen, dict)
+        or any(
+            not isinstance(k, str)
+            or not THEMA_MUSTER.fullmatch(k)
+            or v not in WAHL_WERTE
+            for k, v in themen.items()
+        )
+    ):
         return None, f"{pfad.name} ungueltig - Regel angewandt"
     teile = thema.split("-")
     for laenge in range(len(teile), 0, -1):
@@ -172,8 +194,12 @@ def pruefer_wahl_lesen(thema: str) -> tuple[str | None, str]:
     return None, ""
 
 
-def pruefer_waehlen(pruefer: str | None, sensibel: bool, master: str | None = None,
-                    wahl: str | None = None) -> str:
+def pruefer_waehlen(
+    pruefer: str | None,
+    sensibel: bool,
+    master: str | None = None,
+    wahl: str | None = None,
+) -> str:
     """Pruefer: ``--sensibel`` => Hermes; ``--pruefer`` gilt vor der Wahl; dann die Wahl des Themas (frei, auch aus der
     Familie des Masters); sonst die Regel (Pruefer != Familie des Masters)."""
     if master not in (None, *MASTER_WERTE):
@@ -182,7 +208,9 @@ def pruefer_waehlen(pruefer: str | None, sensibel: bool, master: str | None = No
         raise PruefkreisFehler(f"Unbekannte Prueferwahl: {wahl}")
     if sensibel:
         if pruefer == "codex":
-            raise PruefkreisFehler("Sensible Inhalte prueft ausschliesslich Hermes (AGENTS.md) - Codex verweigert.")
+            raise PruefkreisFehler(
+                "Sensible Inhalte prueft ausschliesslich Hermes (AGENTS.md) - Codex verweigert."
+            )
         return "hermes"
     if pruefer not in (None, "codex", "hermes"):
         raise PruefkreisFehler(f"Unbekannter Pruefer: {pruefer}")
@@ -190,7 +218,9 @@ def pruefer_waehlen(pruefer: str | None, sensibel: bool, master: str | None = No
         return wahl
     if master == "codex":
         if pruefer == "codex":
-            raise PruefkreisFehler("Codex prueft nicht die Arbeit eines Codex-Masters (AGENTS.md: andere Modellfamilie).")
+            raise PruefkreisFehler(
+                "Codex prueft nicht die Arbeit eines Codex-Masters (AGENTS.md: andere Modellfamilie)."
+            )
         return "hermes"
     return pruefer or "codex"
 
@@ -242,33 +272,61 @@ def auftrag_text(vorlage: str, runde: int, sensibel: bool) -> str:
         "Antworte auf Deutsch, knapp, hoechstens 35 Zeilen.",
     ]
     if sensibel:
-        teile.append("Die Datei kann sensible Inhalte betreffen: zitiere keine persoenlichen Inhalte.")
+        teile.append(
+            "Die Datei kann sensible Inhalte betreffen: zitiere keine persoenlichen Inhalte."
+        )
     teile.append("Letzte Zeile exakt 'URTEIL: FREI' oder 'URTEIL: EINWAND'.")
     return " ".join(teile)
 
 
-def befehl_codex(programm: str, auftrag: str, ausgabe: Path, gruendlich: bool) -> list[str]:
+def befehl_codex(
+    programm: str, auftrag: str, ausgabe: Path, gruendlich: bool
+) -> list[str]:
     befehl = [programm, "exec", "--ephemeral", "-s", "read-only", "-o", str(ausgabe)]
-    befehl += ["-m", CODEX_GRUENDLICH_MODELL] if gruendlich else ["-c", "model_reasoning_effort=high"]
+    befehl += (
+        ["-m", CODEX_GRUENDLICH_MODELL]
+        if gruendlich
+        else ["-c", "model_reasoning_effort=high"]
+    )
     return befehl + [auftrag]
 
 
 def befehl_hermes(programm: str, auftrag: str, nutzung: Path) -> list[str]:
-    return [programm, "-z", auftrag, "-m", HERMES_MODELL, "--provider", HERMES_ANBIETER, "--usage-file", str(nutzung),
-            "-t", "file,todo", "--in", str(REPO)]
+    return [
+        programm,
+        "-z",
+        auftrag,
+        "-m",
+        HERMES_MODELL,
+        "--provider",
+        HERMES_ANBIETER,
+        "--usage-file",
+        str(nutzung),
+        "-t",
+        "file,todo",
+        "--in",
+        str(REPO),
+    ]
 
 
 def _baum_beenden(prozess: subprocess.Popen) -> None:
     """Pruefer samt Unterprozessen beenden; ein bereits beendeter Prozess ist kein Fehler."""
     if os.name == "nt":
         try:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(prozess.pid)], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=15, check=False)
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(prozess.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+                check=False,
+            )
         except (OSError, subprocess.TimeoutExpired):
             pass
     else:
         try:
-            os.killpg(prozess.pid, signal.SIGKILL)   # eigene Prozessgruppe, siehe start_new_session
+            os.killpg(
+                prozess.pid, signal.SIGKILL
+            )  # eigene Prozessgruppe, siehe start_new_session
         except OSError:
             pass
     try:
@@ -285,12 +343,20 @@ def starte(befehl: list[str], zeitgrenze: float) -> tuple[int, str, str]:
     der die Ausgabe geerbt hat, wuerde das Lesen einer Pipe bis zu dessen Ende blockieren, auch ueber die
     Zeitgrenze hinaus.
     """
-    with tempfile.TemporaryDirectory(prefix="pruefkreis-", ignore_cleanup_errors=True) as ordner:
+    with tempfile.TemporaryDirectory(
+        prefix="pruefkreis-", ignore_cleanup_errors=True
+    ) as ordner:
         aus_datei, err_datei = Path(ordner) / "stdout.txt", Path(ordner) / "stderr.txt"
         try:
             with open(aus_datei, "wb") as aus, open(err_datei, "wb") as err:
-                prozess = subprocess.Popen(befehl, cwd=str(REPO), stdin=subprocess.DEVNULL, stdout=aus, stderr=err,
-                                           start_new_session=os.name != "nt")
+                prozess = subprocess.Popen(
+                    befehl,
+                    cwd=str(REPO),
+                    stdin=subprocess.DEVNULL,
+                    stdout=aus,
+                    stderr=err,
+                    start_new_session=os.name != "nt",
+                )
         except OSError as fehler:
             return -2, "", str(fehler)
         try:
@@ -298,8 +364,11 @@ def starte(befehl: list[str], zeitgrenze: float) -> tuple[int, str, str]:
         except subprocess.TimeoutExpired:
             _baum_beenden(prozess)
             return -1, "", ""
-        return (code, aus_datei.read_text(encoding="utf-8", errors="replace"),
-                err_datei.read_text(encoding="utf-8", errors="replace"))
+        return (
+            code,
+            aus_datei.read_text(encoding="utf-8", errors="replace"),
+            err_datei.read_text(encoding="utf-8", errors="replace"),
+        )
 
 
 def fehlerzeile(stderr: str) -> str:
@@ -314,12 +383,17 @@ def _nutzung_lesen(datei: Path) -> dict:
         daten = json.loads(datei.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    return {"sitzung": daten.get("session_id"), "kosten_usd": daten.get("estimated_cost_usd")}
+    return {
+        "sitzung": daten.get("session_id"),
+        "kosten_usd": daten.get("estimated_cost_usd"),
+    }
 
 
 def kontingent_datei() -> Path:
     """Codex-Messung des Master-Schalters (`masterwechsel codex-messen`, Leiste alle 5 min)."""
-    basis = os.environ.get("MASTER_SCHALTER_DATEN") or str(Path.home() / ".master-schalter")
+    basis = os.environ.get("MASTER_SCHALTER_DATEN") or str(
+        Path.home() / ".master-schalter"
+    )
     return Path(basis) / "codex-kontingent.json"
 
 
@@ -334,12 +408,19 @@ def codex_im_limit(jetzt: float | None = None) -> str | None:
     jetzt = time.time() if jetzt is None else jetzt
     try:
         roh = json.loads(kontingent_datei().read_text(encoding="utf-8"))
-        stand = datetime.fromisoformat(roh["gelesen_um"].replace("Z", "+00:00"))   # wie `signale._iso`
-        gelesen = (stand if stand.tzinfo else stand.replace(tzinfo=timezone.utc)).timestamp()
+        stand = datetime.fromisoformat(
+            roh["gelesen_um"].replace("Z", "+00:00")
+        )  # wie `signale._iso`
+        gelesen = (
+            stand if stand.tzinfo else stand.replace(tzinfo=timezone.utc)
+        ).timestamp()
         fenster = roh["fenster"]
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
-    if not isinstance(fenster, dict) or not 0 <= jetzt - gelesen <= MESSUNG_FRISCH_SEKUNDEN:
+    if (
+        not isinstance(fenster, dict)
+        or not 0 <= jetzt - gelesen <= MESSUNG_FRISCH_SEKUNDEN
+    ):
         return None
     # Erst BEIDE Fenster prüfen (wie `_codex_filtern` im Master-Schalter): ein kaputtes Fenster macht die ganze
     # Messung ungültig, auch wenn das andere schon ein Limit zeigt.
@@ -349,15 +430,21 @@ def codex_im_limit(jetzt: float | None = None) -> str | None:
         if not isinstance(werte, dict):
             return None
         prozent, reset = werte.get("used_percent"), werte.get("resets_at")
-        if not isinstance(prozent, (int, float)) or isinstance(prozent, bool) or not 0 <= prozent <= 100:
+        if (
+            not isinstance(prozent, (int, float))
+            or isinstance(prozent, bool)
+            or not 0 <= prozent <= 100
+        ):
             return None
-        if reset is None:   # kein offenes Fenster: gültig nur mit 0 % (wie `_codex_filtern`), nie ein Limit
+        if (
+            reset is None
+        ):  # kein offenes Fenster: gültig nur mit 0 % (wie `_codex_filtern`), nie ein Limit
             if prozent != 0:
                 return None
             continue
         if not isinstance(reset, (int, float)) or isinstance(reset, bool):
             return None
-        try:   # nicht darstellbare Zeit (z. B. 1e100, inf) = kaputte Messung
+        try:  # nicht darstellbare Zeit (z. B. 1e100, inf) = kaputte Messung
             bis = time.strftime("%d.%m. %H:%M", time.localtime(reset))
         except (OverflowError, OSError, ValueError):
             return None
@@ -373,11 +460,16 @@ def codex_gesperrt(exitcode: int, stderr: str) -> bool:
     return exitcode not in (0, -1) and bool(GESPERRT_MUSTER.search(stderr or ""))
 
 
-def _lauf(wer: str, programm: str, auftrag: str, gruendlich: bool, zeitgrenze: float) -> dict:
+def _lauf(
+    wer: str, programm: str, auftrag: str, gruendlich: bool, zeitgrenze: float
+) -> dict:
     with tempfile.TemporaryDirectory(prefix="pruefkreis-") as tmp:
         ablage = Path(tmp) / ("antwort.md" if wer == "codex" else "nutzung.json")
-        befehl = (befehl_codex(programm, auftrag, ablage, gruendlich) if wer == "codex"
-                  else befehl_hermes(programm, auftrag, ablage))
+        befehl = (
+            befehl_codex(programm, auftrag, ablage, gruendlich)
+            if wer == "codex"
+            else befehl_hermes(programm, auftrag, ablage)
+        )
         start = time.monotonic()
         exitcode, stdout, stderr = starte(befehl, zeitgrenze)
         dauer = round(time.monotonic() - start, 1)
@@ -386,13 +478,21 @@ def _lauf(wer: str, programm: str, auftrag: str, gruendlich: bool, zeitgrenze: f
             nutzung = {}
         else:
             text, nutzung = stdout, _nutzung_lesen(ablage)
-    return {"exitcode": exitcode, "text": text, "stderr": stderr, "nutzung": nutzung, "dauer": dauer}
+    return {
+        "exitcode": exitcode,
+        "text": text,
+        "stderr": stderr,
+        "nutzung": nutzung,
+        "dauer": dauer,
+    }
 
 
 def modell_fuer(wer: str, gruendlich: bool) -> str:
     if wer == "hermes":
         return HERMES_MODELL
-    return CODEX_GRUENDLICH_MODELL if gruendlich else "Codex-App-Standard (Denkstufe high)"
+    return (
+        CODEX_GRUENDLICH_MODELL if gruendlich else "Codex-App-Standard (Denkstufe high)"
+    )
 
 
 def planfassung_lesen(vorlage: str, angegeben: str | None) -> str:
@@ -401,19 +501,29 @@ def planfassung_lesen(vorlage: str, angegeben: str | None) -> str:
         return angegeben
     datei = REPO / vorlage if (REPO / vorlage).is_file() else Path(vorlage)
     try:
-        treffer = FASSUNG_MUSTER.search(datei.read_text(encoding="utf-8", errors="replace"))
+        treffer = FASSUNG_MUSTER.search(
+            datei.read_text(encoding="utf-8", errors="replace")
+        )
     except OSError:
         treffer = None
     return treffer.group(1) if treffer else "nicht angegeben"
 
 
 def protokoll_block(ergebnis: dict) -> str:
-    kopf = (f"## Runde {ergebnis['runde']} · {ergebnis['zeit']} · Pruefer {ergebnis['pruefer']}"
-            f" · Vorlage `{ergebnis['vorlage']}`")
-    zeilen = [kopf, "", f"**Status: {ergebnis['status'].upper()}**",
-              f"Modell: {ergebnis.get('modell', '?')} · Planfassung: {ergebnis.get('planfassung', '?')}"]
+    kopf = (
+        f"## Runde {ergebnis['runde']} · {ergebnis['zeit']} · Pruefer {ergebnis['pruefer']}"
+        f" · Vorlage `{ergebnis['vorlage']}`"
+    )
+    zeilen = [
+        kopf,
+        "",
+        f"**Status: {ergebnis['status'].upper()}**",
+        f"Modell: {ergebnis.get('modell', '?')} · Planfassung: {ergebnis.get('planfassung', '?')}",
+    ]
     if ergebnis.get("master_quelle"):
-        zeilen.append(f"Master: {ergebnis.get('master') or '?'} ({ergebnis['master_quelle']})")
+        zeilen.append(
+            f"Master: {ergebnis.get('master') or '?'} ({ergebnis['master_quelle']})"
+        )
     if ergebnis.get("pruefer_vermerk"):
         zeilen.append(f"Prueferwahl: {ergebnis['pruefer_vermerk']}")
     if ergebnis.get("ersatz"):
@@ -424,13 +534,20 @@ def protokoll_block(ergebnis: dict) -> str:
         zeilen.append(f"Hermes-Sitzung: `{ergebnis['sitzung']}`")
     if ergebnis.get("kosten_usd") is not None:
         zeilen.append(f"Kosten: {ergebnis['kosten_usd']:.4f} USD")
-    zeilen += [f"Dauer: {ergebnis['dauer_s']} s", "", ergebnis["ausgabe"].strip() or "(keine Ausgabe)", ""]
+    zeilen += [
+        f"Dauer: {ergebnis['dauer_s']} s",
+        "",
+        ergebnis["ausgabe"].strip() or "(keine Ausgabe)",
+        "",
+    ]
     return "\n".join(zeilen)
 
 
 def wartet_datei(name: str) -> Path:
     """„Wartet worauf“-Datei des Master-Schalters (`masterwechsel warte`, angezeigt von `kurz`)."""
-    basis = os.environ.get("MASTER_SCHALTER_DATEN") or str(Path.home() / ".master-schalter")
+    basis = os.environ.get("MASTER_SCHALTER_DATEN") or str(
+        Path.home() / ".master-schalter"
+    )
     return Path(basis) / "wartet" / f"{name}.json"
 
 
@@ -446,12 +563,22 @@ def wartet_melden(name: str, text: str) -> str | None:
         datei.parent.mkdir(parents=True, exist_ok=True)
         # "pid": Prozesskennung dieses Pruefprozesses - der Master-Schalter erkennt damit eine verwaiste Meldung
         # (Prozess nach Absturz/Abbruch weg, Datei blieb liegen); das Format sonst unveraendert.
-        inhalt = json.dumps({"text": text, "zeit": datetime.now(timezone.utc).isoformat(), "pid": os.getpid()},
-                            ensure_ascii=False)
-        fd, tmp = tempfile.mkstemp(prefix=f"{name}.", suffix=".tmp", dir=datei.parent)   # je Aufruf neu (O_EXCL)
+        inhalt = json.dumps(
+            {
+                "text": text,
+                "zeit": datetime.now(timezone.utc).isoformat(),
+                "pid": os.getpid(),
+            },
+            ensure_ascii=False,
+        )
+        fd, tmp = tempfile.mkstemp(
+            prefix=f"{name}.", suffix=".tmp", dir=datei.parent
+        )  # je Aufruf neu (O_EXCL)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(inhalt)
-        os.link(tmp, datei)   # atomar und nur, wenn das Ziel fehlt (FileExistsError) - nie überschreiben
+        os.link(
+            tmp, datei
+        )  # atomar und nur, wenn das Ziel fehlt (FileExistsError) - nie überschreiben
     except OSError:
         return None
     finally:
@@ -475,39 +602,80 @@ def wartet_aufraeumen(name: str, eigen: str | None) -> None:
         pass
 
 
-def pruefen(vorlage: str, thema: str, pruefer: str | None = None, sensibel: bool = False,
-            gruendlich: bool = False, zeitgrenze: float = ZEITGRENZE_STANDARD,
-            planfassung: str | None = None, master: str | None = None) -> dict:
+def pruefen(
+    vorlage: str,
+    thema: str,
+    pruefer: str | None = None,
+    sensibel: bool = False,
+    gruendlich: bool = False,
+    zeitgrenze: float = ZEITGRENZE_STANDARD,
+    planfassung: str | None = None,
+    master: str | None = None,
+) -> dict:
     """Prüflauf mit „Wartet worauf“-Meldung für das Thema der Besitzdatei (nur wenn keine andere da ist)."""
     name = None
     if THEMA_MUSTER.match(thema):
         quelle = master_ermitteln(thema, master)[1]
-        name = quelle[: -len(".master")] if quelle.endswith(".master") else None   # nur ein Schalter-Thema
-    eigen = wartet_melden(name, f"Prüfung R{naechste_runde(thema)} läuft (pruefkreis, {thema})") if name else None
+        name = (
+            quelle[: -len(".master")] if quelle.endswith(".master") else None
+        )  # nur ein Schalter-Thema
+    eigen = (
+        wartet_melden(
+            name, f"Prüfung R{naechste_runde(thema)} läuft (pruefkreis, {thema})"
+        )
+        if name
+        else None
+    )
     try:
-        return _pruefen(vorlage, thema, pruefer, sensibel, gruendlich, zeitgrenze, planfassung, master)
+        return _pruefen(
+            vorlage,
+            thema,
+            pruefer,
+            sensibel,
+            gruendlich,
+            zeitgrenze,
+            planfassung,
+            master,
+        )
     finally:
         if name:
             wartet_aufraeumen(name, eigen)
 
 
-def _pruefen(vorlage: str, thema: str, pruefer: str | None, sensibel: bool, gruendlich: bool,
-             zeitgrenze: float, planfassung: str | None, master: str | None) -> dict:
+def _pruefen(
+    vorlage: str,
+    thema: str,
+    pruefer: str | None,
+    sensibel: bool,
+    gruendlich: bool,
+    zeitgrenze: float,
+    planfassung: str | None,
+    master: str | None,
+) -> dict:
     if not THEMA_MUSTER.match(thema):
-        raise PruefkreisFehler("Thema nur aus a-z, 0-9 und Bindestrich (wird Dateiname).")
+        raise PruefkreisFehler(
+            "Thema nur aus a-z, 0-9 und Bindestrich (wird Dateiname)."
+        )
     if not (REPO / vorlage).is_file() and not Path(vorlage).is_file():
         raise PruefkreisFehler(f"Vorlage nicht gefunden: {vorlage}")
     master, master_quelle = master_ermitteln(thema, master)
     if master is None and not sensibel:
-        raise PruefkreisFehler(f"Master {master_quelle} - bitte --master claude|codex|hermes angeben "
-                               "(sonst koennte Codex einen Codex-Master pruefen).")
+        raise PruefkreisFehler(
+            f"Master {master_quelle} - bitte --master claude|codex|hermes angeben "
+            "(sonst koennte Codex einen Codex-Master pruefen)."
+        )
     # Die Wahl des Themas zaehlt nur ohne --pruefer und ohne --sensibel (beides geht vor).
-    wahl, wahl_quelle = pruefer_wahl_lesen(thema) if pruefer is None and not sensibel else (None, "")
+    wahl, wahl_quelle = (
+        pruefer_wahl_lesen(thema) if pruefer is None and not sensibel else (None, "")
+    )
     wer = pruefer_waehlen(pruefer, sensibel, master, wahl)
-    ersatz = ("Hermes statt Codex - Master ist Codex (keine Pruefung durch dieselbe Modellfamilie)"
-              if master == "codex" and not sensibel and pruefer is None and wahl is None else "")
+    ersatz = (
+        "Hermes statt Codex - Master ist Codex (keine Pruefung durch dieselbe Modellfamilie)"
+        if master == "codex" and not sensibel and pruefer is None and wahl is None
+        else ""
+    )
     limit = codex_im_limit() if wer == "codex" and pruefer is None else None
-    if limit:   # gemessen im Limit: gleich Hermes statt erst eines Codex-Fehlversuchs
+    if limit:  # gemessen im Limit: gleich Hermes statt erst eines Codex-Fehlversuchs
         wer, gruendlich = "hermes", False
         ersatz = f"Hermes statt Codex - {limit} (kein Fehlversuch)"
     programm = codex_programm() if wer == "codex" else hermes_programm()
@@ -527,8 +695,13 @@ def _pruefen(vorlage: str, thema: str, pruefer: str | None, sensibel: bool, grue
             lauf["dauer"] = round(lauf["dauer"] + dauer_codex, 1)
         else:
             ersatz += "; Hermes nicht gefunden - kein Ersatzlauf"
-    exitcode, text, stderr, nutzung, dauer = (lauf["exitcode"], lauf["text"], lauf["stderr"],
-                                              lauf["nutzung"], lauf["dauer"])
+    exitcode, text, stderr, nutzung, dauer = (
+        lauf["exitcode"],
+        lauf["text"],
+        lauf["stderr"],
+        lauf["nutzung"],
+        lauf["dauer"],
+    )
 
     urteil = urteil_lesen(text)
     if exitcode == -1:
@@ -545,8 +718,9 @@ def _pruefen(vorlage: str, thema: str, pruefer: str | None, sensibel: bool, grue
 
     if sensibel:
         sitzung = nutzung.get("sitzung") or "unbekannt"
-        ausgabe = (f"URTEIL: {urteil.upper()}" if urteil else "(kein Urteil)") + \
-                  f"\n(Begruendung bleibt in der Hermes-Sitzung {sitzung} - sensibel.)"
+        ausgabe = (
+            f"URTEIL: {urteil.upper()}" if urteil else "(kein Urteil)"
+        ) + f"\n(Begruendung bleibt in der Hermes-Sitzung {sitzung} - sensibel.)"
     else:
         ausgabe = text
 
@@ -554,14 +728,31 @@ def _pruefen(vorlage: str, thema: str, pruefer: str | None, sensibel: bool, grue
     if wahl is not None:
         vermerk = f"{wahl} ({wahl_quelle})"
         if wer == wahl == master:
-            vermerk += (" - Pruefer aus derselben Familie wie der Master - des Betreibers Wahl, "
-                        "weicht von AGENTS.md ab")
-    elif wahl_quelle:   # Datei unlesbar/ungueltig: Regel angewandt, aber sichtbar vermerkt
+            vermerk += (
+                " - Pruefer aus derselben Familie wie der Master - des Betreibers Wahl, "
+                "weicht von AGENTS.md ab"
+            )
+    elif (
+        wahl_quelle
+    ):  # Datei unlesbar/ungueltig: Regel angewandt, aber sichtbar vermerkt
         vermerk = wahl_quelle
-    ergebnis = {"runde": runde, "zeit": time.strftime("%Y-%m-%d %H:%M"), "pruefer": wer, "vorlage": vorlage,
-                "modell": modell_fuer(wer, gruendlich), "planfassung": planfassung_lesen(vorlage, planfassung),
-                "status": status, "grund": grund, "ersatz": ersatz, "pruefer_vermerk": vermerk, "master": master,
-                "master_quelle": master_quelle, "dauer_s": dauer, "ausgabe": ausgabe, **nutzung}
+    ergebnis = {
+        "runde": runde,
+        "zeit": time.strftime("%Y-%m-%d %H:%M"),
+        "pruefer": wer,
+        "vorlage": vorlage,
+        "modell": modell_fuer(wer, gruendlich),
+        "planfassung": planfassung_lesen(vorlage, planfassung),
+        "status": status,
+        "grund": grund,
+        "ersatz": ersatz,
+        "pruefer_vermerk": vermerk,
+        "master": master,
+        "master_quelle": master_quelle,
+        "dauer_s": dauer,
+        "ausgabe": ausgabe,
+        **nutzung,
+    }
     ordner = protokoll_ordner()
     ordner.mkdir(parents=True, exist_ok=True)
     datei = ordner / f"{thema}.md"
@@ -574,21 +765,38 @@ def _pruefen(vorlage: str, thema: str, pruefer: str | None, sensibel: bool, grue
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="pruefkreis", description="Automatische Gegenpruefung durch Codex oder Hermes")
+    parser = argparse.ArgumentParser(
+        prog="pruefkreis",
+        description="Automatische Gegenpruefung durch Codex oder Hermes",
+    )
     unter = parser.add_subparsers(dest="befehl", required=True)
     p = unter.add_parser("pruefen", help="Vorlage frisch pruefen lassen")
     p.add_argument("--vorlage", required=True)
     p.add_argument("--thema", required=True)
     p.add_argument("--pruefer", choices=("codex", "hermes"))
-    p.add_argument("--master", choices=MASTER_WERTE, help="Master des Themas (sonst aus der Besitzdatei); Codex prueft nie einen Codex-Master")
+    p.add_argument(
+        "--master",
+        choices=MASTER_WERTE,
+        help="Master des Themas (sonst aus der Besitzdatei); Codex prueft nie einen Codex-Master",
+    )
     p.add_argument("--sensibel", action="store_true")
-    p.add_argument("--gruendlich", action="store_true", help=f"Codex mit {CODEX_GRUENDLICH_MODELL}")
+    p.add_argument(
+        "--gruendlich", action="store_true", help=f"Codex mit {CODEX_GRUENDLICH_MODELL}"
+    )
     p.add_argument("--zeitgrenze", type=float, default=ZEITGRENZE_STANDARD)
     p.add_argument("--planfassung", help="sonst 'Fassung N' aus der Vorlage")
     args = parser.parse_args(argv)
     try:
-        ergebnis = pruefen(args.vorlage, args.thema, args.pruefer, args.sensibel, args.gruendlich, args.zeitgrenze,
-                           args.planfassung, args.master)
+        ergebnis = pruefen(
+            args.vorlage,
+            args.thema,
+            args.pruefer,
+            args.sensibel,
+            args.gruendlich,
+            args.zeitgrenze,
+            args.planfassung,
+            args.master,
+        )
     except PruefkreisFehler as fehler:
         print(f"FEHLER: {fehler}", file=sys.stderr)
         return 2

@@ -43,6 +43,8 @@ jobs:
           python-version: "3.12"
       - run: pip install ruff==0.6.9
       - run: ruff check --output-format=github .
+      - name: Format check (ruff · .github/scripts and cross-model-review)
+        run: ruff format --check .github/scripts projects/cross-model-review
       - name: Self-tests of the CI scripts
         run: |
           pip install pytest "PyYAML>=6.0,<7"

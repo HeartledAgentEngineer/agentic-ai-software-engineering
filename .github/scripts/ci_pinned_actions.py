@@ -105,7 +105,9 @@ def _validate_uses_entry(
         return f"::error file={file_ref},line={lineno}::invalid whitespace or empty uses: target ({target})"
 
     line_idx = val_node.start_mark.line
-    raw_after = lines[line_idx][val_node.end_mark.column :] if line_idx < len(lines) else ""
+    raw_after = (
+        lines[line_idx][val_node.end_mark.column :] if line_idx < len(lines) else ""
+    )
     trailing = raw_after.strip()
     if trailing and not trailing.startswith("#"):
         return f"::error file={file_ref},line={lineno}::unexpected trailing content after uses: target"
@@ -127,7 +129,12 @@ def _collect_yaml_files(paths: list[Path]) -> tuple[list[Path], list[str]]:
             files.append(path)
         else:
             found = sorted(
-                {p for pattern in ("*.yml", "*.yaml") for p in path.rglob(pattern) if p.is_file()},
+                {
+                    p
+                    for pattern in ("*.yml", "*.yaml")
+                    for p in path.rglob(pattern)
+                    if p.is_file()
+                },
                 key=lambda p: p.as_posix(),
             )
             files.extend(found)
@@ -171,7 +178,9 @@ def check_paths(paths: list[Path]) -> tuple[int, list[str]]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Ensure workflow uses: lines are pinned to full commit SHAs.")
+    parser = argparse.ArgumentParser(
+        description="Ensure workflow uses: lines are pinned to full commit SHAs."
+    )
     parser.add_argument("paths", nargs="*", default=[".github/workflows"], type=Path)
     args = parser.parse_args(argv)
 

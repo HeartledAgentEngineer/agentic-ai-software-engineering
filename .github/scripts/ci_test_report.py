@@ -39,7 +39,7 @@ def as_sentence(name: str) -> str:
     """``test_add_song_persists_score[x]`` -> ``add song persists score [x]``."""
     base, bracket, rest = name.partition("[")
     if base.startswith("test_"):
-        base = base[len("test_"):]
+        base = base[len("test_") :]
     sentence = base.replace("_", " ").strip()
     return f"{sentence} [{rest}" if bracket else sentence
 
@@ -56,20 +56,37 @@ def read_junit(path: Path) -> list[dict]:
     cases = []
     for case in root.iter("testcase"):
         status, message = "passed", ""
-        for tag, name in (("failure", "failed"), ("error", "error"), ("skipped", "skipped")):
+        for tag, name in (
+            ("failure", "failed"),
+            ("error", "error"),
+            ("skipped", "skipped"),
+        ):
             node = case.find(tag)
             if node is not None:
                 status, message = name, (node.get("message") or "").strip()
                 break
-        file = (case.get("file") or case.get("classname", "").replace(".", "/") + ".py").replace("\\", "/")
-        cases.append({"file": file, "name": case.get("name", ""), "status": status, "message": message,
-                      "time": float(case.get("time") or 0)})
+        file = (
+            case.get("file") or case.get("classname", "").replace(".", "/") + ".py"
+        ).replace("\\", "/")
+        cases.append(
+            {
+                "file": file,
+                "name": case.get("name", ""),
+                "status": status,
+                "message": message,
+                "time": float(case.get("time") or 0),
+            }
+        )
     return cases
 
 
 def is_test_code(filename: str) -> bool:
     parts = filename.replace("\\", "/").split("/")
-    return "tests" in parts[:-1] or parts[-1].startswith("test_") or parts[-1] == "conftest.py"
+    return (
+        "tests" in parts[:-1]
+        or parts[-1].startswith("test_")
+        or parts[-1] == "conftest.py"
+    )
 
 
 def read_coverage(path: Path) -> tuple[dict[str, list[int]], list[int]]:
@@ -105,11 +122,17 @@ def coverage_section(coverage: Path) -> list[str]:
         return [f"No coverage report at <code>{literal(str(coverage))}</code>.", ""]
     except (ET.ParseError, OSError) as error:
         return [unreadable("Coverage report", coverage, error), ""]
-    lines = [f"### Coverage: {share(*total)} of lines ({total[1]} of {total[0]}, test code excluded)", "",
-             "| Module | Lines | Covered | Share |", "|---|---:|---:|---:|"]
+    lines = [
+        f"### Coverage: {share(*total)} of lines ({total[1]} of {total[0]}, test code excluded)",
+        "",
+        "| Module | Lines | Covered | Share |",
+        "|---|---:|---:|---:|",
+    ]
     for module in sorted(modules):
         count, covered = modules[module]
-        lines.append(f"| <code>{literal(module)}</code> | {count} | {covered} | {share(count, covered)} |")
+        lines.append(
+            f"| <code>{literal(module)}</code> | {count} | {covered} | {share(count, covered)} |"
+        )
     return lines + [""]
 
 
@@ -119,37 +142,59 @@ def build_report(title: str, junit: Path, coverage: Path | None) -> str:
         cases = read_junit(junit)
         duration = suite_time(junit) or sum(c["time"] for c in cases)
     except FileNotFoundError:
-        return "\n".join(lines + [f"No JUnit report at <code>{literal(str(junit))}</code>: "
-                                  "pytest did not run to the end.", ""])
+        return "\n".join(
+            lines
+            + [
+                f"No JUnit report at <code>{literal(str(junit))}</code>: "
+                "pytest did not run to the end.",
+                "",
+            ]
+        )
     except (ET.ParseError, OSError) as error:
         return "\n".join(lines + [unreadable("JUnit report", junit, error), ""])
     counts: dict[str, int] = defaultdict(int)
     for case in cases:
         counts[case["status"]] += 1
-    lines.append(f"**{len(cases)} tests:** {counts['passed']} passed · {counts['skipped']} skipped · "
-                 f"{counts['failed']} failed · {counts['error']} errors · {duration:.1f} s")
+    lines.append(
+        f"**{len(cases)} tests:** {counts['passed']} passed · {counts['skipped']} skipped · "
+        f"{counts['failed']} failed · {counts['error']} errors · {duration:.1f} s"
+    )
     lines.append("")
 
-    for status, heading in (("failed", "Failed"), ("error", "Errors while running"), ("skipped", "Skipped")):
+    for status, heading in (
+        ("failed", "Failed"),
+        ("error", "Errors while running"),
+        ("skipped", "Skipped"),
+    ):
         selection = [c for c in cases if c["status"] == status]
         if not selection:
             continue
         lines.append(f"### {heading} ({len(selection)})")
         for case in selection:
-            reason = f": {literal(case['message'].splitlines()[0][:200])}" if case["message"] else ""
-            lines.append(f"- <code>{literal(case['file'])}</code> · {literal(as_sentence(case['name']))}{reason}")
+            reason = (
+                f": {literal(case['message'].splitlines()[0][:200])}"
+                if case["message"]
+                else ""
+            )
+            lines.append(
+                f"- <code>{literal(case['file'])}</code> · {literal(as_sentence(case['name']))}{reason}"
+            )
         lines.append("")
 
     per_file: dict[str, list[dict]] = defaultdict(list)
     for case in cases:
         per_file[case["file"]].append(case)
-    lines.append(f"<details><summary>All {len(cases)} tests by file ({len(per_file)} files)</summary>")
+    lines.append(
+        f"<details><summary>All {len(cases)} tests by file ({len(per_file)} files)</summary>"
+    )
     lines.append("")
     for file in sorted(per_file):
         lines.append(f"**{literal(file)}**")
         lines.append("")
         for case in per_file[file]:
-            lines.append(f"- {ICON[case['status']]} {literal(as_sentence(case['name']))}")
+            lines.append(
+                f"- {ICON[case['status']]} {literal(as_sentence(case['name']))}"
+            )
         lines.append("")
     lines.append("</details>")
     lines.append("")
@@ -160,7 +205,9 @@ def build_report(title: str, junit: Path, coverage: Path | None) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Test report for the GitHub job summary")
+    parser = argparse.ArgumentParser(
+        description="Test report for the GitHub job summary"
+    )
     parser.add_argument("--title", required=True)
     parser.add_argument("--junit", required=True, type=Path)
     parser.add_argument("--coverage", type=Path)
@@ -176,7 +223,9 @@ def main(argv: list[str] | None = None) -> int:
         except OSError as error:
             # The report must never fail the job: fall back to the log, with a warning on the run page.
             report = f"::warning::Job summary could not be written ({error}); the report follows in the log.\n{report}"
-    sys.stdout.buffer.write((report + "\n").encode("utf-8"))  # Windows console: not cp1252
+    sys.stdout.buffer.write(
+        (report + "\n").encode("utf-8")
+    )  # Windows console: not cp1252
     return 0
 
 
