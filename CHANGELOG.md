@@ -9,3 +9,4 @@ No SemVer release has been published yet.
 - Pinned all 13 GitHub Actions uses in `.github/workflows/ci.yml` to full commit SHAs with an AST guard (`ci_pinned_actions.py`) and Dependabot config.
 - Added scoped formatting (`ruff format --check` for `.github/scripts` and `projects/cross-model-review`) and `mypy` type checking (`.github/scripts` and `projects/concertify/domain`).
 - Added the release readiness checklist (`docs/release-checklist.md`), this changelog structure, and the baseline validator (`.github/scripts/ci_release_readiness.py`).
+- Added the aggregate check `ci ok` (green only when every CI job succeeded) as the one check to require for `main`, with a lint guard (`ci_aggregate_check.py`) that fails when a job is missing from it. Branch protection itself is not enabled yet (#48).
