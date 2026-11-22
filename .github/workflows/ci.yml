@@ -31,8 +31,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_COMMENTS: 'false'
-      - name: "TEMPORARY negative proof: ci ok must turn red (reverted in the next commit)"
-        run: exit 1
 
   lint:
     name: Lint (ruff)
