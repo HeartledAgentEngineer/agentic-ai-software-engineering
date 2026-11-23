@@ -52,11 +52,13 @@ jobs:
       - name: Type check (mypy · .github/scripts and concertify/domain)
         run: |
           pip install mypy==1.13.0 types-PyYAML==6.0.12.20240917
-          mypy --python-version 3.12 .github/scripts/ci_pinned_actions.py .github/scripts/ci_test_report.py .github/scripts/ci_release_readiness.py projects/concertify/domain
+          mypy --python-version 3.12 .github/scripts/ci_pinned_actions.py .github/scripts/ci_test_report.py .github/scripts/ci_release_readiness.py .github/scripts/ci_aggregate_check.py projects/concertify/domain
       - name: Release readiness baseline
         run: python .github/scripts/ci_release_readiness.py --repo-root .
       - name: Actions are pinned to a commit SHA
         run: python .github/scripts/ci_pinned_actions.py .github/workflows
+      - name: Aggregate check covers every job
+        run: python .github/scripts/ci_aggregate_check.py .github/workflows/ci.yml --job ci-ok
 
   python-tests:
     name: Tests · ${{ matrix.name }}
@@ -221,3 +223,21 @@ jobs:
           NODE_PATH: ${{ runner.temp }}/sonos-demo-browser/node_modules
           SONOS_QA_DIR: ${{ runner.temp }}/sonos-demo-preview
         run: node projects/sonos-music-drop/demo/browser-check.cjs
+
+  ci-ok:
+    # One check for branch protection instead of every matrix entry by name. Green only when every job above
+    # succeeded; `skipped` counts as red, because a failed secret scan skips all other jobs.
+    # The lint step "Aggregate check covers every job" fails when a job is missing from `needs`.
+    name: ci ok
+    needs: [secrets, lint, python-tests, shotreader, c-university, javascript, sonos-demo]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          not_green=$(echo "$NEEDS" | jq '[.[] | select(.result != "success")] | length')
+          [ "$not_green" -eq 0 ]
