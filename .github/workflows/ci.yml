@@ -52,13 +52,15 @@ jobs:
       - name: Type check (mypy · .github/scripts and concertify/domain)
         run: |
           pip install mypy==1.13.0 types-PyYAML==6.0.12.20240917
-          mypy --python-version 3.12 .github/scripts/ci_pinned_actions.py .github/scripts/ci_test_report.py .github/scripts/ci_release_readiness.py .github/scripts/ci_aggregate_check.py projects/concertify/domain
+          mypy --python-version 3.12 .github/scripts/ci_pinned_actions.py .github/scripts/ci_test_report.py .github/scripts/ci_release_readiness.py .github/scripts/ci_aggregate_check.py .github/scripts/ci_dependabot_coverage.py projects/concertify/domain
       - name: Release readiness baseline
         run: python .github/scripts/ci_release_readiness.py --repo-root .
       - name: Actions are pinned to a commit SHA
         run: python .github/scripts/ci_pinned_actions.py .github/workflows
       - name: Aggregate check covers every job
         run: python .github/scripts/ci_aggregate_check.py .github/workflows/ci.yml --job ci-ok
+      - name: Dependabot watches every manifest
+        run: python .github/scripts/ci_dependabot_coverage.py
 
   python-tests:
     name: Tests · ${{ matrix.name }}

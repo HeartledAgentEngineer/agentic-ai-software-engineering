@@ -61,6 +61,8 @@ The last job, `ci ok`, waits for every other job and is green only when all of t
 as red, because a failed secret scan skips everything after it. It lists each job's result in its log. Branch
 protection needs one stable check name, and the matrix reports one check per suite, so `ci ok` is the check to require
 for `main`. A lint step (`.github/scripts/ci_aggregate_check.py`) fails when a new job is not in its `needs`.
+Another lint step (`.github/scripts/ci_dependabot_coverage.py`) fails when a directory with a pip or npm manifest is
+not in `.github/dependabot.yml`, or when the config lists a directory without one.
 Branch protection itself is not switched on yet
 ([#48](https://github.com/HeartledAgentEngineer/agentic-ai-software-engineering/issues/48)).
 
@@ -76,5 +78,6 @@ Branch protection itself is not switched on yet
   and are not format-checked in CI yet.
 - Static type checking (`mypy` 1.13.0) currently covers only `.github/scripts/ci_pinned_actions.py`,
   `.github/scripts/ci_test_report.py`, `.github/scripts/ci_release_readiness.py`,
-  `.github/scripts/ci_aggregate_check.py`, and `projects/concertify/domain` (updated on 2026-11-22); all other modules
+  `.github/scripts/ci_aggregate_check.py`, `.github/scripts/ci_dependabot_coverage.py`, and `projects/concertify/domain`
+  (updated on 2026-11-23); all other modules
   and test files are not type-checked in CI yet.
