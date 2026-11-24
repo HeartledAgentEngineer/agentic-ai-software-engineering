@@ -14,7 +14,6 @@ updates:
       - /projects/rag-knowledge-base
       - /tools/readfree
       - /tools/foundry-demos
-      - /tools/foundry-demos/shared_core
     schedule:
       interval: monthly
   - package-ecosystem: npm

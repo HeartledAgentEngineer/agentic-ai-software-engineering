@@ -63,7 +63,9 @@ as red, because a failed secret scan skips everything after it. It lists each jo
 protection needs one stable check name, and the matrix reports one check per suite, so `ci ok` is the check to require
 for `main`. A lint step (`.github/scripts/ci_aggregate_check.py`) fails when a new job is not in its `needs`.
 Another lint step (`.github/scripts/ci_dependabot_coverage.py`) fails when a directory with a pip or npm manifest is
-not in `.github/dependabot.yml`, or when the config lists a directory without one.
+not in `.github/dependabot.yml`, or when the config lists a directory without one. Like Dependabot, it counts a
+folder that holds only requirement files as covered by its listed parent one level up, and it rejects listing both,
+because Dependabot would then open every update twice.
 Branch protection itself is not switched on yet
 ([#48](https://github.com/HeartledAgentEngineer/agentic-ai-software-engineering/issues/48)).
 
