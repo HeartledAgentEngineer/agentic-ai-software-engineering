@@ -161,3 +161,75 @@ def test_repository_config_passes(capsys):
     )
     out = capsys.readouterr().out
     assert code == 0, out
+
+
+# Dependabot pip also reads requirement files one folder below a listed directory (dependabot-core,
+# python/lib/dependabot/python/shared_file_fetcher.rb, req_files_for_dir). Other pip manifests are not read there.
+PARENT_ONLY = COMPLETE.replace("      - /tools/cli\n", "")
+
+
+def test_requirements_one_folder_down_are_covered_by_the_parent(tmp_path, capsys):
+    files = [
+        "app/requirements.txt",
+        "app/shared/requirements_azure.txt",
+        "web/package.json",
+    ]
+    code, out = run(repo(tmp_path, files, PARENT_ONLY), capsys)
+    assert code == 0, out
+    assert "(pip: 2, npm: 1)" in out
+
+
+def test_listing_parent_and_requirements_child_fails_as_duplicate(tmp_path, capsys):
+    config = COMPLETE.replace("      - /tools/cli\n", "      - /app/shared\n")
+    files = [
+        "app/requirements.txt",
+        "app/shared/requirements_azure.txt",
+        "web/package.json",
+    ]
+    code, out = run(repo(tmp_path, files, config), capsys)
+    assert code == 1
+    assert (
+        "pip: /app/shared is already covered by /app (Dependabot pip reads requirement files one folder down); "
+        "listing both opens duplicate pull requests"
+    ) in out
+
+
+def test_pyproject_one_folder_down_is_not_covered_by_the_parent(tmp_path, capsys):
+    files = ["app/requirements.txt", "app/lib/pyproject.toml", "web/package.json"]
+    code, out = run(repo(tmp_path, files, PARENT_ONLY), capsys)
+    assert code == 1
+    assert "pip: /app/lib has a manifest but is not in dependabot.yml" in out
+
+
+def test_requirements_two_folders_down_are_not_covered(tmp_path, capsys):
+    files = [
+        "app/requirements.txt",
+        "app/sub/deep/requirements.txt",
+        "web/package.json",
+    ]
+    code, out = run(repo(tmp_path, files, PARENT_ONLY), capsys)
+    assert code == 1
+    assert "pip: /app/sub/deep has a manifest but is not in dependabot.yml" in out
+
+
+def test_root_covers_requirements_in_top_level_folders(tmp_path, capsys):
+    config = PARENT_ONLY.replace("      - /app\n", "      - /\n")
+    files = ["requirements.txt", "tools/requirements-dev.txt", "web/package.json"]
+    code, out = run(repo(tmp_path, files, config), capsys)
+    assert code == 0, out
+
+
+def test_mixed_folder_below_a_listed_parent_must_be_listed_itself(tmp_path, capsys):
+    files = [
+        "app/requirements.txt",
+        "app/lib/pyproject.toml",
+        "app/lib/requirements.txt",
+        "web/package.json",
+    ]
+    listed = COMPLETE.replace("      - /tools/cli\n", "      - /app/lib\n")
+    code, out = run(repo(tmp_path, files, listed), capsys)
+    assert code == 0, out
+
+    code, out = run(repo(tmp_path, files, PARENT_ONLY), capsys)
+    assert code == 1
+    assert "pip: /app/lib has a manifest but is not in dependabot.yml" in out
