@@ -33,4 +33,4 @@ The public repository CI configures an OrbitDesk Windows test job. It installs t
 
 For the distinction between the personal desktop application, current checks, and an enterprise design proposal, see the [enterprise rollout guide](../../docs/enterprise-rollout.md).
 
-The package metadata currently identifies version 0.5.1 and package name `master-schalter`; the Python modules and command names retain that name.
+The package metadata ([`pyproject.toml`](pyproject.toml)) currently identifies version 0.5.1 and package name `master-schalter`; the Python modules and command names retain that name.

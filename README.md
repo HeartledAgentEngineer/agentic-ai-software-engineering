@@ -24,6 +24,7 @@ here**.
 | [How I work](HOW-I-WORK.md) | The working method: verification gate, planner / reviewer / worker roles across harnesses, cross-model review, state in files |
 | [Delivery and checks](docs/enterprise-rollout.md#ci-releases-and-portfolio-promotion) | What runs automatically (CI), what stays a controlled step (merge, release), and what is still missing |
 | [Projects](#projects) | The projects that came out of it, from a PLC digital twin to a multi-agent control room (*Leitwarte*) |
+
 Quick links: [Projects](#projects) · [Private Tools](tools/README.md) · [Sonos simulation](projects/sonos-music-drop/README.md)
 
 ---
@@ -126,11 +127,12 @@ Each pytest job also writes a job summary (every test with its result, skipped t
 | typeFREE | 659 pytest tests (658 passed, 1 skipped on CI) | yes (Windows) | hotkeys and audio are mocked; real devices are tested by hand |
 | readFREE | 88 pytest tests | yes (Windows) | clipboard, hotkey API, player and speech client are fakes; a manual smoke test covers real windows and audio, the real key press and voice are tested by hand |
 | ShotReader | PowerShell self-test (`-Test`): speed rules, clipboard-format rule, image fingerprint, decision rules, 30-image memory, local OCR and speech | yes (Windows) | the OpenRouter speech call and the window are checked by hand |
+| Foundry demos (Azure speech servers) | 87 pytest tests; every network call except loopback is blocked | yes (Linux) | Azure, Entra and LLM calls are stand-ins; real credentials, provisioning and live provider behaviour are not verified |
 | Concertify | 193 pytest tests (+ 2 skipped) | yes (Linux) | external APIs are stubbed; `app.py` still holds 66 of 76 routes and 6 `global` statements |
 | Personal AI agent | 57 pytest tests | yes (Linux) | this is an excerpt; the full private suite is larger and not published |
 | Cross-model review | 99 pytest tests | yes (Linux) | CLI agents are replaced by stand-ins; real review runs are logged in protocols |
 | RAG knowledge base | 13 pytest tests (chunking + query path with fakes) | yes (Linux) | ingestion (`ingest.py`) and the real database are not tested; `test_embeddings.py` is a manual check against the live API |
-| Document automation | 11 node:test tests (CV data model, HTML rendering, PDF merge error paths) | yes (Linux) | the browser PDF print step (Puppeteer) is checked by hand; `npm audit` reports 0 advisories (Puppeteer 25) |
+| Document automation | 11 node:test tests (CV data model, HTML rendering, PDF merge error paths) | yes (Linux) | the browser PDF print step (Puppeteer) is checked by hand; `npm audit` reported 0 vulnerabilities on 2026-11-23 (Puppeteer 25; a manual check, not a CI step) |
 | University foundations (C, 2020) | 12 checks in C against the unchanged 2020 code | yes (Windows, clang) | two of the checks pin known bugs on purpose; see the review |
 | Elevator digital twin | — | JS syntax only (ADS bridge) | PLC logic needs the TwinCAT runtime and is checked by hand there, not in CI |
 | Squirrel game | — | no | single HTML file with inline script, not covered by the JS check |

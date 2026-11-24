@@ -3,10 +3,10 @@
     sync-portfolio.ps1 - Synchronisation zwischen privatem Playground und Schaufenster-Portfolio.
 
 .DESCRIPTION
-    Automatisierter Übergabe-Workflow:
-    1. Whitelist-Übertrag der freigegebenen Projekte, Agenten-Tools und Dokumentation.
-    2. Privacy- & Leak-Scan (keine privaten Pfade, Mailadressen oder Tokens).
-    3. Verifikations-Gate (Prüfung von Linter und Test-Suiten im Zielrepo).
+    Prüfhilfe vor dem Veröffentlichen (kopiert nichts; Befunde werden gemeldet, nicht erzwungen):
+    1. Whitelist-Prüfung: sind die freigegebenen Projekte, Agenten-Tools und Dokumente in der Quelle vorhanden?
+    2. Privacy- & Leak-Scan im Zielrepo (private Pfade, Mailadressen, Tokens); Treffer werden gezählt und gemeldet.
+    3. Testlauf im Zielrepo (concertify, personal-ai-agent/backend); eine rote Suite ergibt eine Warnung.
     4. Zusammenfassung für das atomare Git-Commit.
 
 .PARAMETER SourceDir

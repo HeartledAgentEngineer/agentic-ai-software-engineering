@@ -6,7 +6,7 @@ They are written for Claude Code and kept tool-agnostic where possible. The text
 | Part | What it does | When it is used |
 |---|---|---|
 | [`AGENTS.md`](AGENTS.md) | the tool-agnostic master instruction file defining core rules: verification gates, code+docs, cross-model cascade, multi-agent collision protection, and privacy boundaries | read by every agent harness (Claude Code, Codex, Antigravity, Hermes) at session start |
-| [`sync-portfolio.ps1`](sync-portfolio.ps1) | staged export & sync pipeline: moves whitelisted components from private playground to the showcase repo, runs privacy scan and triggers verification | whenever verified changes from the playground workspace are published to the showcase repository |
+| [`sync-portfolio.ps1`](sync-portfolio.ps1) | pre-publication check: confirms the whitelisted components exist in the private playground, scans the showcase for private paths, e-mail addresses and tokens, and runs two test suites; it reports findings but does not stop on them, and it copies nothing | whenever verified changes from the playground workspace are published to the showcase repository |
 | [`skills/fehlersuche`](skills/fehlersuche/SKILL.md) | root-cause debugging: find the cause before proposing a fix | every error, failed test or unexpected behaviour, especially when the fix looks obvious |
 | [`skills/grill-me`](skills/grill-me/SKILL.md) | the agent asks me questions until the goal is unambiguous, with a question catalogue and an alignment template | before planning, at design forks, when a wish could mean several things |
 | [`skills/critic`](skills/critic/SKILL.md) | independent second opinion from a model of another family; `pruefe.mjs` runs it, `review.py` and `protokoll-schema.json` keep the verdict machine-readable | before a slice is committed, for security-related or concurrent code |
@@ -17,7 +17,8 @@ They are written for Claude Code and kept tool-agnostic where possible. The text
 
 ## Staging & Synchronization Workflow
 
-The transition from the private playground workspace to the public showcase repository follows a strictly verified staging pipeline:
+Copying from the private playground to the public showcase repository is a manual, reviewed step. `sync-portfolio.ps1`
+supports it with checks that **report** problems; the gates that **stop** a change are the pre-commit hook and CI:
 
 ```mermaid
 flowchart TD
@@ -28,14 +29,14 @@ flowchart TD
     end
 
     subgraph SyncGate["Staging Gate (agent-setup/sync-portfolio.ps1)"]
-        WhitelistFilter["1. Whitelist Filter<br/>Only curated projects, docs & configs"]
-        PrivacyScan["2. Privacy & Leak Scan<br/>Regex search: paths, emails, secrets (0 findings required)"]
-        TargetVerify["3. Target Verification<br/>Run test suites within staged environment"]
+        WhitelistFilter["1. Whitelist check<br/>Curated projects, docs & configs exist in the playground (nothing is copied)"]
+        PrivacyScan["2. Privacy & leak scan<br/>Regex search: paths, emails, secrets (findings are reported)"]
+        TargetVerify["3. Test run<br/>concertify and personal-ai-agent backend (a red suite is reported)"]
         WhitelistFilter --> PrivacyScan --> TargetVerify
     end
 
     subgraph Public["Showcase Repository (GitHub)"]
-        StagedClean["Staged Files Clean & Verified"]
+        StagedClean["Manual copy & review"]
         PreCommit["Local Pre-Commit Hook<br/>Project check must exit 0"]
         GitPush["Push to origin/main"]
         CloudCI["GitHub Actions Matrix CI<br/>Gitleaks + Ruff + Pytest (Win/Linux)"]
@@ -43,8 +44,19 @@ flowchart TD
     end
 
     LocalTests -->|"Run sync-portfolio.ps1"| WhitelistFilter
-    TargetVerify -->|"Green Exit Code 0"| StagedClean
+    TargetVerify -->|"Report read by a human"| StagedClean
 ```
+
+## Check
+
+No automated test covers this folder; CI does not run anything from it. Before using the hook, a syntax check:
+
+```bash
+bash -n agent-setup/githooks/pre-commit   # exit 0 = the hook parses
+```
+
+Turning the report of `sync-portfolio.ps1` into a real gate (exit code 1 on a privacy finding or a red suite) is an
+open item in [#51](https://github.com/HeartledAgentEngineer/agentic-ai-software-engineering/issues/51).
 
 ## Why these exist
 

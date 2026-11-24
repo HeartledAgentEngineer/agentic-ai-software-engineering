@@ -50,4 +50,16 @@ This directory contains the browser client of the Personal AI Agent. It is built
   - **Combinable Filter Chips (AND logic)**: `🔧 Werkzeuge` (tool-use support), `🖼️ Bilder` (vision), `🧠 Reasoning`, `🇪🇺 EU`, `🔒 Kein Training` (zero data retention / no prompt training), `⚡ Schnell`, `💰 Günstig`.
   - **Per-Provider Privacy Inspection**: Tapping a model queries `GET /api/models/{id}/details` to display exact input/output/cache costs, context window length, German capability notes, and provider data-retention policies.
 
+## Run and check
+
+There is no separate build step. The backend serves this folder at `/` (`backend/app/main.py`, `StaticFiles`):
+
+```powershell
+cd ../backend
+uvicorn app.main:app --port 8080   # then open http://127.0.0.1:8080/
+```
+
+Configuration of the backend is described in the [backend README](../backend/README.md). The CI job
+"JavaScript syntax" runs `node --check` on `app.js` and `sw.js`; there are no automated UI tests.
+
 ← [Back to Personal AI Agent overview](../README.md)
