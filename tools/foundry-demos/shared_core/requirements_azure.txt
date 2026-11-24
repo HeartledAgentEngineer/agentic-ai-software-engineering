@@ -11,7 +11,7 @@ pillow>=10.4
 
 # Server (FastAPI) und Clients (Mikrofon/Hotkey)
 fastapi>=0.115
-uvicorn>=0.30
+uvicorn>=0.54.0
 python-multipart>=0.0.9
 sounddevice>=0.4.6
 keyboard>=0.13.5
