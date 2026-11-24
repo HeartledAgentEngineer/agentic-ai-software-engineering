@@ -195,6 +195,9 @@ jobs:
       - name: Lockfile in sync · document-automation (no install scripts)
         working-directory: projects/document-automation
         run: npm ci --ignore-scripts
+      - name: ESLint · document-automation
+        working-directory: projects/document-automation
+        run: npm run lint
       - name: Tests · document-automation (node:test)
         working-directory: projects/document-automation
         run: node --test

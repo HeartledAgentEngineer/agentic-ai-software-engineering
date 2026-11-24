@@ -6,6 +6,7 @@ No SemVer release has been published yet.
 
 ## [Unreleased]
 
+- Added ESLint to `projects/document-automation` (same flat config and pinned versions as the workshop copy): `npm run lint` and `npm run check`, and an ESLint step in the CI job before the tests (#49).
 - Pinned all 13 GitHub Actions uses in `.github/workflows/ci.yml` to full commit SHAs with an AST guard (`ci_pinned_actions.py`) and Dependabot config.
 - Added scoped formatting (`ruff format --check` for `.github/scripts` and `projects/cross-model-review`) and `mypy` type checking (`.github/scripts` and `projects/concertify/domain`).
 - Added the release readiness checklist (`docs/release-checklist.md`), this changelog structure, and the baseline validator (`.github/scripts/ci_release_readiness.py`).
