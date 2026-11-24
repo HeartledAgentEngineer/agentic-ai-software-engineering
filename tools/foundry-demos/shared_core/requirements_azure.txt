@@ -7,7 +7,7 @@ msal>=1.31
 openai>=1.60
 httpx>=0.27
 python-dotenv>=1.0
-pillow>=10.4
+pillow>=13.0.0
 
 # Server (FastAPI) und Clients (Mikrofon/Hotkey)
 fastapi>=0.115
