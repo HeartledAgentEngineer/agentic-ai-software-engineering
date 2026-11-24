@@ -20,7 +20,7 @@
   "license": "MIT",
   "dependencies": {
     "pdf-lib": "^1.17.1",
-    "puppeteer": "^25.16.0"
+    "puppeteer": "^25.18.1"
   },
   "engines": {
     "node": ">=22.12"
