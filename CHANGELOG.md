@@ -6,6 +6,7 @@ No SemVer release has been published yet.
 
 ## [Unreleased]
 
+- Added a coverage floor per pytest suite (`ci_coverage_floor.py`, step `Coverage floor`): the job fails when line coverage, computed like the job summary with test code excluded, drops below the suite's `coverage_floor` in `ci.yml` (today's value rounded down minus one point, raised by hand) (#49).
 - Added ESLint to `projects/document-automation` (same flat config and pinned versions as the workshop copy): `npm run lint` and `npm run check`, and an ESLint step in the CI job before the tests (#49).
 - Pinned all 13 GitHub Actions uses in `.github/workflows/ci.yml` to full commit SHAs with an AST guard (`ci_pinned_actions.py`) and Dependabot config.
 - Added scoped formatting (`ruff format --check` for `.github/scripts` and `projects/cross-model-review`) and `mypy` type checking (`.github/scripts` and `projects/concertify/domain`).

@@ -34,21 +34,30 @@ Since 2026-11-19 every pytest suite also writes a JUnit report and a coverage re
 `Tests · <suite>` job lists the totals, every failed, erroring or skipped test with its reason, all tests grouped by
 file, and line coverage per module (test code excluded). Both reports stay attached to the run for 14 days as the
 artifact `test-reports-<suite>`. The summary comes from [`.github/scripts/ci_test_report.py`](../.github/scripts/ci_test_report.py);
-its 10 tests run in the lint job, and the step cannot fail the job. There is no coverage threshold: the numbers are reported, not enforced.
+its 10 tests run in the lint job, and the step cannot fail the job.
+
+Since 2026-11-24 each suite also has a **coverage floor**. The step `Coverage floor` runs
+[`.github/scripts/ci_coverage_floor.py`](../.github/scripts/ci_coverage_floor.py): it computes the share with the same
+function as the summary (test code excluded) and fails the job when the share drops below the `coverage_floor`
+recorded for the suite in `ci.yml`, or when the report is missing. pytest-cov's own `--cov-fail-under` is not used
+because it counts the test files too. Each floor is the exact share from the line counts in the table below, rounded
+down to a whole percent, minus one point against measurement noise. The table rounds to the nearest percent, so for
+concertify it shows 21 %, while 1,167 of 5,611 lines is 20.80 %, which gives a floor of 19 %. Floors are raised by hand
+when coverage grows; nothing raises them automatically. The script's 15 tests run in the lint job.
 
 **Recorded run:** [GitHub Actions run 44498434719](https://github.com/HeartledAgentEngineer/agentic-ai-software-engineering/actions/runs/44498434719)
 on 2026-11-19 for pull request #42, commit `16ecfee`, all jobs green.
 
-| Suite | Tests | Line coverage (test code excluded) |
-|---|---|---|
-| orbitdesk | 2,044 (2,043 passed, 1 skipped) | 89 % (9,191 of 10,319 lines) |
-| typefree | 659 (658 passed, 1 skipped) | 82 % (2,039 of 2,480) |
-| cross-model-review | 99 passed | 92 % (357 of 388) |
-| foundry-demos | 87 passed | 61 % (622 of 1,019) |
-| readfree | 88 passed | 53 % (579 of 1,091) |
-| concertify | 195 (193 passed, 2 skipped) | 21 % (1,167 of 5,611) |
-| personal-ai-agent | 57 passed | 22 % (1,107 of 5,086) |
-| rag-knowledge-base | 13 passed | 17 % (112 of 676) |
+| Suite | Tests | Line coverage (test code excluded) | Floor |
+|---|---|---|---|
+| orbitdesk | 2,044 (2,043 passed, 1 skipped) | 89 % (9,191 of 10,319 lines) | 88 % |
+| typefree | 659 (658 passed, 1 skipped) | 82 % (2,039 of 2,480) | 81 % |
+| cross-model-review | 99 passed | 92 % (357 of 388) | 91 % |
+| foundry-demos | 87 passed | 61 % (622 of 1,019) | 60 % |
+| readfree | 88 passed | 53 % (579 of 1,091) | 52 % |
+| concertify | 195 (193 passed, 2 skipped) | 21 % (1,167 of 5,611) | 19 % |
+| personal-ai-agent | 57 passed | 22 % (1,107 of 5,086) | 20 % |
+| rag-knowledge-base | 13 passed | 17 % (112 of 676) | 15 % |
 
 Where coverage is low, the "Known gap" column in the [README](../README.md#quality-at-a-glance) says what is not
 tested. Adding coverage did not change which tests run: the same pull request first ran with the JUnit report only
@@ -81,6 +90,6 @@ Branch protection itself is not switched on yet
   and are not format-checked in CI yet.
 - Static type checking (`mypy` 1.13.0) currently covers only `.github/scripts/ci_pinned_actions.py`,
   `.github/scripts/ci_test_report.py`, `.github/scripts/ci_release_readiness.py`,
-  `.github/scripts/ci_aggregate_check.py`, `.github/scripts/ci_dependabot_coverage.py`, and `projects/concertify/domain`
-  (updated on 2026-11-23); all other modules
+  `.github/scripts/ci_aggregate_check.py`, `.github/scripts/ci_dependabot_coverage.py`,
+  `.github/scripts/ci_coverage_floor.py`, and `projects/concertify/domain` (updated on 2026-11-24); all other modules
   and test files are not type-checked in CI yet.

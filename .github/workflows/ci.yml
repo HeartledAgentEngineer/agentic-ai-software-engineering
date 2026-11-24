@@ -52,7 +52,7 @@ jobs:
       - name: Type check (mypy · .github/scripts and concertify/domain)
         run: |
           pip install mypy==1.13.0 types-PyYAML==6.0.12.20240917
-          mypy --python-version 3.12 .github/scripts/ci_pinned_actions.py .github/scripts/ci_test_report.py .github/scripts/ci_release_readiness.py .github/scripts/ci_aggregate_check.py .github/scripts/ci_dependabot_coverage.py projects/concertify/domain
+          mypy --python-version 3.12 .github/scripts/ci_pinned_actions.py .github/scripts/ci_test_report.py .github/scripts/ci_release_readiness.py .github/scripts/ci_aggregate_check.py .github/scripts/ci_dependabot_coverage.py .github/scripts/ci_coverage_floor.py projects/concertify/domain
       - name: Release readiness baseline
         run: python .github/scripts/ci_release_readiness.py --repo-root .
       - name: Actions are pinned to a commit SHA
@@ -75,41 +75,49 @@ jobs:
             dir: projects/orbitdesk
             install: pip install -e ".[leiste,dev]"
             test: python -m pytest -q
+            coverage_floor: 88
           - name: typefree
             os: windows-latest
             dir: tools/typefree
             install: pip install -r windows/requirements.txt -r windows/requirements-dev.txt
             test: python -m pytest -q windows/tests
+            coverage_floor: 81
           - name: readfree
             os: windows-latest
             dir: tools/readfree
             install: pip install -r requirements.txt pytest
             test: python -m pytest -q tests
+            coverage_floor: 52
           - name: foundry-demos
             os: ubuntu-latest
             dir: tools/foundry-demos
             install: pip install -r requirements-dev.txt -r shared_core/requirements_azure.txt
             test: python -m pytest -q --disable-socket --allow-unix-socket --allow-hosts=localhost,127.0.0.1,::1 tests
+            coverage_floor: 60
           - name: concertify
             os: ubuntu-latest
             dir: projects/concertify
             install: pip install -r requirements.txt pytest
             test: python -m pytest -q tests
+            coverage_floor: 19
           - name: cross-model-review
             os: ubuntu-latest
             dir: projects/cross-model-review
             install: pip install pytest
             test: python -m pytest -q tests
+            coverage_floor: 91
           - name: rag-knowledge-base
             os: ubuntu-latest
             dir: projects/rag-knowledge-base
             install: pip install pytest -r requirements.txt
             test: python -m pytest -q tests
+            coverage_floor: 15
           - name: personal-ai-agent
             os: ubuntu-latest
             dir: projects/personal-ai-agent/backend
             install: pip install -r requirements.txt -r requirements-dev.txt
             test: python -m pytest -q tests
+            coverage_floor: 20
     defaults:
       run:
         working-directory: ${{ matrix.dir }}
@@ -142,6 +150,16 @@ jobs:
         run: >-
           python "$GITHUB_WORKSPACE/.github/scripts/ci_test_report.py" --title "$SUITE"
           --junit "$RUNNER_TEMP/reports/junit.xml" --coverage "$RUNNER_TEMP/reports/coverage.xml"
+      # Coverage floor per suite, computed like the job summary (test code excluded). The floor is today's value
+      # rounded down minus one point and is raised by hand; a suite without coverage_floor fails here on purpose.
+      - name: Coverage floor
+        shell: bash
+        env:
+          SUITE: ${{ matrix.name }}
+          FLOOR: ${{ matrix.coverage_floor }}
+        run: >-
+          python "$GITHUB_WORKSPACE/.github/scripts/ci_coverage_floor.py" --suite "$SUITE" --floor "$FLOOR"
+          --coverage "$RUNNER_TEMP/reports/coverage.xml"
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
