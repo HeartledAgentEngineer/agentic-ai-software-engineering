@@ -119,7 +119,7 @@ flowchart TB
 
 Every push to `main`, pull request, and manual workflow dispatch runs [CI](.github/workflows/ci.yml): a full-history secret scan (Gitleaks), a lint gate (ruff bug-class rules: syntax errors, undefined names; `ruff format --check` on `.github/scripts` and `projects/cross-model-review`; `mypy` type checking on `.github/scripts/ci_pinned_actions.py`, `.github/scripts/ci_test_report.py`, `.github/scripts/ci_release_readiness.py`, `.github/scripts/ci_aggregate_check.py`, `.github/scripts/ci_dependabot_coverage.py`, `.github/scripts/ci_coverage_floor.py`, and `projects/concertify/domain`, while the other Python modules are not format- or type-checked yet; plus the [`ci_release_readiness.py`](.github/scripts/ci_release_readiness.py) baseline check), the test suites below, a syntax check of every JavaScript file, ESLint and the Node test runner for document automation, and the C characterization tests.
 
-Each pytest job also writes a job summary (every test with its result, skipped tests with their reason, line coverage per module) keeps the JUnit and coverage reports for 14 days, and fails when line coverage drops below the floor recorded for the suite; [how to read a run](docs/verification.md#test-report-and-coverage-per-suite).
+Each pytest job also writes a job summary (every test with its result, skipped tests with their reason, line coverage per module), keeps the JUnit and coverage reports for 14 days, and fails when line coverage drops below the floor recorded for the suite; [how to read a run](docs/verification.md#test-report-and-coverage-per-suite).
 
 | Project | Automated tests | Runs in CI | Known gap |
 |---|---|---|---|
