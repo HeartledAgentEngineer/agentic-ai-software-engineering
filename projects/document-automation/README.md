@@ -39,6 +39,8 @@ npm run build:html       # HTML only, no browser needed
 npm install              # once, for the PDF step
 npm run build            # HTML + A4 PDF into output/
 npm run merge            # needs the certificate PDFs, see merge_pdfs.js
+npm run lint             # ESLint (after npm ci or npm install)
+npm run check            # lint + tests, as in CI
 ```
 
 Runtime dependencies are Puppeteer (PDF) and pdf-lib (merge). The unused `docx` package was removed on 2026-11-19;
@@ -49,5 +51,8 @@ nothing in this folder builds Word files.
 `test/cv.test.js` (Node's built-in test runner) covers the sample data, every validation rule, HTML escaping, date
 formatting, the exit codes of `build.js`, and the error paths of `merge_pdfs.js`. The PDF itself is checked by eye — a visual test would need a browser
 in CI and buys little for a one-page layout.
+
+ESLint (`eslint.config.mjs`, the `recommended` rules for Node and CommonJS) checks the code and the tests, not
+`data/` or `output/`. CI runs it before the tests.
 
 ← [Back to overview](../../README.md)
