@@ -40,7 +40,7 @@ Concertify started in April 2026 as a fast-moving prototype and is being migrate
 ```powershell
 pip install -r requirements.txt
 # create .env with SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_REDIRECT_URI,
-# TICKETMASTER_API_KEY, TAVILY_API_KEY, GEMINI_API_KEY, CONCERT_CITIES, ACTIVE_FESTIVALS
+# TICKETMASTER_API_KEY, SETLISTFM_API_KEY, TAVILY_API_KEY, GEMINI_API_KEY, CONCERT_CITIES, ACTIVE_FESTIVALS
 python app.py      # http://127.0.0.1:5000
 pytest tests/      # 193 passed, 2 skipped; also run in CI
 ```

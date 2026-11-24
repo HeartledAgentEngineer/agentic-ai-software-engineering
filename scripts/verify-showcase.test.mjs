@@ -9,9 +9,9 @@ import test from 'node:test';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const validator = path.join(repoRoot, 'scripts', 'verify-showcase.mjs');
 
-// The fixture holds the Sonos project and the demo recorder its README links to.
+// The fixture holds the Sonos project and everything its README links to: the demo recorder and the overview README.
 function copyShowcase(fixtureRoot) {
-  for (const part of [['projects', 'sonos-music-drop'], ['scripts', 'demos']]) {
+  for (const part of [['projects', 'sonos-music-drop'], ['scripts', 'demos'], ['README.md']]) {
     fs.cpSync(path.join(repoRoot, ...part), path.join(fixtureRoot, ...part), { recursive: true });
   }
 }

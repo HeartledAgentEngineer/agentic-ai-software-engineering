@@ -25,7 +25,8 @@ on 2026-11-17 for pull request #32, commit `87e0aa7` (tested as merge commit `59
 | Sonos simulation · tests, validator and browser QA | Windows | `node --test projects/sonos-music-drop/demo/ducker.test.js` · `node scripts/verify-showcase.mjs` · `node --test scripts/verify-showcase.test.mjs` · `node projects/sonos-music-drop/demo/browser-check.cjs` (needs Playwright and Edge) | `# pass 9` · `Showcase validation passed: … and 3 demo file(s) within 5 MB and linked from their README.` · `# pass 2` · `Browser QA passed at 390px and 1280px; guard probes blocked: 1; unexpected external requests: 0; page errors: 0; …` |
 
 In total: 3,151 Python tests passed across seven suites (4 skipped), plus 22 Node tests, the C characterization checks
-and the PowerShell self-test.
+and the PowerShell self-test. The `Tests · foundry-demos` job did not exist yet in this run; it is part of the next
+recorded run below.
 
 ## Test report and coverage per suite
 
@@ -52,7 +53,7 @@ on 2026-11-19 for pull request #42, commit `16ecfee`, all jobs green.
 Where coverage is low, the "Known gap" column in the [README](../README.md#quality-at-a-glance) says what is not
 tested. Adding coverage did not change which tests run: the same pull request first ran with the JUnit report only
 (commit `aa8c5b5`, [run 44496003931](https://github.com/HeartledAgentEngineer/agentic-ai-software-engineering/actions/runs/44496003931)),
-and the two runs were compared test by test. All 3,242 tests matched with the same result in both runs (none added,
+and the two runs were compared test by test. All 3,242 tests (the 3,155 tests of the seven suites above plus the 87 foundry-demos tests) matched with the same result in both runs (none added,
 missing or changed), and the pytest summary lines of the first run matched the last run on `main`.
 
 ## Merge gate

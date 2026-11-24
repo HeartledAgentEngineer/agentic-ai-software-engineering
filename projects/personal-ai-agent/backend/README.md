@@ -31,7 +31,7 @@ backend/
 │   │   └── selbsttest.py           # /api/selbsttest cable-free mobile diagnostics (never returns HTTP 500)
 │   └── services/
 │       ├── werkzeug_schleife.py    # Multi-round streaming tool loop harness & <｜DSML｜> filter
-│       ├── werkzeuge.py            # 13 registered agent tools, OpenAI schema generator & invariant check
+│       ├── werkzeuge.py            # 15 registered agent tools, OpenAI schema generator & invariant check
 │       ├── faehigkeiten.py         # Deterministic capability manifest & Hermes boundary detector
 │       ├── chat_routing.py         # Workstation delegation (Track A: PC gateway, Track B: Queue; retired Track C prototype)
 │       ├── modell_router.py        # Task-category classifier & cost-optimal OpenRouter model selector
@@ -97,7 +97,7 @@ backend/
     - Filters leaked DeepSeek `<｜DSML｜>` / `<|DSML|` markup via `_DsmlFilter`. If DSML appears before any visible text was emitted, raises `DsmlAlsText` so the caller can cleanly fall back to a non-tool call.
     - Executes up to `MAX_AUFRUFE_JE_RUNDE = 4` tools per round, yields concrete `{"status": ...}` and `{"werkzeug": ...}` telemetry events, attaches up to `MAX_BILDER_JE_RUNDE = 3` loaded images as multimodal user content for the next round, and forces a final response on round `MAX_RUNDEN = 5` with `tool_choice="none"`.
 - **[`app/services/werkzeuge.py`](app/services/werkzeuge.py)**
-  - **`REGISTER`**: Defines all 13 tools available to the model:
+  - **`REGISTER`**: Defines all 15 tools available to the model:
     | Tool Name | Mode | Purpose |
     |---|---|---|
     | `dateien_suchen` | Read | Searches phone files (camera photos, screenshots, PDFs, docs) by filename, year, date, or category |

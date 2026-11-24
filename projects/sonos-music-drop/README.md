@@ -36,3 +36,5 @@ NODE_PATH="$TMP/demo-deps/node_modules" node scripts/demos/record-browser-demos.
 The script asserts every state before it keeps a frame (40 % → 70 %, speaking level 15 %, restored 70 %) and blocks
 all network requests. Two runs usually produce the same bytes; when they do not, only a few anti-aliased pixels of
 the native slider differ by one colour step.
+
+[Back to overview](../../README.md)
