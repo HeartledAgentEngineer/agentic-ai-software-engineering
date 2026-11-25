@@ -34,6 +34,8 @@ def melde(name: str, ok: bool) -> None:
     print(('OK    ' if ok else 'FEHLER'), name, flush=True)
 
 
+# The PasswordBox value 'erfunden' ("invented") is a non-secret UI fixture: the smoke test only checks that
+# readFREE recognises password fields; it is no credential.
 FENSTER_SKRIPT = r"""
 Add-Type -AssemblyName PresentationFramework
 $w = New-Object System.Windows.Window
