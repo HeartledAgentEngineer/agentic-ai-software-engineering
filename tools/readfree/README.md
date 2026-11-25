@@ -4,6 +4,18 @@ Select text in any Windows program, press **AltGr + Ö**, and it is read aloud. 
 well. It is the counterpart to [typeFREE](../typefree/): there I speak instead of typing, here I listen instead of
 reading.
 
+![readFREE: a sample paragraph is selected, AltGr + Ö is pressed, the control window shows "Klaus setzt an …", then "Klaus liest: Block 1 von 2" and "Block 2 von 2"](docs/demo.gif)
+
+▶ [Demo video with sound (MP4, 19 s)](docs/demo.mp4) — the voice is the point; the GIF above is silent.
+
+**What you see:** a sample paragraph in Notepad is selected and AltGr + Ö is pressed. The small control window
+appears below the selection ("Klaus setzt an …", then "Klaus liest: Block 1 von 2" and "Block 2 von 2", with Pause
+and Stop), the voice reads the text in two blocks, and the window closes when it is done. In this recording about
+2.7 s pass between the key press and the first word; that time depends on the speech service. Recorded on my desktop
+on 17 Nov 2026 (screen region plus system audio). The key presses were sent as real keyboard events by the recording
+script, so the normal hotkey path was used; unlike the browser demos, the recording cannot be re-created by a script
+in CI. The small DeepL button next to the selection belongs to another program.
+
 **Stack:** Python · Win32 `RegisterHotKey` via `ctypes` · UI Automation (`comtypes`) · Win32 clipboard · MCI audio
 playback · tkinter · `pystray` · text-to-speech through OpenRouter (`microsoft/mai-voice-2-flash`) · pytest
 

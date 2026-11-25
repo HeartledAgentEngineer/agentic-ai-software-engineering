@@ -5,6 +5,25 @@ locally (German or English) and reads it out with a natural neural voice (*Klaus
 questions and explanations in practice tests) so I can listen instead of reading on the screen for hours.
 Until November 2026 it was called *Screenshot-Vorleser*.
 
+![ShotReader: a screenshot of sample text is taken, the recognised text appears in the ShotReader window and is read aloud; copying text afterwards triggers nothing](docs/demo.gif)
+
+▶ [Demo video with sound (MP4, 32 s)](docs/demo.mp4) — the voice is the point; the GIF above is silent.
+
+**What you see:** `Win + Shift + S` over a sample paragraph in Notepad. In automatic mode the recognised text appears
+in the ShotReader window and is read aloud in two chunks. A second later the same image landed on the clipboard again
+(same fingerprint); ShotReader stayed silent and said so ("Derselbe Screenshot liegt wieder in der Zwischenablage -
+nicht erneut vorgelesen"). Then the text in Notepad is copied: no image, nothing is read. Recorded on my desktop on
+17 Nov 2026; key presses and the mouse drag were sent as real input events by the recording script. Not shown: copying
+in Office programs, which put an image next to text on the clipboard.
+
+The log of that run (decisions only, no content):
+
+```
+2026-11-17 18:43:19 Sequenz 1520 | lesen | Kennung 5E-34-B8-0F | Formate Bitmap, PNG, CanUploadToCloudClipboard, CanIncludeInClipboardHistory
+2026-11-17 18:43:20 Sequenz 1522 | bekanntesBild | Kennung 5E-34-B8-0F | Formate Bitmap, PNG, CanUploadToCloudClipboard, CanIncludeInClipboardHistory
+2026-11-17 18:43:43 Sequenz 1530 | keinbild | Kennung - | Formate Text, UnicodeText, EnterpriseDataProtectionId
+```
+
 **Stack:** PowerShell 5.1 · Windows Forms · Windows OCR (`Windows.Media.Ocr`, on the device) · text-to-speech through
 OpenRouter (`microsoft/mai-voice-2-flash`) · ffmpeg for faster playback · Windows Media Player COM for streaming
 
